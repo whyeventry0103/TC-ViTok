@@ -1,0 +1,79 @@
+# TC-ViTok Base Configuration
+# Default hyperparameters for all training phases
+
+# Model architecture
+model:
+  # Token budget (number of tokens to select from 576 total)
+  k: 144  # {72, 144, 216, 288, 576}
+
+  # Tokenization Policy Network (TPN)
+  tpn:
+    n_heads: 8
+    d_model: 384  # DINOv2-S feature dimension
+    d_h: 512      # Hidden dimension for cross-attention
+    d_text: 512   # CLIP text embedding dimension
+
+  # LoRA configuration for LLaVA backbone
+  lora:
+    rank: 32
+    alpha: 64
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+# Training dynamics
+training:
+  # Gumbel-Sigmoid temperature schedule (Eq. 13)
+  tau_max: 5.0
+  tau_min: 0.5
+
+  # Sparsity regularization schedule (Eq. 14)
+  lambda_max: 0.01
+  T_warmup: 5000  # steps for lambda warmup
+
+  # Diversity and entropy regularization
+  lambda_diversity: 0.001
+  lambda_entropy: 0.0001
+
+  # Optimization
+  batch_size: 16
+  grad_accum_steps: 4  # effective batch size = 64
+  max_steps: 50000
+  warmup_steps: 1000
+
+  # Learning rates (per-group)
+  lr_tpn: 1e-4
+  lr_lora: 5e-5
+  lr_mlp: 1e-4
+  weight_decay: 0.01
+
+  # Gradient clipping
+  max_grad_norm: 1.0
+
+# Data
+data:
+  image_size_coarse: 98   # DINOv2-S input
+  image_size_full: 336    # CLIP ViT-L/14 input
+  num_workers: 4
+  pin_memory: true
+
+  # Feature caching
+  cache_dir: "data/cache"
+  use_cached_features: false
+
+# Logging
+logging:
+  wandb_project: "tc-vitok"
+  log_interval: 100
+  eval_interval: 1000
+  save_interval: 5000
+  output_dir: "runs"
+
+# Evaluation
+evaluation:
+  benchmarks: ["vqav2", "gqa", "textvqa", "pope"]
+  token_budgets: [72, 144, 216, 288, 576]
+  spatial_eval: true  # Enable spatial specificity stratification
+
+# Reproducibility
+seed: 42
+deterministic: false  # Set true for full reproducibility (slower)

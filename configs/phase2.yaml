@@ -1,0 +1,46 @@
+# Phase 2: Domain Transfer
+# Finetune on TextVQA for OCR-heavy questions (optional)
+
+# Inherit from base config
+defaults:
+  - base
+
+# Override for Phase 2
+phase: 2
+description: "Domain transfer to TextVQA"
+
+training:
+  max_steps: 10000
+
+  # Continue training all components
+  trainable_components:
+    - tpn
+    - lora
+    - vision_projector
+
+  # Lower regularization for domain adaptation
+  lambda_max: 0.005
+  T_warmup: 2000
+
+  # Lower learning rates for finetuning
+  lr_tpn: 5e-5
+  lr_lora: 2e-5
+  lr_mlp: 5e-5
+
+  # Tighter temperature for exploitation
+  tau_max: 2.0
+  tau_min: 0.3
+
+data:
+  # TextVQA only
+  datasets: ["textvqa"]
+  train_samples: null
+
+logging:
+  wandb_run_name: "phase2_textvqa_transfer"
+  eval_interval: 500
+
+# Load Phase 1 checkpoint
+checkpoint:
+  load_from: "runs/phase1/best.ckpt"
+  strict: false
