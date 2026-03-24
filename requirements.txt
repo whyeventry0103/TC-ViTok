@@ -1,0 +1,39 @@
+# TC-ViTok Requirements
+#
+# IMPORTANT: This project uses three different image normalization schemes:
+# - CLIP ViT-L/14 (full encoder): mean=[0.48145466, 0.4578275, 0.40821073], std=[0.26862954, 0.26130258, 0.27577711]
+# - DINOv2-Small (coarse encoder): mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225] (ImageNet)
+# - CLIP ViT-B/32 (text encoder companion): same as CLIP ViT-L/14
+# Ensure preprocessing pipelines apply the correct normalization per encoder!
+
+# Core ML frameworks
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.36.0
+accelerate>=0.25.0
+peft>=0.7.0
+
+# Vision models
+timm>=0.9.12
+
+# Data handling
+datasets>=2.16.0
+pillow>=10.0.0
+h5py>=3.10.0
+
+# Utilities
+einops>=0.7.0
+omegaconf>=2.3.0
+tqdm>=4.66.0
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Logging and monitoring
+wandb>=0.16.0
+tensorboard>=2.15.0
+
+# Development
+pytest>=7.4.0
+black>=23.12.0
+flake8>=7.0.0
+mypy>=1.8.0
