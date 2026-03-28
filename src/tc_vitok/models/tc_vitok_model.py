@@ -25,37 +25,25 @@ from .tpn import TokenizationPolicyNetwork
 from .encoders import CoarseVisualEncoder, TextEncoder, FullVisualEncoder
 
 
-def gather_selected_tokens(
-    visual_tokens: torch.Tensor,
-    mask: torch.Tensor,
-    k: int,
+def gather_tokens(
+    V: torch.Tensor,
+    idx: torch.Tensor,
 ) -> torch.Tensor:
-    """Extract selected tokens using gather (real compression).
+    """Extract k visual tokens from V using top-k indices (Option B: gather).
 
-    This replaces zero-masking with actual token extraction:
-    output has shape [B, k, D] instead of [B, N, D] with zeros.
-    This provides REAL compute savings in the downstream LLM.
+    This is the core gather operation that provides real sequence compression.
+    Output has shape [B, k, d_v] — the LLM sees k tokens, not N.
 
     Args:
-        visual_tokens: Full visual features, Shape: [B, N, D]
-        mask: Binary selection mask, Shape: [B, N]
-        k: Number of tokens to select
+        V: Full visual features from ViT-L, Shape: [B, N, d_v]
+        idx: Top-k token indices from TPN, Shape: [B, k]
 
     Returns:
-        selected: Extracted tokens, Shape: [B, k, D]
+        V_selected: Extracted tokens, Shape: [B, k, d_v]
     """
-    B, N, D = visual_tokens.shape
-
-    # Get indices of selected tokens (top-k positions where mask == 1)
-    # mask is binary with exactly k ones per sample from hard top-k
-    indices = mask.topk(k, dim=-1).indices  # [B, k]
-    indices = indices.sort(dim=-1).values   # [B, k], sorted for stable ordering
-
-    # Gather selected tokens
-    indices_expanded = indices.unsqueeze(-1).expand(-1, -1, D)  # [B, k, D]
-    selected = torch.gather(visual_tokens, dim=1, index=indices_expanded)  # [B, k, D]
-
-    return selected
+    d_v = V.shape[-1]
+    idx_exp = idx.unsqueeze(-1).expand(-1, -1, d_v)  # [B, k, d_v]
+    return torch.gather(V, dim=1, index=idx_exp)       # [B, k, d_v]
 
 
 class StubLLM(nn.Module):
@@ -227,7 +215,7 @@ class TCViTokModel(nn.Module):
         questions: list[str],
         labels: Optional[torch.Tensor] = None,
         tau: float = 1.0,
-        return_mask: bool = False,
+        return_idx: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """Forward pass through TC-ViTok model.
 
@@ -237,14 +225,14 @@ class TCViTokModel(nn.Module):
             questions: List of question strings, length B
             labels: Optional answer token IDs, Shape: [B, seq_len]
             tau: Gumbel-Sigmoid temperature
-            return_mask: If True, include mask and scores in output
+            return_idx: If True, include idx and scores in output
 
         Returns:
             outputs: Dictionary containing:
                 - loss: VQA loss (if labels provided)
                 - logits: Language model logits
-                - mask: Token selection mask (if return_mask)
-                - scores: TPN raw scores (if return_mask)
+                - idx: Top-k gather indices [B, k] (if return_idx)
+                - scores: TPN raw scores [B, N]
                 - selected_tokens: Gathered visual tokens [B, k, D]
         """
         # Step 1: Extract coarse visual features (frozen DINOv2-S)
@@ -253,21 +241,21 @@ class TCViTokModel(nn.Module):
         # Step 2: Extract text embeddings (frozen CLIP)
         q_embed = self.text_encoder(questions)  # [B, 512]
 
-        # Step 3: Run TPN to get token selection mask
-        mask, scores = self.tpn(
+        # Step 3: TPN produces top-k gather indices
+        idx, s_N = self.tpn(
             v_coarse=v_coarse,
             q_embed=q_embed,
             k=self.k,
             tau=tau,
             training=self.training,
-        )  # mask: [B, N], scores: [B, N]
+        )  # idx: [B, k], s_N: [B, N]
 
         # Step 4: Extract full visual features (frozen CLIP ViT-L/14)
         v_full = self.full_encoder(images_full)  # [B, 576, 1024]
 
         # Step 5: GATHER selected tokens (real compression!)
-        # Output: [B, k, 1024] — sequence length is k, NOT 576
-        v_selected = gather_selected_tokens(v_full, mask, self.k)
+        # Output: [B, k, 1024] — LLM sees k tokens, not N
+        v_selected = gather_tokens(v_full, idx)
 
         # Step 6: Forward through LLM backbone
         if self.use_stub_llm:
@@ -284,15 +272,15 @@ class TCViTokModel(nn.Module):
         # Build output dict
         outputs = {
             "logits": llm_outputs.get("logits"),
-            "scores": scores,
+            "scores": s_N,
             "selected_tokens": v_selected,
         }
 
         if "loss" in llm_outputs:
             outputs["loss"] = llm_outputs["loss"]
 
-        if return_mask:
-            outputs["mask"] = mask
+        if return_idx:
+            outputs["idx"] = idx
 
         return outputs
 

@@ -1,5 +1,6 @@
 # TC-ViTok Base Configuration
-# Default hyperparameters — ALIGNED WITH PAPER (paperv2.tex)
+# Default hyperparameters — ALIGNED WITH PAPER (paperv4.tex)
+# Masking method: Index-gather (Option B) — real FLOP savings
 
 # Model architecture
 model:

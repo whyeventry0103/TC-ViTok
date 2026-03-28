@@ -196,17 +196,52 @@
 
 ---
 
+## 11. Index-Based Gather API (Option B Alignment)
+
+**Category:** CRITICAL
+**Date:** 2026-03-28 (Session 2)
+**Files:** `src/tc_vitok/models/masking.py`, `src/tc_vitok/models/tpn.py`, `src/tc_vitok/models/tc_vitok_model.py`, `src/tc_vitok/training/losses.py`, `src/tc_vitok/training/trainer.py`, `scripts/test_core.py`, `scripts/test_pipeline.py`, `README.md`, `configs/base.yaml`, `src/tc_vitok/training/optimizer.py`
+
+**Problem:** Codebase used a mask-based API (`gumbel_sigmoid_ste` returns mask, TPN returns `(mask, scores)`, `gather_selected_tokens(v, mask, k)` derives indices from mask internally). The updated paper (paperv4.tex) and spec (planv2.tex) mandate an index-based API throughout (Option B), where:
+- `gumbel_sigmoid_ste` returns `(mask_ste, idx)` — both differentiable mask and top-k indices
+- TPN returns `(idx, s_N)` — gather indices and raw scores (not mask)
+- `gather_tokens(V, idx)` — takes indices directly
+- Loss computation reconstructs batch-mean selection frequency from idx for entropy
+
+**What changed:**
+
+| Component | Before | After |
+|-----------|--------|-------|
+| `gumbel_sigmoid_ste()` | Returns `mask` (Tensor) | Returns `(mask_ste, idx)` tuple |
+| `TPN.forward()` | Returns `(mask, s_N)` | Returns `(idx, s_N)` — indices + scores |
+| `gather_selected_tokens(v, mask, k)` | Takes mask, derives indices internally | Replaced by `gather_tokens(V, idx)` — takes indices directly |
+| `TCViTokModel.forward()` | Uses `mask` from TPN, `gather_selected_tokens`, returns `mask` key | Uses `idx` from TPN, `gather_tokens`, returns `idx` key |
+| `compute_total_loss()` | Takes `mask` parameter for entropy/diversity | Takes `idx` parameter; reconstructs mask from indices for diversity; uses `entropy_from_idx()` for entropy |
+| `entropy_from_idx()` | Did not exist | NEW function: reconstructs batch-mean selection frequency from indices, computes Shannon entropy |
+| `trainer.py` | Passes `mask=outputs["mask"]` to loss | Passes `idx=outputs["idx"]` to loss |
+| `return_mask` parameter | `TCViTokModel.forward(return_mask=True)` | Renamed to `return_idx` |
+| All test files | Use mask-based API | Updated to idx-based API throughout |
+| `README.md` | Describes "Selection mask (576 binary values)" | Updated to "Top-k gather indices + raw scores"; mentions `torch.gather`; updated diagnostic code |
+| `configs/base.yaml` | References paperv2 | References paperv4; added "Masking method: Index-gather (Option B)" |
+| `optimizer.py` | Docstring had wrong LR values (1e-4, 5e-5, 1e-4) | Fixed to match actual config (1e-3, 2e-4, 5e-4) |
+
+**Why:** The updated paper (paperv4.tex Section 4.4 "Gather-Based Token Extraction") and spec (planv2.tex Component 4) explicitly adopt Option B (index-gather) and reject Option A (zero-masking). The entire codebase must use indices as the primary representation, with masks reconstructed only when needed (e.g., for diversity loss). This matches the pseudocode in Algorithm 1 and all appendix code listings.
+
+**Effect:** Codebase now consistently uses the index-based gather API throughout, matching paperv4.tex and planv2.tex exactly. TPN returns `(idx, s_N)`, gather uses `torch.gather(V, dim=1, idx_exp)`, and the LLM receives exactly k tokens.
+
+---
+
 ## Verification
 
 All fixes verified via `scripts/test_core.py`:
 
 ```
-TEST 1: TPN Architecture — 887,955 params (paper: ~887K) ✓
-TEST 2: Gumbel-Sigmoid STE — binary forward, soft backward ✓
-TEST 3: Gather Token Extraction — [4,576,1024] → [4,144,1024] ✓
+TEST 1: TPN Architecture — 887,955 params, returns (idx, s_N) ✓
+TEST 2: Gumbel-Sigmoid STE — returns (mask_ste, idx), binary forward, soft backward ✓
+TEST 3: Gather Token Extraction — gather_tokens(V, idx) → [4,144,1024] ✓
 TEST 4: Sparsity Loss — mean(|scores|) = 1.625 ✓
-TEST 5: Spatial Entropy — Shannon entropy, uniform=6.36, concentrated=2.30 ✓
-TEST 6: Total Loss — all terms computed, gradients flow to TPN ✓
+TEST 5: Spatial Entropy — from idx: uniform=5.86, concentrated=2.30 ✓
+TEST 6: Total Loss — idx-based API, all terms computed, gradients flow ✓
 TEST 7: Curriculum — tau: 1.0→0.1, lambda: 0.0→0.1 ✓
 ```
 
@@ -214,6 +249,7 @@ TEST 7: Curriculum — tau: 1.0→0.1, lambda: 0.0→0.1 ✓
 
 - Architecture matches paper: **YES**
 - Core bugs fixed: **YES** (sparsity, entropy, gather, TPN)
+- API matches paperv4/planv2: **YES** (index-based gather throughout)
 - Pipeline runs minimally: **YES** (StubLLM, all tests pass)
 - Token compression is real: **YES** (gather-based, [B,k,D] output)
 - Ready for first experiment: **YES** (pending real dataset loaders and LLaVA integration)

@@ -2,9 +2,9 @@
 
 This module sets up per-component learning rates and optimizer groups.
 Different components are trained with different learning rates:
-- TPN: 1e-4 (learns quickly, lightweight)
-- LoRA: 5e-5 (careful finetuning of LM)
-- Vision projector: 1e-4 (adapts vision features to LM)
+- TPN: 1e-3 (learns quickly, lightweight)
+- LoRA: 2e-4 (careful finetuning of LM)
+- Vision projector (MLP): 5e-4 (adapts vision features to LM)
 
 Paper reference: Section 7.3 (Optimization Details)
 """
@@ -26,9 +26,9 @@ def create_optimizer(
     """Create AdamW optimizer with per-component learning rates.
 
     Different model components have different learning rate requirements:
-    - TPN: Higher LR (1e-4) — small network, learns quickly
-    - LoRA: Lower LR (5e-5) — careful finetuning to preserve pretrained weights
-    - Projector: Medium LR (1e-4) — adapts frozen vision features
+    - TPN: Higher LR (1e-3) — small network, learns quickly
+    - LoRA: Lower LR (2e-4) — careful finetuning to preserve pretrained weights
+    - Projector: Medium LR (5e-4) — adapts frozen vision features
 
     Args:
         model: Full TC-ViTok model

@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 # Add project root to path
 sys.path.insert(0, ".")
 
-from src.tc_vitok.models.tc_vitok_model import TCViTokModel, gather_selected_tokens
+from src.tc_vitok.models.tc_vitok_model import TCViTokModel, gather_tokens
 from src.tc_vitok.models.tpn import TokenizationPolicyNetwork
 from src.tc_vitok.models.masking import gumbel_sigmoid_ste, compute_spatial_entropy
 from src.tc_vitok.training.losses import compute_total_loss, l1_sparsity_loss
@@ -27,7 +27,7 @@ from src.tc_vitok.data.datasets import DummyVQADataset, collate_fn
 
 
 def test_tpn_architecture():
-    """Verify TPN matches paper architecture."""
+    """Verify TPN matches paper architecture — returns (idx, s_N)."""
     print("=" * 60)
     print("TEST 1: TPN Architecture")
     print("=" * 60)
@@ -45,30 +45,25 @@ def test_tpn_architecture():
     )
 
     # Check forward pass shapes
-    B = 4
+    B, k = 4, 144
     v_coarse = torch.randn(B, 49, 384)
     q_embed = torch.randn(B, 512)
 
-    mask, scores = tpn(v_coarse, q_embed, k=144, tau=1.0, training=True)
+    idx, s_N = tpn(v_coarse, q_embed, k=k, tau=1.0, training=True)
 
-    assert mask.shape == (B, 576), f"Mask shape: {mask.shape}, expected ({B}, 576)"
-    assert scores.shape == (B, 576), f"Scores shape: {scores.shape}, expected ({B}, 576)"
+    assert idx.shape == (B, k), f"idx shape: {idx.shape}, expected ({B}, {k})"
+    assert s_N.shape == (B, 576), f"s_N shape: {s_N.shape}, expected ({B}, 576)"
 
-    # Check exactly k tokens selected
-    k_actual = mask.sum(dim=-1)
-    assert torch.allclose(k_actual, torch.full_like(k_actual, 144.0), atol=1.0), (
-        f"Expected 144 tokens selected, got {k_actual}"
-    )
+    # Check unique indices per sample
+    for b in range(B):
+        assert idx[b].unique().numel() == k, "Duplicate gather indices"
 
-    # Check gradient flow
-    assert mask.grad_fn is not None, "Mask has no gradient! STE is broken."
-
-    print("  PASSED: shapes correct, ~887K params, gradient flows")
+    print("  PASSED: shapes correct, ~887K params, returns (idx, s_N)")
     print()
 
 
 def test_gumbel_sigmoid_ste():
-    """Verify Gumbel-Sigmoid STE forward/backward."""
+    """Verify Gumbel-Sigmoid STE returns (mask_ste, idx)."""
     print("=" * 60)
     print("TEST 2: Gumbel-Sigmoid STE")
     print("=" * 60)
@@ -76,62 +71,62 @@ def test_gumbel_sigmoid_ste():
     B, N, k = 4, 576, 144
     scores = torch.randn(B, N, requires_grad=True)
 
-    # Training mode
-    mask = gumbel_sigmoid_ste(scores, k=k, tau=1.0, training=True)
-    assert mask.shape == (B, N)
-    assert mask.grad_fn is not None, "STE has no gradient in training mode"
+    # Training mode — returns (mask_ste, idx)
+    mask_ste, idx = gumbel_sigmoid_ste(scores, k=k, tau=1.0, training=True)
+    assert mask_ste.shape == (B, N)
+    assert idx.shape == (B, k), f"idx shape {idx.shape}"
+    assert mask_ste.grad_fn is not None, "STE has no gradient in training mode"
 
     # Check binary values in forward
-    hard_values = mask.detach()
+    hard_values = mask_ste.detach()
     assert set(hard_values.unique().tolist()).issubset({0.0, 1.0}), (
         f"Forward pass should be binary, got values: {hard_values.unique()}"
     )
 
     # Check gradient flows
-    loss = mask.sum()
+    loss = mask_ste.sum()
     loss.backward()
     assert scores.grad is not None, "No gradient on scores after backward"
     assert scores.grad.abs().sum() > 0, "Gradient is all zeros"
 
     # Inference mode
     scores2 = torch.randn(B, N)
-    mask_inf = gumbel_sigmoid_ste(scores2, k=k, tau=1.0, training=False)
+    mask_inf, idx_inf = gumbel_sigmoid_ste(scores2, k=k, tau=1.0, training=False)
     assert mask_inf.sum(dim=-1).allclose(torch.full((B,), float(k)))
+    assert idx_inf.shape == (B, k)
 
-    print("  PASSED: STE is binary forward, soft backward, correct k")
+    print("  PASSED: STE returns (mask_ste, idx), binary forward, soft backward")
     print()
 
 
 def test_gather_extraction():
-    """Verify gather-based token extraction."""
+    """Verify gather-based token extraction using idx (Option B)."""
     print("=" * 60)
     print("TEST 3: Gather-Based Token Extraction")
     print("=" * 60)
 
     B, N, D, k = 4, 576, 1024, 144
 
-    # Create dummy visual tokens and mask
-    v_full = torch.randn(B, N, D)
-    mask = torch.zeros(B, N)
-    # Set first k positions to 1 for simplicity
-    mask[:, :k] = 1.0
+    # Create dummy visual tokens and indices
+    V = torch.randn(B, N, D)
+    idx = torch.arange(k).unsqueeze(0).expand(B, -1)  # [B, k]
 
-    selected = gather_selected_tokens(v_full, mask, k)
+    selected = gather_tokens(V, idx)
 
     assert selected.shape == (B, k, D), (
         f"Selected shape: {selected.shape}, expected ({B}, {k}, {D})"
     )
 
     # Verify the correct tokens were extracted
-    expected = v_full[:, :k, :]
+    expected = V[:, :k, :]
     assert torch.allclose(selected, expected), "Gathered tokens don't match expected"
 
-    print(f"  PASSED: output shape [{B}, {k}, {D}] (real compression from [{B}, {N}, {D}])")
+    print(f"  PASSED: gather_tokens(V, idx) → [{B}, {k}, {D}] (real compression from [{B}, {N}, {D}])")
     print()
 
 
 def test_losses():
-    """Verify loss functions match paper formulations."""
+    """Verify loss functions match paper formulations (idx-based API)."""
     print("=" * 60)
     print("TEST 4: Loss Functions")
     print("=" * 60)
@@ -140,26 +135,27 @@ def test_losses():
 
     # Create dummy data
     scores = torch.randn(B, N, requires_grad=True)
-    mask = gumbel_sigmoid_ste(scores, k=k, tau=1.0, training=True)
+    mask_ste, idx = gumbel_sigmoid_ste(scores, k=k, tau=1.0, training=True)
 
     # Test L1 sparsity on raw scores (NOT |sum(mask) - k|)
     loss_sp = l1_sparsity_loss(scores)
     assert loss_sp.item() > 0, "Sparsity loss should be > 0 for non-zero scores"
     print(f"  L1 sparsity (mean|scores|): {loss_sp.item():.4f}")
 
-    # Test entropy (Shannon entropy of spatial distribution)
-    entropy = compute_spatial_entropy(mask.detach())
+    # Test entropy from idx (Shannon entropy of spatial distribution)
+    from src.tc_vitok.training.losses import entropy_from_idx
+    entropy = entropy_from_idx(idx, N=N)
     max_entropy = torch.log(torch.tensor(float(N)))
-    print(f"  Spatial entropy: {entropy.item():.4f} (max possible: {max_entropy.item():.4f})")
+    print(f"  Spatial entropy (from idx): {entropy.item():.4f} (max possible: {max_entropy.item():.4f})")
     assert 0 < entropy.item() <= max_entropy.item() + 0.1
 
-    # Test full loss computation (with dummy logits)
+    # Test full loss computation (with dummy logits, idx-based)
     logits = torch.randn(B, k, 1000)
     labels = torch.randint(0, 1000, (B, k))
 
     loss_dict = compute_total_loss(
         logits=logits, labels=labels,
-        scores=scores, mask=mask, k=k,
+        scores=scores, idx=idx, k=k, N=N,
         lambda_sparsity=0.1, lambda_entropy=0.01, lambda_diversity=0.01,
     )
 
@@ -174,7 +170,7 @@ def test_losses():
     # Verify gradient flows to scores
     loss_dict["total"].backward()
     assert scores.grad is not None, "No gradient on scores from total loss"
-    print("  PASSED: all loss terms computed, gradients flow")
+    print("  PASSED: all loss terms computed (idx-based), gradients flow")
     print()
 
 
@@ -245,26 +241,30 @@ def test_full_pipeline():
         questions=batch["questions"],
         labels=batch["labels"],
         tau=1.0,
-        return_mask=True,
+        return_idx=True,
     )
 
     print(f"  Output keys: {list(outputs.keys())}")
     print(f"  Logits shape: {outputs['logits'].shape}")
     print(f"  Selected tokens shape: {outputs['selected_tokens'].shape}")
-    print(f"  Mask shape: {outputs['mask'].shape}")
+    print(f"  idx shape: {outputs['idx'].shape}")
     print(f"  Scores shape: {outputs['scores'].shape}")
 
     # Verify selected_tokens has correct shape [B, k, D]
     assert outputs["selected_tokens"].shape == (4, 144, 1024), (
         f"Expected [4, 144, 1024], got {outputs['selected_tokens'].shape}"
     )
+    # Verify idx shape
+    assert outputs["idx"].shape == (4, 144), (
+        f"Expected [4, 144], got {outputs['idx'].shape}"
+    )
 
-    # Compute loss
+    # Compute loss (idx-based API)
     loss_dict = compute_total_loss(
         logits=outputs["logits"],
         labels=batch["labels"],
         scores=outputs["scores"],
-        mask=outputs["mask"],
+        idx=outputs["idx"],
         k=144,
     )
 

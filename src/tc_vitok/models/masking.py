@@ -7,6 +7,8 @@ while the backward pass uses soft Gumbel-Sigmoid gradients.
 Paper Section 6: "Differentiable Token Selection via Gumbel-Sigmoid STE"
 """
 
+from typing import Tuple
+
 import torch
 
 
@@ -15,38 +17,38 @@ def gumbel_sigmoid_ste(
     k: int,
     tau: float = 1.0,
     training: bool = True,
-    hard: bool = True,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Gumbel-Sigmoid Straight-Through Estimator for differentiable top-k selection.
 
     Forward pass: hard top-k binary mask (exact k ones per sample).
     Backward pass: gradients flow through soft Gumbel-Sigmoid.
 
-    Implementation matches paper Appendix A.2 exactly:
+    Implementation matches paper Appendix A.2 and planv2 spec exactly:
         eps = 1e-8
         u ~ Uniform(0, 1), clamped to [eps, 1-eps]
         g = -log(-log(u))                    # Gumbel(0,1)
         m_soft = sigmoid((scores + g) / tau)  # soft mask
-        topk_idx = scores.topk(k).indices     # hard top-k on RAW scores
-        m_hard = scatter(topk_idx, 1.0)
-        return m_hard - m_soft.detach() + m_soft  # STE trick
+        idx = scores.topk(k).indices          # hard top-k on RAW scores
+        m_hard = scatter(idx, 1.0)
+        mask_ste = m_hard - m_soft.detach() + m_soft  # STE trick
+        return mask_ste, idx
 
     Args:
         scores: Raw importance scores from TPN, Shape: [B, N]
         k: Number of tokens to select
         tau: Temperature (annealed 1.0 → 0.1 during training)
         training: If True, inject Gumbel noise; else deterministic top-k
-        hard: If True, use hard top-k in forward; else return soft mask
 
     Returns:
-        mask: Selection mask, Shape: [B, N]
+        mask_ste: STE mask, Shape: [B, N] — binary forward, soft gradients backward
+        idx: Top-k indices, Shape: [B, k] — used for gather
     """
     if not training:
         # Inference: deterministic hard top-k, no gradients needed
-        topk_idx = scores.topk(k, dim=-1).indices
+        idx = scores.topk(k, dim=-1).indices
         mask = torch.zeros_like(scores)
-        mask.scatter_(-1, topk_idx, 1.0)
-        return mask
+        mask.scatter_(-1, idx, 1.0)
+        return mask, idx
 
     # Step 1: Sample Gumbel noise
     eps = 1e-8
@@ -56,16 +58,14 @@ def gumbel_sigmoid_ste(
     # Step 2: Soft mask via Gumbel-Sigmoid with temperature
     m_soft = torch.sigmoid((scores + g) / tau)
 
-    if not hard:
-        return m_soft
-
     # Step 3: Hard top-k on RAW scores (not noisy scores)
-    topk_idx = scores.topk(k, dim=-1).indices
+    idx = scores.topk(k, dim=-1).indices
     m_hard = torch.zeros_like(scores)
-    m_hard.scatter_(-1, topk_idx, 1.0)
+    m_hard.scatter_(-1, idx, 1.0)
 
     # Step 4: STE trick — forward = m_hard, backward = grad through m_soft
-    return m_hard - m_soft.detach() + m_soft
+    mask_ste = m_hard - m_soft.detach() + m_soft
+    return mask_ste, idx
 
 
 def compute_spatial_entropy(mask: torch.Tensor) -> torch.Tensor:

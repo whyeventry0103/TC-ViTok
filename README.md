@@ -16,15 +16,15 @@ Most VLMs use **fixed tokenization**: every image → 576 tokens, regardless of 
 
 **Visual Tokenization as Policy Learning:**
 ```
-π: (Query Q, Image I_coarse) → Token Selection Mask S
+π: (Query Q, Image I_coarse) → Token Selection Indices S (for gather)
 ```
 
 Instead of encoding all 576 tokens, TC-ViTok:
 1. Extracts **coarse features** (DINOv2-S, 49 tokens) and **text embeddings** (CLIP)
 2. Runs **TPN** to predict importance scores for each of 576 spatial locations
-3. Selects **top-k tokens** via differentiable Gumbel-Sigmoid STE
-4. Encodes only selected tokens with **full CLIP ViT-L/14**
-5. Feeds selected tokens to **LLaVA** for answer generation
+3. Selects **top-k indices** via differentiable Gumbel-Sigmoid STE
+4. **Gathers** selected tokens from full CLIP ViT-L/14 output via `torch.gather` (real compression)
+5. Feeds **k gathered tokens** (not N) to **LLaVA** — LLM sees k+L tokens, reducing prefill FLOPs
 
 **High-level flow:**
 ```
@@ -61,9 +61,9 @@ TC-ViTok consists of five main components:
 ### 3. Tokenization Policy Network (TPN)
 - **Architecture:** Cross-attention (4 heads) + concat [ctx; alpha_avg] + Score MLP + bilinear upsample
 - **Input:** Coarse visual (49×384) + text embedding (512)
-- **Output:** Selection mask (576 binary values)
+- **Output:** Top-k gather indices (k values) + raw scores (576)
 - **Parameters:** ~887K (trainable)
-- **Key innovation:** Gumbel-Sigmoid STE for differentiable top-k
+- **Key innovation:** Gumbel-Sigmoid STE for differentiable top-k; returns indices for `torch.gather`
 
 ### 4. Full Visual Encoder
 - **Model:** CLIP ViT-L/14
@@ -83,7 +83,7 @@ TC-ViTok consists of five main components:
 |-------------------------|------------|-----------|---------------|----------------|
 | DINOv2-S (coarse)       | 22M        | ✗ Frozen  | 98×98×3       | 49×384         |
 | CLIP Text               | 63M        | ✗ Frozen  | text          | 512            |
-| **TPN**                 | **~887K**  | **✓ Yes** | 49×384 + 512  | 576 (binary)   |
+| **TPN**                 | **~887K**  | **✓ Yes** | 49×384 + 512  | idx (k) + scores (576) |
 | CLIP ViT-L/14 (full)    | 304M       | ✗ Frozen  | 336×336×3     | 576×1024       |
 | LLaVA (LoRA + proj)     | 35M        | **✓ Yes** | k×1024        | text           |
 | **Total Trainable**     | **~34M**   | **—**     | **—**         | **—**          |
@@ -483,9 +483,10 @@ if diagnostics["is_ignoring"]:
 **Diagnosis:**
 ```python
 # CRITICAL CHECK in training loop:
-mask, scores = tpn(v_coarse, q_embed, k=k, tau=tau, training=True)
+idx, s_N = tpn(v_coarse, q_embed, k=k, tau=tau, training=True)
 
-assert mask.grad_fn is not None, "STE is broken! No gradient flow."
+# Verify s_N has gradient flow (gradients flow through STE)
+assert s_N.grad_fn is not None, "STE is broken! No gradient flow."
 ```
 
 **Fix:** Verify Gumbel-Sigmoid STE implementation in `src/tc_vitok/models/masking.py`

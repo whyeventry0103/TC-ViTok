@@ -92,27 +92,65 @@ def diversity_loss(mask: torch.Tensor) -> torch.Tensor:
     return -compute_mask_diversity(mask)
 
 
+def entropy_from_idx(idx: torch.Tensor, N: int = 576) -> torch.Tensor:
+    """Compute Shannon entropy of spatial selection from gather indices.
+
+    Reconstructs batch-mean selection frequency from top-k indices,
+    then computes Shannon entropy. This matches the planv2 spec
+    (Section Stage E: Loss Computation) where entropy is computed
+    from idx rather than from a binary mask.
+
+    Args:
+        idx: Top-k gather indices from TPN, Shape: [B, k]
+        N: Total number of spatial positions (576)
+
+    Returns:
+        entropy: Scalar Shannon entropy (higher = more diverse selection)
+    """
+    eps = 1e-10
+    B = idx.shape[0]
+
+    # Reconstruct batch-mean selection frequency from indices
+    m_bar = torch.zeros(N, device=idx.device)
+    m_bar.scatter_add_(0, idx.flatten(),
+                       torch.ones_like(idx.flatten(), dtype=torch.float))
+    m_bar = m_bar / B  # normalize by batch size
+
+    # Normalize to probability distribution
+    p_hat = m_bar / (m_bar.sum() + eps)
+
+    # Shannon entropy: H = -Σ p_i log(p_i)
+    entropy = -(p_hat * torch.log(p_hat + eps)).sum()
+
+    return entropy
+
+
 def compute_total_loss(
     logits: Optional[torch.Tensor],
     labels: Optional[torch.Tensor],
     scores: torch.Tensor,
-    mask: torch.Tensor,
+    idx: torch.Tensor,
     k: int,
+    N: int = 576,
     lambda_sparsity: float = 0.01,
     lambda_entropy: float = 0.01,
     lambda_diversity: float = 0.001,
 ) -> dict[str, torch.Tensor]:
     """Compute total training loss with all regularization terms.
 
-    Total loss (paper Eq. 15):
-        L = L_VQA + λ * mean(|s_N|) - |μ| * H(p) + ν * L_div
+    Total loss (paper Eq. 15, planv2 Stage E):
+        L = L_VQA + λ * mean(|s_N|) - μ * H(p)
+
+    Entropy is computed from gather indices (idx), not from a binary mask.
+    This matches the gather-based (Option B) approach throughout.
 
     Args:
         logits: Language model logits (None if pipeline stub)
         labels: Ground truth token IDs (None if pipeline stub)
         scores: Raw TPN importance scores, Shape: [B, N]
-        mask: Token selection mask from TPN, Shape: [B, N]
+        idx: Top-k gather indices from TPN, Shape: [B, k]
         k: Token budget
+        N: Total number of spatial positions (576)
         lambda_sparsity: Weight for L1 sparsity (paper: λ)
         lambda_entropy: Weight for entropy (paper: |μ|)
         lambda_diversity: Weight for diversity (paper: ν)
@@ -124,15 +162,19 @@ def compute_total_loss(
     if logits is not None and labels is not None:
         loss_vqa = vqa_loss(logits, labels)
     else:
-        loss_vqa = torch.tensor(0.0, device=mask.device, requires_grad=True)
+        loss_vqa = torch.tensor(0.0, device=scores.device, requires_grad=True)
 
     # L1 sparsity on RAW SCORES (not mask)
     loss_sparsity = l1_sparsity_loss(scores)
 
-    # Entropy regularization (returns -entropy, so minimizing = maximizing entropy)
-    loss_ent = entropy_loss(mask)
+    # Entropy regularization from gather indices
+    # Returns positive entropy; we negate to maximize (minimizing -H = maximizing H)
+    ent = entropy_from_idx(idx, N=N)
+    loss_ent = -ent
 
-    # Diversity regularization
+    # Diversity: reconstruct mask from idx for diversity computation
+    mask = torch.zeros(idx.shape[0], N, device=idx.device)
+    mask.scatter_(-1, idx, 1.0)
     loss_div = diversity_loss(mask)
 
     # Total loss
