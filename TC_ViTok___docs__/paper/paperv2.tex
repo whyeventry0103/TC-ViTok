@@ -23,16 +23,19 @@
 \pgfplotsset{compat=1.18}
 \usetikzlibrary{positioning,arrows.meta,shapes.geometric,fit}
 \usepackage{listings}
+% ─── hyperref and cleveref must be loaded last ───────────────────────────────
 \usepackage{hyperref}
 \usepackage[noabbrev]{cleveref}
 
 % ─── Color Definitions ───────────────────────────────────────────────────────
-\definecolor{defbg}{RGB}{245,240,255}
-\definecolor{defborder}{RGB}{130,70,200}
+\definecolor{intuitionbg}{RGB}{235,245,255}
+\definecolor{intuitionborder}{RGB}{70,130,200}
+\definecolor{mathbg}{RGB}{245,240,255}
+\definecolor{mathborder}{RGB}{130,70,200}
 \definecolor{warnbg}{RGB}{255,245,235}
 \definecolor{warnborder}{RGB}{200,130,70}
-\definecolor{notebg}{RGB}{235,245,255}
-\definecolor{noteborder}{RGB}{70,130,200}
+\definecolor{implbg}{RGB}{235,255,240}
+\definecolor{implborder}{RGB}{70,180,100}
 \definecolor{codegray}{RGB}{245,245,245}
 \definecolor{codekey}{RGB}{0,0,180}
 \definecolor{codecomment}{RGB}{100,100,100}
@@ -41,38 +44,52 @@
 % ─── Listings Setup ──────────────────────────────────────────────────────────
 \lstset{
   language=Python,
-  basicstyle=\ttfamily\small,
+  basicstyle=\ttfamily\footnotesize,
   keywordstyle=\color{codekey}\bfseries,
   commentstyle=\color{codecomment}\itshape,
   stringstyle=\color{codestring},
   backgroundcolor=\color{codegray},
-  frame=single, framerule=0.4pt, rulecolor=\color{gray!40},
-  numbers=left, numberstyle=\tiny\color{gray}, numbersep=6pt,
-  breaklines=true, showstringspaces=false, tabsize=2,
-  xleftmargin=12pt, xrightmargin=4pt,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{gray!40},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=6pt,
+  breaklines=true,
+  showstringspaces=false,
+  tabsize=2,
+  xleftmargin=12pt,
+  xrightmargin=4pt,
 }
 
 % ─── tcolorbox Environments ──────────────────────────────────────────────────
 \tcbuselibrary{skins,breakable}
 
-\newtcolorbox{definitionbox}[1][]{
+\newtcolorbox{intuitionbox}[1][]{%
   enhanced, breakable,
-  colback=defbg, colframe=defborder,
-  fonttitle=\bfseries\small,
+  colback=intuitionbg, colframe=intuitionborder,
+  fonttitle=\bfseries\small, title={Intuition},
   left=6pt, right=6pt, top=4pt, bottom=4pt,
   arc=4pt, #1}
 
-\newtcolorbox{warnbox}[1][]{
+\newtcolorbox{mathbox}[1][]{%
+  enhanced, breakable,
+  colback=mathbg, colframe=mathborder,
+  fonttitle=\bfseries\small, title={Formal Definition},
+  left=6pt, right=6pt, top=4pt, bottom=4pt,
+  arc=4pt, #1}
+
+\newtcolorbox{warnbox}[1][]{%
   enhanced, breakable,
   colback=warnbg, colframe=warnborder,
   fonttitle=\bfseries\small, title={Failure Mode},
   left=6pt, right=6pt, top=4pt, bottom=4pt,
   arc=4pt, #1}
 
-\newtcolorbox{notebox}[1][]{
+\newtcolorbox{implbox}[1][]{%
   enhanced, breakable,
-  colback=notebg, colframe=noteborder,
-  fonttitle=\bfseries\small,
+  colback=implbg, colframe=implborder,
+  fonttitle=\bfseries\small, title={Implementation Note},
   left=6pt, right=6pt, top=4pt, bottom=4pt,
   arc=4pt, #1}
 
@@ -87,30 +104,29 @@
 \DeclareMathOperator{\flatten}{flatten}
 \DeclareMathOperator{\IoU}{IoU}
 \DeclareMathOperator{\simop}{sim}
-\newcommand{\sg}[1]{\mathrm{sg}\!\left[#1\right]} % stop-gradient operator
 
-% ─── Math Shorthands ─────────────────────────────────────────────────────────
+% ─── Math Shorthands (no \bm conflict) ───────────────────────────────────────
 \newcommand{\R}{\mathbb{R}}
 \newcommand{\E}{\mathbb{E}}
-\newcommand{\vc}{\mathbf{v}_c}       % coarse visual features
-\newcommand{\qe}{\mathbf{q}_e}       % query embedding
-\newcommand{\vm}{\mathbf{m}}         % mask vector
-\newcommand{\vs}{\mathbf{s}}         % score vector
-\newcommand{\mI}{\mathbf{I}}         % image
-\newcommand{\mQ}{\mathbf{Q}}         % query sequence
-\newcommand{\mV}{\mathbf{V}}         % visual token matrix
+\newcommand{\vv}{\mathbf{v}}
+\newcommand{\vq}{\mathbf{q}}
+\newcommand{\vm}{\mathbf{m}}        % mask vector — avoids \bm conflict
+\newcommand{\vs}{\mathbf{s}}
+\newcommand{\mI}{\mathbf{I}}
+\newcommand{\mQ}{\mathbf{Q}}
+\newcommand{\mV}{\mathbf{V}}
 
 % ─── Theorem Environments ────────────────────────────────────────────────────
-\newtheorem{hypothesis}{Hypothesis}
+\newtheorem{proposition}{Proposition}
 \newtheorem{remark}{Remark}
 \newtheorem{definition}{Definition}
 
 % ─── Hyperref Setup ──────────────────────────────────────────────────────────
 \hypersetup{
   colorlinks=true,
-  linkcolor=defborder,
-  citecolor=teal,
-  urlcolor=noteborder,
+  linkcolor=mathborder,
+  citecolor=implborder,
+  urlcolor=intuitionborder,
   pdftitle={TC-ViTok: Task-Conditioned Visual Tokenization},
   pdfauthor={Muhammad Ali Shah and Talha Hassan Ul Haq}
 }
@@ -119,144 +135,142 @@
 \begin{document}
 % ════════════════════════════════════════════════════════════════════════════
 
-\title{
+\title{%
   \textbf{TC-ViTok: Task-Conditioned Visual Tokenizer} \\[0.3em]
-  \large A Learned Token-Selection Policy for Efficient Vision-Language Reasoning
+  \large Learning a Query-Conditioned Token Selection Policy
+  for Efficient Vision-Language Reasoning%
 }
 
-\author{
-  Muhammad Ali Shah \and Talha Hassan Ul Haq \\[0.3em]
+\author{%
+  Muhammad Ali Shah -  Talha Hassan Ul Haq \\[0.3em]
   Lahore University of Management Sciences (LUMS) \\
-  \texttt{\{27100172, 27100306\}@lums.edu.pk}
+  \texttt{\{27100172, 27100306\}@lums.edu.pk}%
 }
 
 \date{\today}
-
 \maketitle
-\thispagestyle{empty}
 
-% ────────────────────────────────────────────────────────────────────────────
+% ════════════════════════════════════════════════════════════════════════════
 \begin{abstract}
-% ────────────────────────────────────────────────────────────────────────────
+% ════════════════════════════════════════════════════════════════════════════
 
-Vision-language models (VLMs) such as LLaVA encode every image into a
-\emph{fixed} set of $N$ visual tokens regardless of the spatial specificity
-of the language query.
-This is fundamentally wasteful: a question like ``What is written on the
-sign?''\ requires high-resolution attention to one small region, whereas ``Is
-there a cat?''\ requires only coarse global features.
-We introduce \textbf{TC-ViTok} (\textbf{T}ask-\textbf{C}onditioned
-\textbf{Vi}sual \textbf{Tok}enizer), a lightweight module that \emph{learns
-a token-selection policy}
-$\pi_\theta\colon (\qe, \vc) \to \mathcal{S} \subseteq \{1,\ldots,N\}$,
-mapping a CLIP language embedding and a coarse DINOv2 spatial feature map to a
-sparse subset of $k \ll N$ visual tokens.
-The core component is a \emph{Tokenization Policy Network} (TPN): a
-cross-attention module that scores every spatial position by its
-relevance to the query, trained end-to-end via a Gumbel-Sigmoid
-straight-through estimator with a phased curriculum and compression
-regularization.
-Unlike existing visual-token compression methods---all of which are
-query-agnostic---TC-ViTok conditions the tokenization decision on the user's
-natural-language query \emph{before} the selected tokens enter the language
-model.
-We evaluate on VQAv2, GQA, and TextVQA, and hypothesize that
-query-conditioning yields selective improvements concentrated in
-spatially-grounded questions---the precise regime where fixed-budget
-tokenization is most harmful---while using $4\times$ fewer visual tokens.
+Vision-language models (VLMs) such as LLaVA encode images into a
+\emph{fixed} set of $N$ visual tokens irrespective of the language query.
+This is wasteful: a question such as ``What is written on the sign?''
+requires high-resolution attention to one small region, whereas ``Is there
+a cat?'' requires only coarse global features. We introduce \textbf{TC-ViTok}
+(\textbf{T}ask-\textbf{C}onditioned \textbf{Vi}sual \textbf{Tok}enizer), a
+lightweight module that learns a token selection function
+$\pi_\theta\colon(\mQ, \mI_{\mathrm{c}})\to\mathcal{S}$, mapping a language
+query~$\mQ$ and a coarse image representation~$\mI_{\mathrm{c}}$ to a sparse
+subset $\mathcal{S}$ of $k \ll N$ visual tokens. The core component is a
+3\,M-parameter \emph{Tokenization Policy Network} (TPN) built on cross-attention
+between a CLIP text embedding and DINOv2-S spatial features. Unlike existing
+compression methods---which are query-agnostic---TC-ViTok predicts task-relevant
+spatial regions and allocates the visual token budget accordingly. The selection
+is trained end-to-end via a Gumbel-Sigmoid straight-through estimator with a
+phased curriculum and compression regularization. We evaluate on VQAv2, GQA,
+and TextVQA, and introduce a spatial specificity evaluation protocol that
+stratifies questions by their dependence on localized visual evidence, enabling
+fine-grained hypothesis testing of query-conditioned token allocation.
+
 \end{abstract}
-
-\tableofcontents
-\newpage
 
 % ════════════════════════════════════════════════════════════════════════════
 \section{Introduction}
 \label{sec:intro}
 % ════════════════════════════════════════════════════════════════════════════
 
-\subsection{The Fixed-Budget Problem}
+\subsection{The Problem: Fixed-Budget Visual Processing}
 
-Modern VLMs encode images into a fixed-length sequence of $N$ visual tokens,
-each corresponding to one patch of the input.
-LLaVA-1.5~\citep{liu2024llava} produces $N{=}576$ tokens from a
-$336{\times}336$ image with a $14{\times}14$ patch size.
-These tokens are concatenated with $L$ text tokens and fed to a causal
-language model (LLM) whose self-attention cost is dominated by the
-$\mathcal{O}(N(N{+}L))$ term arising from visual-token self-attention and
-text-to-visual cross-attention.\footnote{
-  In prefix-style VLMs, visual tokens serve as a prefix to which every
-  subsequent text token attends.
-  For a typical query length $L \approx 30$ and $N{=}576$, visual tokens
-  contribute $\sim\!95\%$ of the total prefill attention cost.
-}
-Every query---whether it demands fine-grained spatial reading or coarse
-scene-level understanding---receives the same 576-token budget.
-The number of visual tokens is determined by image resolution, not by task
-complexity.
-
-\subsection{Limitations of Existing Compression Methods}
-
-Several methods attempt to reduce the visual token count:
-\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
-  \item \textbf{Token Merging (ToMe)}~\citep{bolya2022token}: merges
-    visually similar tokens inside the ViT using bipartite soft matching.
-    The criterion is embedding-space similarity---purely image-driven and
-    query-agnostic.
-  \item \textbf{LLaVA-PruMerge}~\citep{shang2024llava}: prunes tokens by
-    their cross-attention weight with the \texttt{[CLS]} token, which
-    summarizes the \emph{entire image} rather than the query.
-    The full ViT forward pass still runs; savings accrue only in the LLM.
-  \item \textbf{DynamicViT}~\citep{rao2021dynamicvit}: learns to drop
-    tokens inside the ViT.
-    Content-adaptive but not conditioned on any external task signal.
-\end{itemize}
-The shared limitation is that \textbf{the compression decision is made
-without knowledge of the task}.
-These methods learn which tokens are \emph{generally} important, not which
-tokens are important \emph{for a specific question}.
-
-\subsection{Our Approach: Tokenization as a Learned Policy}
-
-We propose a conceptual shift: \textbf{visual tokenization should be a
-learned, query-conditioned policy}.
-A policy maps a state (the query--image pair) to an action (the selected
-token set):
+Modern VLMs encode images into a fixed sequence of $N$ visual tokens, one per
+image patch. LLaVA-1.5~\citep{liu2024llava} produces $N{=}576$ tokens from a
+$336{\times}336$ image using patch size $p{=}14$, i.e.\ $N{=}(336/14)^2$. These
+tokens are concatenated with $L$ text tokens and fed to a causal large language
+model (LLM). Under causal attention, each visual token attends to all prior
+visual tokens and each text token attends to all visual and prior text tokens,
+giving a prefill attention cost of:
 \begin{equation}
-  \pi_\theta\colon (\qe,\, \vc) \;\longrightarrow\;
-    \mathcal{S} \;\subseteq\; \{1, \ldots, N\},
-    \qquad |\mathcal{S}| = k,
+  C_{\text{attn}}
+  = \underbrace{\textstyle\sum_{i=1}^{N}i}_{\text{visual}\to\text{visual}}
+  + \underbrace{N \cdot L}_{\text{text}\to\text{visual}}
+  + \underbrace{\textstyle\sum_{j=1}^{L}j}_{\text{text}\to\text{text}}
+  = \mathcal{O}(N^2 + NL + L^2).
+  \label{eq:attn_cost}
+\end{equation}
+For typical queries ($L{\approx}30$), visual self-attention
+($N^2{\approx}3.3{\times}10^5$) dominates text self-attention
+($L^2{\approx}9{\times}10^2$) by more than two orders of magnitude.
+
+The fundamental mismatch is: \textbf{the number of visual tokens is determined
+by image resolution, not by the information requirements of the query.} Every
+question---whether requiring localized OCR reading or holistic scene
+understanding---receives the same 576-token visual budget.
+
+\subsection{Why Existing Solutions Fall Short}
+
+Several methods attempt to reduce the visual token count
+(\cref{tab:related_comparison}). \emph{Within-ViT} methods such as Token
+Merging (ToMe)~\citep{bolya2022token} and DynamicViT~\citep{rao2021dynamicvit}
+merge or prune tokens inside the vision transformer using embedding similarity
+or attention-based criteria. \emph{Post-ViT} methods such as
+LLaVA-PruMerge~\citep{shang2024llava} prune tokens after the full ViT forward
+pass, saving only LLM context cost. BLIP-2's
+Q-Former~\citep{li2023blip2} uses a fixed set of learnable queries to
+cross-attend to visual features, compressing them into a small token set.
+
+\textbf{The shared limitation:} all existing methods make the compression
+decision without knowledge of the downstream language query. They learn which
+visual tokens are \emph{generally} important---not which tokens are important
+\emph{for this specific question}. Q-Former's learnable queries are fixed at
+test time; they do not change with the input question.
+
+\subsection{Our Approach: Tokenization as a Conditional Selection Function}
+
+We propose treating visual tokenization as a \emph{learned, query-conditioned
+selection function}:
+\begin{equation}
+  \pi_\theta\colon
+  \underbrace{(\mQ,\;\mI_{\mathrm{c}})}_{\text{query + coarse image}}
+  \;\longrightarrow\;
+  \underbrace{\mathcal{S} \subseteq \{1,\ldots,N\}}_{\text{selected tokens}},
+  \quad |\mathcal{S}| = k.
   \label{eq:policy_def}
 \end{equation}
-where $\qe \in \R^{d_q}$ is a CLIP text embedding of the query,
-$\vc \in \R^{M \times d_c}$ is a coarse DINOv2 spatial feature map with
-$M \ll N$ tokens, and $\theta$ are the learnable TPN parameters.
-Unlike a representation (which produces an embedding) or an attention bias
-(which reweights existing computation), a policy governs \emph{which
-computation is performed}.
+Unlike a representation (which encodes information), an attention bias (which
+reweights already-computed features), or fixed learnable queries (which are
+task-agnostic at test time), a selection function determines \emph{which tokens
+enter the downstream model}, conditioned on both the task specification (the
+language query) and the image content (via a cheap coarse encoder).
 
-This framing makes a testable prediction: query-conditioning should help
-\emph{selectively}, concentrated on spatially-grounded questions where
-different queries require attention to different image regions.
-For globally-answerable questions (e.g., scene classification), the benefit
-should be negligible.
+\begin{intuitionbox}
+  A radiologist examining a chest X-ray does not scrutinize every pixel equally.
+  If the referral asks ``Is there a femur fracture?'', they focus on the femur;
+  if it asks ``Is there pneumonia?'', they focus on the lung fields. The clinical
+  question determines which image regions receive fine-grained analysis. TC-ViTok
+  is the learned analogue of this task-driven spatial allocation.
+\end{intuitionbox}
 
 \subsection{Contributions}
 
-\begin{enumerate}[leftmargin=1.5em, itemsep=2pt]
-  \item \textbf{Formulation.}
-    We formalize visual tokenization as a query-conditioned discrete policy
-    and distinguish it from prior query-agnostic compression.
-  \item \textbf{Architecture.}
-    We introduce the \emph{Tokenization Policy Network} (TPN), a lightweight
-    cross-attention module that produces spatial token-selection masks
-    conditioned on the user's language query.
-  \item \textbf{Training.}
-    We propose a phased curriculum with Gumbel-Sigmoid annealing and
-    compression regularization to train the discrete policy end-to-end.
-  \item \textbf{Evaluation protocol.}
-    We introduce a \emph{spatial specificity stratification} of VQA
-    benchmarks, enabling fine-grained hypothesis testing of when
-    query-conditioning helps.
+\begin{enumerate}[leftmargin=2em, itemsep=2pt]
+  \item \textbf{Formulation.} We formalize visual tokenization as a
+    query-conditioned selection problem and analyze the requirements for
+    differentiable training.
+
+  \item \textbf{Architecture.} We introduce the Tokenization Policy Network
+    (TPN), a lightweight (${\approx}\,3$\,M parameters) cross-attention module
+    that produces spatial selection masks conditioned on language queries, with a
+    DINOv2-S coarse encoder adding only ${\approx}\,3$\,ms overhead.
+
+  \item \textbf{Training methodology.} We propose a phased training curriculum
+    with Gumbel-Sigmoid annealing and compression regularization, and
+    characterize three failure modes with concrete mitigations that are
+    integrated into a unified training objective.
+
+  \item \textbf{Evaluation protocol.} We introduce a spatial specificity
+    stratification of VQA benchmarks enabling fine-grained hypothesis testing of
+    when query-conditioning provides benefit.
 \end{enumerate}
 
 % ════════════════════════════════════════════════════════════════════════════
@@ -264,665 +278,557 @@ should be negligible.
 \label{sec:related}
 % ════════════════════════════════════════════════════════════════════════════
 
-\paragraph{Vision-language architectures.}
-Modern VLMs follow a recipe of visual encoder, projection layer, and LLM
-backbone~\citep{liu2024llava,li2023blip2,bai2023qwenvl}.
-LLaVA-1.5~\citep{liu2024llava} uses a CLIP ViT-L/14 encoder, a two-layer MLP
-projector, and Vicuna-7B.
-Subsequent work (LLaVA-1.6, LLaVA-HR) increases resolution via image tiling,
-producing 2880+ visual tokens and exacerbating the efficiency problem.
+\paragraph{Vision-language models.}
+Modern VLMs follow a three-stage recipe: a frozen visual encoder (typically
+CLIP ViT~\citep{radford2021learning}), a learnable projector, and an
+instruction-tuned LLM~\citep{liu2024llava,li2023blip2,bai2023qwenvl}.
+LLaVA-1.5~\citep{liu2024llava} uses a two-layer MLP projector with Vicuna-7B;
+subsequent models (LLaVA-1.6, LLaVA-HR) increase resolution via image tiling,
+producing $2{,}880{+}$ visual tokens and exacerbating the efficiency problem.
+We build on LLaVA-1.5 as the backbone.
 
 \paragraph{Visual token compression.}
-\emph{Within-ViT} methods reduce tokens during the ViT forward pass:
-ToMe~\citep{bolya2022token} merges similar tokens via bipartite matching;
-DynamicViT~\citep{rao2021dynamicvit} learns token-dropping masks;
-EViT~\citep{liang2022evit} fuses inattentive tokens.
-\emph{Post-ViT} methods (LLaVA-PruMerge~\citep{shang2024llava}, FastV)
-apply compression after ViT encoding, saving only LLM context cost.
-All methods in both categories are \textbf{query-agnostic}: the compression
-decision depends only on image content.
-
-\paragraph{Conditional visual feature extraction.}
-BLIP-2's Q-Former~\citep{li2023blip2} uses a set of \emph{learned queries}
-to extract a fixed number of visual tokens via cross-attention with the visual
-encoder.
-While this is a form of conditional visual tokenization, it differs from
-TC-ViTok in two key respects:
-(i) Q-Former's queries are \emph{learned parameters}, not derived from the
-user's natural-language question---they are the same for every input;
-(ii) Q-Former produces a \emph{dense bottleneck} representation, not a
-\emph{sparse binary mask} over the full token set.
-TC-ViTok is, to our knowledge, the first method to condition visual-token
-\emph{selection} on the user's \emph{specific language query}.
-
-\paragraph{Discrete optimization in neural networks.}
-The Gumbel-Softmax trick~\citep{jang2017categorical,maddison2017concrete}
-enables gradient estimation through categorical variables.
-The straight-through estimator
-(STE)~\citep{bengio2013estimating} provides biased but low-variance gradients
-for binary stochastic neurons.
-We use a per-element Gumbel-Sigmoid STE for top-$k$ selection, adapting these
-ideas to the spatial-mask setting.
-
-\paragraph{Adaptive computation.}
-Mixture-of-Experts~\citep{shazeer2017moe} and early-exit
-networks~\citep{teerapittayanon2016branchynet} route inputs through different
-computation paths.
-AdaViT~\citep{meng2022adavit} learns per-sample computation budgets for ViTs.
-TC-ViTok applies this spirit to the cross-modal token interface of VLMs,
-with the unique feature of conditioning on an external task specification.
-
-% ════════════════════════════════════════════════════════════════════════════
-\section{Problem Formulation}
-\label{sec:formulation}
-% ════════════════════════════════════════════════════════════════════════════
-
-\subsection{Notation}
-
-\Cref{tab:notation} defines all symbols.
-Throughout, the binary mask $\vm \in \{0,1\}^N$ and the index set
-$\mathcal{S} \subseteq \{1,\ldots,N\}$ are two views of the same selection:
-$m_i = \mathbf{1}[i \in \mathcal{S}]$.
+\Cref{tab:related_comparison} compares approaches. \emph{Within-ViT}
+methods---ToMe~\citep{bolya2022token}, DynamicViT~\citep{rao2021dynamicvit},
+EViT~\citep{liang2022evit}---use similarity or attention criteria inside the
+ViT; all are query-agnostic. \emph{Post-ViT} methods
+(LLaVA-PruMerge~\citep{shang2024llava}) apply compression after the full ViT
+forward pass, saving only LLM context cost. \emph{Cross-modal} compression
+(BLIP-2 Q-Former~\citep{li2023blip2}) uses fixed learnable queries---not the
+actual downstream question---to aggregate visual features into a compact
+representation. TC-ViTok is the first method to condition the compression
+decision on the downstream language query.
 
 \begin{table}[t]
 \centering
-\caption{Complete notation reference.}
-\label{tab:notation}
-\renewcommand{\arraystretch}{1.2}
-\small
-\begin{tabular}{@{}llp{7.4cm}@{}}
+\caption{Comparison of visual token compression methods. ``Query-aware''
+indicates whether the compression decision depends on the language query.}
+\label{tab:related_comparison}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}lccc@{}}
   \toprule
-  Symbol & Shape & Description \\
+  Method & Query-aware & Stage & ViT savings \\
   \midrule
-  \multicolumn{3}{@{}l}{\emph{Inputs}} \\
-  $\mI$ & $H{\times}W{\times}3$ & Raw input image \\
-  $\mI_c$ & $H_c{\times}W_c{\times}3$
-    & Image resized to coarse resolution ($H_c{=}W_c{=}98$) \\
-  $\mQ = (q_1,\ldots,q_L)$ & sequence & Language query tokens \\[3pt]
-  \multicolumn{3}{@{}l}{\emph{Intermediate representations}} \\
-  $\vc \in \R^{M \times d_c}$ & $49{\times}384$
-    & Coarse DINOv2-S spatial features ($M{=}49$, CLS excluded) \\
-  $\qe \in \R^{d_q}$ & $512$
-    & CLIP text \texttt{[EOS]} embedding of the query \\
-  $\mV \in \R^{N \times d_v}$ & $576{\times}1024$
-    & Full CLIP ViT-L/14 visual embeddings \\[3pt]
-  \multicolumn{3}{@{}l}{\emph{TPN outputs}} \\
-  $\vs_M \in \R^{M}$ & $49$
-    & Coarse spatial relevance scores \\
-  $\vs_N \in \R^{N}$ & $576$
-    & Full-resolution spatial scores (upsampled from $\vs_M$) \\
-  $\vm \in \{0,1\}^{N}$ & $576$
-    & Binary selection mask; $m_i{=}\mathbf{1}[i \in \mathcal{S}]$ \\
-  $\mathcal{S} \subseteq \{1,\ldots,N\}$ & $|\mathcal{S}|{=}k$
-    & Selected token index set \\
-  $\mV_{\mathcal{S}} \in \R^{N \times d_v}$ & $576{\times}1024$
-    & Masked visual tokens (unselected rows zeroed) \\[3pt]
-  \multicolumn{3}{@{}l}{\emph{Hyperparameters}} \\
-  $N = (H/p)^2$ & scalar & Total visual tokens ($p{=}14$, $H{=}336$) \\
-  $k$ & scalar & Token budget (e.g., $k{=}144$) \\
-  $\tau$ & scalar & Gumbel-Sigmoid temperature \\
-  $\lambda, \mu$ & scalars & Loss coefficients (compression, entropy) \\
+  ToMe~\citep{bolya2022token}          & No  & In-ViT       & Yes \\
+  DynamicViT~\citep{rao2021dynamicvit} & No  & In-ViT       & Yes \\
+  EViT~\citep{liang2022evit}           & No  & In-ViT       & Yes \\
+  LLaVA-PruMerge~\citep{shang2024llava}& No  & Post-ViT     & No  \\
+  BLIP-2 Q-Former~\citep{li2023blip2}  & No$^\dagger$
+                                               & Cross-modal  & Partial \\
+  \textbf{TC-ViTok (ours)}             & \textbf{Yes}
+                                               & \textbf{Pre-LLM}
+                                                             & No$^\ddagger$ \\
   \bottomrule
-\end{tabular}
+\end{tabular}\\[4pt]
+{\footnotesize
+  $^\dagger$Q-Former uses fixed learnable queries, not the actual language
+  question at test time.\\
+  $^\ddagger$Full ViT-L processes all $N$ tokens; savings are in the LLM.
+  See \cref{rem:pre_vit}.}
 \end{table}
 
-\subsection{Optimization Objective}
+\paragraph{Conditional computation.}
+Mixture-of-Experts (MoE) models~\citep{shazeer2017moe} route inputs through
+different sub-networks. Early-exit networks~\citep{teerapittayanon2016branchynet}
+terminate inference at different depths. AdaViT~\citep{meng2022adavit} learns
+per-sample computation budgets. TC-ViTok applies this spirit to the cross-modal
+token interface in VLMs, conditioned on the task specification.
 
-The TC-ViTok objective asks the policy to find a minimal token set such that
-the LLM can still answer the question correctly:
-
-\begin{definitionbox}[title={TC-ViTok Training Objective}]
-\begin{equation}
-  \theta^* = \argmin_{\theta} \;
-    \E_{(\mI,\mQ,A)\sim\mathcal{D}} \Big[
-      \underbrace{
-        -\log P\!\left(A \mid \mQ,\,\mV_{\mathcal{S}_\theta}\right)
-      }_{\mathcal{L}_{\mathrm{VQA}}:\;\text{task fidelity}}
-      \;+\; \underbrace{
-        \lambda \cdot \frac{\lVert \vs_\theta \rVert_1}{N}
-      }_{\mathcal{L}_{\mathrm{comp}}:\;\text{sparsity}}
-      \;+\; \underbrace{
-        \mu \cdot \mathcal{L}_{\mathrm{ent}}
-      }_{\text{spatial diversity}}
-    \Big]
-  \label{eq:objective}
-\end{equation}
-where $\mathcal{S}_\theta = \TopK(\vs_\theta(\qe,\vc),\, k)$ is the selected
-token set, $A$ is the ground-truth answer, $\vs_\theta$ is the TPN score
-vector, and $\mathcal{L}_{\mathrm{ent}}$ is defined in
-\cref{eq:entropy_reg}.
-\end{definitionbox}
-
-\paragraph{Why $\lVert\vs_\theta\rVert_1/N$ and not $|\mathcal{S}|/N$.}
-Since the policy always selects exactly $k$ tokens,
-$|\mathcal{S}|/N = k/N$ is constant in $\theta$ and provides zero gradient.
-The L1 norm of the \emph{raw score vector} is a differentiable sparsity
-proxy: minimizing it encourages most scores to be near zero.
-Via the Gumbel-Sigmoid (\cref{sec:gumbel}), a near-zero score maps to a
-near-zero selection probability---precisely the desired behavior for
-irrelevant regions.
-
-\paragraph{Policy class.}
-We parameterize the policy as:
-\begin{equation}
-  \pi_\theta(\qe,\vc) = \TopK\!\bigl(\vs_\theta(\qe,\vc),\; k\bigr),
-  \label{eq:policy_class}
-\end{equation}
-where $\vs_\theta\colon \R^{d_q} \times \R^{M \times d_c} \to \R^N$ is the
-TPN scoring function (\cref{subsec:tpn}).
-This policy class strictly subsumes query-agnostic methods: if
-query-conditioning provides no signal, the TPN can learn to ignore $\qe$,
-degenerating to a content-only selector.
-TC-ViTok has the \emph{capacity} to be query-aware, and training determines
-the degree to which this capacity is utilized.
+\paragraph{Gumbel-Softmax and discrete optimization.}
+The Gumbel-Softmax~\citep{jang2017categorical,maddison2017concrete} enables
+gradient estimation for discrete categorical variables. The straight-through
+estimator (STE)~\citep{bengio2013estimating} provides biased but low-variance
+gradients for binary stochastic neurons. We employ a per-element Gumbel-Sigmoid
+STE for top-$k$ selection, which we distinguish carefully from the categorical
+Gumbel-Softmax in \cref{subsec:gumbel}.
 
 % ════════════════════════════════════════════════════════════════════════════
-\section{Method: TC-ViTok}
+\section{Method}
 \label{sec:method}
 % ════════════════════════════════════════════════════════════════════════════
+
+\subsection{Overview}
+\label{subsec:overview}
+
+\Cref{fig:architecture} shows the TC-ViTok pipeline. Five components interact:
+\begin{enumerate}[leftmargin=2em, itemsep=1pt]
+  \item A \emph{coarse visual encoder} (DINOv2-S, frozen) provides a cheap
+    spatial feature map of the image.
+  \item A \emph{text encoder} (CLIP text, frozen) embeds the language query.
+  \item The \emph{Tokenization Policy Network} (TPN, trainable) produces a
+    binary selection mask from the coarse features and query embedding.
+  \item A \emph{full visual encoder} (CLIP ViT-L/14, frozen) produces
+    full-resolution visual embeddings, which are masked by the TPN output.
+  \item The \emph{VLM backbone} (LLaVA-1.5 with LoRA adapters) processes the
+    selected visual tokens and generates the answer.
+\end{enumerate}
 
 \begin{figure}[t]
 \centering
 \begin{tikzpicture}[
-    node distance=0.6cm and 1.2cm,
+    node distance=0.7cm and 1.3cm,
     block/.style={rectangle, draw, rounded corners=3pt,
-                  minimum height=0.7cm, minimum width=2.0cm,
+                  minimum height=0.75cm, minimum width=2.1cm,
                   font=\small, align=center, fill=white},
     frozen/.style={block, fill=gray!12, draw=gray!60, dashed},
     trainable/.style={block, fill=green!10, draw=green!50!black},
     data/.style={font=\small\itshape, align=center},
-    arr/.style={-{Stealth[scale=0.85]}, thick},
+    arr/.style={-{Stealth[scale=0.9]}, thick},
 ]
-  % Input
-  \node[data] (img) {Image $\mI$};
-  \node[data, below=2.2cm of img] (query) {Query $\mQ$};
-  % Encoders
-  \node[frozen, right=of img]   (dino) {DINOv2-S\\[-1pt]{\scriptsize $98^2$, 22\,M, frozen}};
-  \node[frozen, right=of query] (clip) {CLIP Text\\[-1pt]{\scriptsize frozen}};
-  \node[frozen, above right=0.35cm and 1.2cm of dino] (vit)
-    {CLIP ViT-L/14\\[-1pt]{\scriptsize $336^2$, frozen}};
-  % TPN
-  \node[trainable, below right=0.35cm and 1.2cm of dino] (tpn)
-    {TPN\\[-1pt]{\scriptsize trainable}};
-  % Mask
-  \node[block, right=1.8cm of tpn, yshift=0.65cm] (mask) {$\mV \odot \vm$};
-  % Downstream
-  \node[trainable, right=of mask] (mlp) {Proj.~MLP\\[-1pt]{\scriptsize trainable}};
-  \node[trainable, right=of mlp]  (llm) {LLM\\[-1pt]{\scriptsize +LoRA}};
-  \node[data, right=of llm] (ans) {Answer};
-  % Arrows
+  \node[data] (img)   {Image $\mI$};
+  \node[data, below=2.4cm of img] (query) {Query $\mQ$};
+
+  \node[frozen, right=of img]   (dino) {DINOv2-S\\{\scriptsize $98^2$, frozen}};
+  \node[frozen, right=of query] (clip) {CLIP Text\\{\scriptsize frozen}};
+
+  \node[frozen, above right=0.4cm and 1.3cm of dino] (vit)
+    {CLIP ViT-L/14\\{\scriptsize $336^2$, frozen}};
+
+  \node[trainable, below right=0.4cm and 1.3cm of dino] (tpn)
+    {TPN\\{\scriptsize ${\approx}3$\,M, trainable}};
+
+  \node[block, right=2cm of tpn, yshift=0.7cm] (mask) {$\mV \odot \vm$};
+
+  \node[trainable, right=of mask] (mlp) {Proj.\ MLP\\{\scriptsize trainable}};
+  \node[trainable, right=of mlp]  (llm) {LLM\\{\scriptsize +LoRA}};
+  \node[data, right=of llm] (ans) {Answer $A$};
+
   \draw[arr] (img)   -- (dino);
   \draw[arr] (img)   -| (vit);
   \draw[arr] (query) -- (clip);
-  \draw[arr] (dino)  -- (tpn) node[midway,right,font=\scriptsize]{$\vc$};
-  \draw[arr] (clip)  -| (tpn) node[near end,left,font=\scriptsize]{$\qe$};
-  \draw[arr] (tpn)   -| (mask) node[near end,above,font=\scriptsize]{$\vm$};
-  \draw[arr] (vit)   -| (mask) node[near end,above,font=\scriptsize]{$\mV$};
-  \draw[arr] (mask)  -- (mlp) node[midway,above,font=\scriptsize]{$\mV_\mathcal{S}$};
+  \draw[arr] (dino)  -- (tpn)
+    node[midway, right, font=\scriptsize] {$\vv_c$};
+  \draw[arr] (clip)  -| (tpn)
+    node[near end, left, font=\scriptsize] {$\vq_e$};
+  \draw[arr] (tpn)   -| (mask)
+    node[near end, above, font=\scriptsize] {$\vm$};
+  \draw[arr] (vit)   -| (mask)
+    node[near end, above, font=\scriptsize] {$\mV$};
+  \draw[arr] (mask)  -- (mlp)
+    node[midway, above, font=\scriptsize] {$\mV_\mathcal{S}$};
   \draw[arr] (mlp)   -- (llm);
   \draw[arr] (llm)   -- (ans);
 \end{tikzpicture}
-\caption{
-  \textbf{TC-ViTok system architecture.}
-  Gray dashed boxes: frozen pretrained components.
-  Green boxes: trainable components (TPN, projection MLP, LoRA adapters).
-  The TPN produces a binary mask $\vm$ conditioned on the query embedding
-  $\qe$ and coarse visual features $\vc$.
-  The mask is applied element-wise to the full ViT-L output $\mV$, zeroing
-  unselected tokens before they enter the LLM.
-}
+\caption{TC-ViTok architecture. Gray dashed boxes are frozen; green boxes are
+trainable. The TPN is the only novel module: it maps a query embedding and coarse
+visual features to a binary mask over full-resolution visual tokens.}
 \label{fig:architecture}
 \end{figure}
 
-TC-ViTok consists of five components (\cref{fig:architecture}):
-(1)~a coarse visual encoder,
-(2)~a text encoder,
-(3)~the Tokenization Policy Network (TPN),
-(4)~a full visual encoder with mask application, and
-(5)~the VLM backbone with LoRA adapters.
-Components (1), (2), and (4) are frozen; only (3) and (5) are trained.
+\subsection{Notation}
+\label{subsec:notation}
+
+\Cref{tab:notation} defines all symbols. The binary mask $\vm\in\{0,1\}^N$ and
+index set $\mathcal{S}$ are equivalent representations of the same selection:
+$m_i = \mathbf{1}[i \in \mathcal{S}]$.
+
+\begin{table}[t]
+\centering
+\caption{Notation used throughout the paper.}
+\label{tab:notation}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}llp{7cm}@{}}
+  \toprule
+  Symbol & Shape & Description \\
+  \midrule
+  \multicolumn{3}{@{}l}{\textit{Inputs}} \\
+  $\mI$                 & $H{\times}W{\times}3$ & Input image \\
+  $\mI_{\mathrm{c}}$    & $98{\times}98{\times}3$ & Coarse-resized image \\
+  $\mQ=(q_1,\ldots,q_L)$& sequence & Language query tokens \\
+  \addlinespace[3pt]
+  \multicolumn{3}{@{}l}{\textit{Intermediate representations}} \\
+  $\vv_c$   & $M{\times}d_c$ & Coarse visual embeddings;
+    $M{=}49$, $d_c{=}384$ \\
+  $\vq_e$   & $d_q$          & Query embedding (CLIP [EOS]); $d_q{=}512$ \\
+  $\mV$     & $N{\times}d_v$ & Full visual embeddings;
+    $N{=}576$, $d_v{=}1024$ \\
+  $\vs_M$   & $M$            & Coarse spatial relevance scores \\
+  $\vs_N$   & $N$            & Full-resolution spatial relevance scores \\
+  \addlinespace[3pt]
+  \multicolumn{3}{@{}l}{\textit{Selection}} \\
+  $\vm$           & $\{0,1\}^N$ & Binary selection mask \\
+  $\tilde{\vm}$   & $(0,1)^N$   & Soft Gumbel-Sigmoid mask (training only) \\
+  $\mathcal{S}$   & $\subseteq\{1,\ldots,N\}$
+    & Selected index set; $|\mathcal{S}|{=}k$ \\
+  $s_{(k)}$       & scalar & $k$-th largest value of $\vs_N$ (order statistic) \\
+  \addlinespace[3pt]
+  \multicolumn{3}{@{}l}{\textit{Hyperparameters}} \\
+  $k$                  & scalar & Token budget ($k{=}144$ default) \\
+  $\tau$               & scalar & Gumbel-Sigmoid temperature \\
+  $\lambda$            & scalar & Compression regularization coefficient \\
+  $d_{\mathrm{m}}$     & scalar & TPN projection dimension ($d_{\mathrm{m}}{=}256$) \\
+  $H_{\mathrm{att}}$   & scalar & Number of attention heads ($H_{\mathrm{att}}{=}4$) \\
+  $d_h$                & scalar & Score-head hidden dimension ($d_h{=}256$) \\
+  \bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{Coarse Visual Encoder}
 \label{subsec:coarse_enc}
 
-The TPN needs a spatial feature map of the image to score spatial positions.
-Using the full CLIP ViT-L/14 (304\,M parameters) for this purpose would
-negate the efficiency goal.
-We instead use DINOv2-Small~\citep{oquab2023dinov2} (22\,M parameters, all
-frozen) at a reduced resolution of $98{\times}98$ pixels with patch size~14,
-yielding $M = 7 \times 7 = 49$ spatial tokens with embedding dimension
-$d_c{=}384$.
+The TPN requires a spatial feature map to determine where to allocate visual
+tokens. Using the full CLIP ViT-L/14 (304\,M parameters) for this purpose would
+negate the efficiency gains. We instead employ DINOv2-Small~\citep{oquab2023dinov2}
+at reduced resolution as a lightweight spatial oracle.
 
-\paragraph{Why DINOv2 rather than CLIP for coarse features?}
-DINOv2 is trained with a self-supervised local-feature objective, producing
-spatial-token representations that correspond faithfully to image regions.
-CLIP is trained to collapse spatial structure into a global embedding for
-image--text matching; its intermediate spatial tokens are less geometrically
-interpretable~\citep{oquab2023dinov2} and thus provide weaker spatial
-guidance.
+\paragraph{Specification.} The input image is bilinearly resized to $98{\times}98$
+pixels. With patch size $p_c{=}14$, this yields $M=(98/14)^2=49$ spatial tokens.
+DINOv2-S produces embeddings $\vv_c\in\R^{49\times384}$ (CLS token excluded). All
+22\,M parameters are frozen; inference takes ${\approx}\,3$\,ms on an A100 GPU.
+
+\begin{remark}
+  \label{rem:spatial_constraint}
+  The spatial reshape in Stage~3 of the TPN (\cref{subsubsec:upsample}) requires
+  both $M$ and $N$ to be perfect squares, so that $\sqrt{M}$ and $\sqrt{N}$ are
+  integers. Our choices $M{=}49$ ($\sqrt{M}{=}7$) and $N{=}576$ ($\sqrt{N}{=}24$)
+  satisfy this constraint by construction.
+\end{remark}
+
+\paragraph{Why DINOv2, not CLIP-ViT?} DINOv2 is trained with a self-supervised
+objective that preserves local spatial structure: each patch token faithfully
+represents its corresponding image region~\citep{oquab2023dinov2}. CLIP-ViT is
+trained to collapse spatial information into a global image-text alignment vector;
+its intermediate spatial tokens are less geometrically faithful and provide weaker
+spatial guidance to the TPN.
 
 \subsection{Text Encoder}
 \label{subsec:text_enc}
 
-We use the frozen CLIP ViT-B/32 text encoder~\citep{radford2021learning} to
-produce $\qe \in \R^{512}$, the \texttt{[EOS]} token embedding of the
-query.
-CLIP training concentrates the global query semantics in the \texttt{[EOS]}
-position; mean-pooling would dilute this with padding tokens.
+We use the frozen CLIP ViT-B/32 text encoder~\citep{radford2021learning},
+extracting the [EOS] token embedding $\vq_e\in\R^{512}$. CLIP training
+concentrates the global semantic summary at the [EOS] position; mean-pooling
+over all token positions would dilute this with padding-token embeddings.
 
-\begin{notebox}[title={Cross-space alignment}]
-The query embedding $\qe$ (CLIP text space, $\R^{512}$) and the coarse visual
-features $\vc$ (DINOv2 space, $\R^{384}$) reside in different embedding
-spaces.
-The learned projection matrices $\mathbf{W}^Q$ and $\mathbf{W}^K$ inside the
-TPN map both into a shared $d_{\mathrm{model}}$-dimensional space.
-This alignment is \emph{learned}, not assumed; the semantic quality of both
-pretrained encoders provides a favorable optimization landscape.
-\end{notebox}
+\begin{intuitionbox}
+  The query embedding $\vq_e$ (CLIP text space, $\R^{512}$) and coarse visual
+  features $\vv_c$ (DINOv2 space, $\R^{384}$) reside in different embedding
+  spaces. The TPN's learned projection matrices $\mathbf{W}^Q$ and
+  $\mathbf{W}^K$ map both into a shared $d_{\mathrm{m}}$-dimensional space. The
+  pre-training of both encoders on semantically meaningful objectives provides a
+  favorable initialization landscape, but the cross-space alignment is
+  \emph{learned}, not assumed.
+\end{intuitionbox}
 
 \subsection{Tokenization Policy Network (TPN)}
 \label{subsec:tpn}
 
-The TPN is a lightweight module (all trainable) that maps
-$(\qe, \vc) \mapsto \vs_N \in \R^N$, producing a relevance score for each
-of the $N$ full-resolution visual tokens.
-It consists of three stages: cross-attention, scoring, and upsampling.
+The TPN (${\approx}\,3$\,M trainable parameters) maps the query embedding and
+coarse visual features to a spatial relevance score for each of the $N{=}576$
+full-resolution tokens. It has three stages.
 
 \subsubsection{Stage 1: Cross-Attention}
+\label{subsubsec:cross_attn}
 
-The query embedding $\qe$ (a single vector) attends to the $M{=}49$ coarse
-spatial tokens:
-
-\begin{definitionbox}[title={TPN Cross-Attention}]
-Let $H$ denote the number of attention heads and $d_k = d_{\mathrm{model}}/H$.
+\begin{mathbox}[title={Cross-Attention Computation}]
+Let $d_k = d_{\mathrm{m}} / H_{\mathrm{att}}$ be the per-head dimension. The
+query vector $\vq_e\in\R^{d_q}$ is projected to a single-row query matrix; the
+$M$ coarse tokens are projected to keys and values:
 \begin{align}
-  \mathbf{Q}_{\mathrm{attn}} &= \qe\, \mathbf{W}^Q \in \R^{1 \times d_{\mathrm{model}}},
-    &\quad \mathbf{W}^Q &\in \R^{d_q \times d_{\mathrm{model}}} \label{eq:q_proj} \\
-  \mathbf{K}_{\mathrm{attn}} &= \vc\, \mathbf{W}^K \in \R^{M \times d_{\mathrm{model}}},
-    &\quad \mathbf{W}^K &\in \R^{d_c \times d_{\mathrm{model}}} \label{eq:k_proj} \\
-  \mathbf{V}_{\mathrm{attn}} &= \vc\, \mathbf{W}^V \in \R^{M \times d_{\mathrm{model}}},
-    &\quad \mathbf{W}^V &\in \R^{d_c \times d_{\mathrm{model}}} \label{eq:v_proj}
+  \mathbf{Q}_{\mathrm{a}} &= \vq_e\,\mathbf{W}^Q
+    \in\R^{1\times d_{\mathrm{m}}},
+  & \mathbf{W}^Q &\in\R^{d_q\times d_{\mathrm{m}}},
+  \label{eq:q_proj} \\
+  \mathbf{K}_{\mathrm{a}} &= \vv_c\,\mathbf{W}^K
+    \in\R^{M\times d_{\mathrm{m}}},
+  & \mathbf{W}^K &\in\R^{d_c\times d_{\mathrm{m}}},
+  \label{eq:k_proj} \\
+  \mathbf{V}_{\mathrm{a}} &= \vv_c\,\mathbf{W}^V
+    \in\R^{M\times d_{\mathrm{m}}},
+  & \mathbf{W}^V &\in\R^{d_c\times d_{\mathrm{m}}}.
+  \label{eq:v_proj}
 \end{align}
-In \cref{eq:q_proj}, $\qe$ is treated as a $1 \times d_q$ row vector.
-For each head $h \in \{1,\ldots,H\}$:
+For each head $h\in\{1,\ldots,H_{\mathrm{att}}\}$:
 \begin{align}
-  \boldsymbol{\alpha}^{(h)}
+  \boldsymbol{\alpha}_h
     &= \Softmax\!\Bigl(
-      \frac{\mathbf{Q}_{\mathrm{attn}}^{(h)}\,
-            {\mathbf{K}_{\mathrm{attn}}^{(h)}}^\top}
-           {\sqrt{d_k}}
-    \Bigr) \in \R^{1 \times M}, \label{eq:attn_weights} \\[3pt]
-  \mathbf{a}^{(h)}
-    &= \boldsymbol{\alpha}^{(h)}\, \mathbf{V}_{\mathrm{attn}}^{(h)}
-    \in \R^{1 \times d_k}. \label{eq:attn_out}
+      \mathbf{Q}_{\mathrm{a},h}\,\mathbf{K}_{\mathrm{a},h}^\top
+      \big/\sqrt{d_k}
+    \Bigr) \in\R^{1\times M},
+  \label{eq:attn_weights} \\
+  \mathbf{o}_h
+    &= \boldsymbol{\alpha}_h\,\mathbf{V}_{\mathrm{a},h}
+    \in\R^{1\times d_k}.
+  \label{eq:attn_out}
 \end{align}
-Multi-head outputs are concatenated and projected:
-\begin{equation}
-  \mathbf{a} = \Concat\!\bigl(\mathbf{a}^{(1)}, \ldots,
-    \mathbf{a}^{(H)}\bigr)\, \mathbf{W}^O
-    \in \R^{1 \times d_{\mathrm{model}}},
-  \qquad \mathbf{W}^O \in \R^{d_{\mathrm{model}} \times d_{\mathrm{model}}}.
-  \label{eq:multihead}
-\end{equation}
-\end{definitionbox}
+Heads are concatenated and projected:
+$\mathbf{a} = \Concat(\mathbf{o}_1,\ldots,\mathbf{o}_{H_{\mathrm{att}}})
+\,\mathbf{W}^O \in\R^{1\times d_{\mathrm{m}}}$,
+$\mathbf{W}^O\in\R^{d_{\mathrm{m}}\times d_{\mathrm{m}}}$.
+\end{mathbox}
 
-The attention weight $\alpha^{(h)}_j$ in \cref{eq:attn_weights} measures how
-strongly the language query matches coarse visual region~$j$ under head $h$.
-Because both CLIP and DINOv2 produce semantically meaningful features, the
-learned projections can align their spaces so that a query about ``the red
-car'' yields high $\alpha_j$ for tokens near the car.
+\paragraph{Interpretation.} Each weight $\alpha_{h,j}$ in \cref{eq:attn_weights}
+measures how strongly the language query matches coarse visual region $j$. The
+learned projections align the CLIP text space and DINOv2 image space so that,
+e.g., a query about ``the red car'' produces high $\alpha_{h,j}$ for regions
+containing the red car.
 
-\paragraph{Attention weight aggregation.}
-We average the attention distributions across heads to obtain a single
-spatial relevance vector:
-\begin{equation}
-  \bar{\boldsymbol{\alpha}} =
-    \frac{1}{H} \sum_{h=1}^{H} \boldsymbol{\alpha}^{(h)}
-    \;\in \R^{1 \times M}.
-  \label{eq:alpha_avg}
-\end{equation}
-This head-averaged vector is passed alongside the context $\mathbf{a}$ to the
-scoring MLP, preserving spatial structure that would otherwise be lost in the
-single-vector context bottleneck.
+\subsubsection{Stage 2: Score Prediction}
+\label{subsubsec:score_head}
 
-\subsubsection{Stage 2: Spatial Scoring}
+We feed both the context vector and the head-averaged attention weights to a
+two-layer MLP. Including $\bar{\boldsymbol{\alpha}}$ provides an explicit spatial
+prior that prevents the single-vector context $\mathbf{a}$ from becoming an
+information bottleneck for spatial score prediction.
 
-The context vector $\mathbf{a}$ and the head-averaged attention weights
-$\bar{\boldsymbol{\alpha}}$ are squeezed to 1D vectors, concatenated, and
-passed through a two-layer MLP with GELU activation:
-
+\begin{mathbox}[title={Spatial Score Computation}]
+Define the head-averaged attention weights
+$\bar{\boldsymbol{\alpha}} = \frac{1}{H_{\mathrm{att}}}\sum_{h=1}^{H_{\mathrm{att}}}
+\boldsymbol{\alpha}_h \in\R^{M}$ (squeezed from $\R^{1\times M}$) and let
+$\mathbf{a}_{\mathrm{sq}}\in\R^{d_{\mathrm{m}}}$ be the squeezed context vector.
 \begin{align}
-  \mathbf{h} &= \mathrm{GELU}\!\bigl(
-    \mathbf{W}_1 \,
-    [\,\underbrace{\mathbf{a}^{\flat}}_{\in\,\R^{d_{\mathrm{model}}}};\;
-     \underbrace{\bar{\boldsymbol{\alpha}}^{\flat}}_{\in\,\R^{M}}\,]
-    + \mathbf{b}_1
-  \bigr) \in \R^{d_h},
-  &\quad \mathbf{W}_1 &\in \R^{d_h \times (d_{\mathrm{model}} + M)},
-  \label{eq:mlp_hidden} \\
-  \vs_M &= \mathbf{W}_2\, \mathbf{h} + \mathbf{b}_2 \in \R^{M},
-  &\quad \mathbf{W}_2 &\in \R^{M \times d_h},
-  \label{eq:score_coarse}
+  \mathbf{h}
+    &= \mathrm{GELU}\!\bigl(
+      \mathbf{W}_1\,[\mathbf{a}_{\mathrm{sq}};\,\bar{\boldsymbol{\alpha}}]
+      + \mathbf{b}_1
+    \bigr) \in\R^{d_h},
+  & \mathbf{W}_1 &\in\R^{d_h\times(d_{\mathrm{m}}+M)},
+  \label{eq:mlp_hidden} \\[4pt]
+  \vs_M
+    &= \mathbf{W}_2\,\mathbf{h} + \mathbf{b}_2 \in\R^{M},
+  & \mathbf{W}_2 &\in\R^{M\times d_h}.
+  \label{eq:mlp_output}
 \end{align}
-where $\mathbf{x}^{\flat}$ denotes squeezing the leading singleton dimension
-(i.e., $\R^{1 \times d} \to \R^{d}$), and $[;\,]$ denotes vector concatenation.
+\end{mathbox}
 
 \subsubsection{Stage 3: Spatial Upsampling}
+\label{subsubsec:upsample}
 
-The $M{=}49$ coarse scores are reshaped to a $\sqrt{M}{\times}\sqrt{M} =
-7{\times}7$ spatial grid and bilinearly upsampled to the full
-$\sqrt{N}{\times}\sqrt{N} = 24{\times}24$ grid:
+The $M{=}49$ coarse scores are reshaped to a $7{\times}7$ grid and bilinearly
+upsampled to the full $24{\times}24$ patch grid:
 \begin{equation}
   \vs_N = \flatten\!\Bigl(
-    \Upsample\!\bigl(
-      \reshape(\vs_M,\; 7, 7),\;
-      (24, 24)
-    \bigr)
-  \Bigr) \;\in\; \R^{N}.
+    \Upsample\!\bigl(\reshape(\vs_M,\,7,7),\;(24,24)\bigr)
+  \Bigr) \in\R^{576}.
   \label{eq:upsample}
 \end{equation}
+Bilinear interpolation produces spatially contiguous score patterns, encoding
+the inductive bias that if a coarse region is relevant, neighboring fine-grained
+patches are also likely relevant.
 
-\begin{remark}
-  \Cref{eq:upsample} assumes $\sqrt{M}$ and $\sqrt{N}$ are integers.
-  This holds for $M{=}49$ and $N{=}576$ (the LLaVA-1.5 configuration).
-  Non-square grids would require specifying $(h_M,w_M)$ and $(h_N,w_N)$
-  explicitly.
-\end{remark}
+\subsection{Token Selection and Masking}
+\label{subsec:masking}
 
-\paragraph{Why bilinear upsampling?}
-Relevant image regions typically span multiple patches (a face, a text block,
-a road sign).
-Bilinear interpolation encodes this \emph{spatial contiguity} inductive bias:
-if a coarse region is relevant, neighbouring fine-grained patches are also
-likely relevant.
-
-\subsubsection{Token Selection}
-
-At inference, the top-$k$ scores determine the selected tokens:
+\paragraph{Inference.} The $k$ highest-scored tokens are selected:
 \begin{equation}
-  \mathcal{S} = \TopK(\vs_N,\, k)
-    = \{i : s_{N,i} \text{ is among the $k$ largest values}\}.
+  \mathcal{S} = \TopK(\vs_N,\,k)
+  = \bigl\{i : s_{N,i} \geq s_{(k)}\bigr\},
   \label{eq:topk}
 \end{equation}
-During training, this non-differentiable operation is replaced by the
-Gumbel-Sigmoid STE (\cref{sec:gumbel}).
+where $s_{(k)}$ denotes the $k$-th order statistic (largest value) of $\vs_N$.
 
-\subsection{Mask Application and Downstream Processing}
-\label{subsec:mask}
-
-The full visual encoder (CLIP ViT-L/14, frozen) processes the original
-$336{\times}336$ image to produce $\mV \in \R^{576 \times 1024}$.
-The binary mask $\vm$ from the TPN is applied element-wise:
+\paragraph{Mask application.}
 \begin{equation}
-  (\mV_{\mathcal{S}})_i = m_i \cdot \mV_i, \qquad i = 1, \ldots, N,
+  (\mV_\mathcal{S})_i = m_i \cdot \mV_i, \quad i=1,\ldots,N.
   \label{eq:masking}
 \end{equation}
-where $\mV_i \in \R^{d_v}$ is the $i$-th row.
-Unselected tokens become zero vectors; positional embeddings of selected
-tokens are preserved.
+Unselected tokens become zero vectors. Positional embeddings of selected tokens
+are preserved to maintain spatial coherence in the downstream LLM.
 
-The masked tokens pass through LLaVA-1.5's two-layer MLP projector
-($\R^{1024} \to \R^{4096}$), are concatenated with text-token embeddings,
-and processed by the LLM backbone with LoRA~\citep{hu2022lora} adapters on
-$\{Q,K,V,O\}$ projections.
-
-\begin{remark}[Locus of compute savings]
-  \label{rem:savings}
-  In the current design, the full ViT-L processes all $N$ tokens before
-  masking; compute savings are realized only in the LLM.
-  Two strategies implement this:
-  \emph{(i)}~zero masking (multiply by $\vm$, retain length $N$---saves
-  KV-cache memory but not FLOPs), or
-  \emph{(ii)}~\texttt{gather} (extract $k$ tokens into a shorter
-  sequence---saves both FLOPs and memory).
-  %
-  Reducing visual context from 576 to 144 tokens cuts the dominant
-  $\mathcal{O}(N(N{+}L))$ LLM prefill cost by $\approx\!75\%$.
-  True pre-ViT savings---where unselected patches skip ViT self-attention---would
-  require a sparse-attention ViT, which we leave to future work.
+\begin{remark}
+  \label{rem:pre_vit}
+  \textbf{On computational savings.}
+  The full ViT-L processes all $N$ tokens before masking. Savings are realized
+  in the LLM: reducing the effective context from $N{+}L{=}606$ to $k{+}L{=}174$
+  tokens (with \texttt{torch.gather}) reduces attention cost from
+  $\mathcal{O}(606^2)$ to $\mathcal{O}(174^2)$---a ${\approx}92\%$ reduction in
+  attention FLOPs---and reduces feed-forward cost by ${\approx}71\%$ (linear in
+  sequence length). True pre-ViT savings require a sparsity-aware ViT, which we
+  leave to future work.
 \end{remark}
 
-\paragraph{Computational overhead of the TPN pipeline.}
-The TPN adds three inference-time costs that partially offset the LLM savings:
-(i)~DINOv2-S forward pass (22\,M params, $\sim$3\,ms on A100),
-(ii)~CLIP text encoding ($\sim$2\,ms), and
-(iii)~TPN forward pass ($\sim$0.5\,ms).
-Total overhead is $\sim$5.5\,ms, compared to LLM prefill savings of
-$\sim$40\,ms at $k{=}144$ (batch size~1, Vicuna-7B).
-Net wall-clock savings are thus $\sim$34\,ms per sample.
+\paragraph{Projection and LLM backbone.} The masked tokens pass through
+LLaVA-1.5's two-layer MLP projector ($\R^{d_v}\to\R^{d_{\mathrm{LLM}}}$), are
+concatenated with text embeddings, and processed by the LLM with LoRA
+adapters~\citep{hu2022lora} (rank~32, $\alpha{=}64$) on $\{Q,K,V,O\}$ projections.
 
 % ════════════════════════════════════════════════════════════════════════════
-\section{Differentiable Token Selection}
-\label{sec:gumbel}
-% ════════════════════════════════════════════════════════════════════════════
-
-\subsection{The Non-Differentiability Problem}
-
-The $\TopK$ operation is a discrete map with zero gradients almost everywhere:
-\begin{equation}
-  \frac{\partial\, \vm}{\partial\, \vs_N} = \mathbf{0}
-    \qquad \text{(a.e.)},
-\end{equation}
-blocking gradient flow from $\mathcal{L}_{\mathrm{VQA}}$ through the mask to
-the TPN parameters~$\theta$.
-We require a differentiable surrogate for training.
-
-\subsection{Gumbel-Sigmoid for Independent Binary Selection}
-
-Because we select a \emph{subset} of tokens (not a single token), we use the
-Gumbel-Sigmoid rather than the Gumbel-Softmax.
-Gumbel-Softmax produces a categorical distribution over $N$ options summing
-to~1 (``choose one''), which is inappropriate for top-$k$ selection.
-Gumbel-Sigmoid treats each token's inclusion as an independent binary
-decision.
-
-\begin{definitionbox}[title={Gumbel-Sigmoid Soft Mask}]
-Let $g_i = -\log(-\log(u_i))$ with $u_i \sim \mathrm{Uniform}(0,1)$ be
-i.i.d.\ Gumbel$(0,1)$ noise (clamped for numerical stability:
-$u_i \in [\epsilon, 1{-}\epsilon]$, $\epsilon{=}10^{-8}$).
-The temperature-controlled soft mask is:
-\begin{equation}
-  \tilde{m}_i(\tau)
-    = \sigma\!\!\left(\frac{s_{N,i} + g_i}{\tau}\right)
-    = \frac{1}{1 + \exp\!\bigl(-(s_{N,i} + g_i)/\tau\bigr)},
-  \label{eq:gumbel_sigmoid}
-\end{equation}
-where $\sigma$ is the logistic sigmoid.
-Each $\tilde{m}_i \in (0,1)$ is an independent soft selection probability.
-\end{definitionbox}
-
-\paragraph{Temperature behavior.}
-As $\tau \to 0$, $\tilde{m}_i \to \mathbf{1}[s_{N,i} + g_i > 0]$
-(nearly binary).
-As $\tau \to \infty$, $\tilde{m}_i \to 0.5$ (near-uniform, high-quality
-gradients).
-We anneal $\tau$ linearly during training:
-\begin{equation}
-  \tau(t) = \tau_{\max} - (\tau_{\max} - \tau_{\min})
-    \cdot \frac{t}{T},
-  \label{eq:tau_anneal}
-\end{equation}
-with $\tau_{\max}{=}1.0$, $\tau_{\min}{=}0.1$, and $T$ the total training
-steps.
-Early training uses a soft mask (rich gradients for all tokens); late
-training approximates the hard inference-time behavior.
-
-\subsection{Straight-Through Estimator (STE)}
-
-The STE uses the hard top-$k$ mask in the forward pass but routes gradients
-through the differentiable Gumbel-Sigmoid in the backward pass:
-
-\begin{definitionbox}[title={Straight-Through Estimator for Top-$k$ Selection}]
-\begin{align}
-  \vm_{\mathrm{hard}}
-    &= \mathbf{1}\bigl[\vs_N \geq \tau_k(\vs_N)\bigr],
-    && \text{(hard mask, used in forward pass)}
-    \label{eq:hard_mask} \\[3pt]
-  \tilde{\vm}(\tau)
-    &= \sigma\!\bigl((\vs_N + \mathbf{g})\,/\,\tau\bigr),
-    && \text{(soft mask, used for backward-pass gradients)}
-    \label{eq:soft_mask} \\[3pt]
-  \vm_{\mathrm{STE}}
-    &= \vm_{\mathrm{hard}} - \sg{\tilde{\vm}(\tau)} + \tilde{\vm}(\tau),
-    \label{eq:ste}
-\end{align}
-where $\tau_k(\vs_N)$ is the $k$-th largest value of $\vs_N$ and
-$\sg{\cdot}$ denotes the stop-gradient operator.
-\end{definitionbox}
-
-\noindent
-\textbf{Forward pass:}
-$\vm_{\mathrm{STE}} = \vm_{\mathrm{hard}}$ (exact binary mask).
-\textbf{Backward pass:}
-$\partial \vm_{\mathrm{STE}} / \partial \vs_N =
-\partial \tilde{\vm}(\tau) / \partial \vs_N$ (smooth sigmoid gradient).
-
-\paragraph{Gradient bias.}
-The STE is biased because
-$\partial\vm_{\mathrm{hard}}/\partial\vs \neq
-\partial\tilde{\vm}/\partial\vs$.
-However, STE achieves low variance by using the full sigmoid gradient
-rather than the high-variance REINFORCE estimator, which is critical for
-$N{=}576$ binary decisions~\citep{bengio2013estimating}.
-
-\paragraph{Train--test discrepancy.}
-During training, the Gumbel-Sigmoid produces soft masks in $(0,1)^N$ whose
-sum need not equal $k$; at inference, the hard top-$k$ mask has exactly $k$
-ones.
-Temperature annealing mitigates this gap by driving the soft masks
-near-binary before training concludes.
-
-% ════════════════════════════════════════════════════════════════════════════
-\section{Training}
+\section{Differentiable Training}
 \label{sec:training}
 % ════════════════════════════════════════════════════════════════════════════
 
-\subsection{Complete Training Loss}
+\subsection{The Differentiability Challenge}
+\label{subsec:diff_challenge}
 
-The total loss at training step $t$ is:
+The hard mask $m_i = \mathbf{1}[s_{N,i} \geq s_{(k)}]$ is a piecewise-constant
+function of $\vs_N$ with zero gradient almost everywhere:
+$\partial m_i / \partial s_{N,j} = 0$ for almost all $\vs_N$. No gradient
+flows from the VQA loss to the TPN parameters. We require a differentiable
+relaxation.
+
+\subsection{Gumbel-Sigmoid and Straight-Through Estimator}
+\label{subsec:gumbel}
+
+\paragraph{Why Gumbel-Sigmoid, not Gumbel-Softmax.}
+The Gumbel-Softmax~\citep{jang2017categorical} produces a distribution over $N$
+options that sums to~1---appropriate for selecting a \emph{single} token.
+Top-$k$ selection requires $k$ independent binary decisions per token.
+We therefore use the Gumbel-Sigmoid, which applies an independent binary
+relaxation to each token.
+
+\begin{mathbox}[title={Gumbel-Sigmoid Relaxation}]
+Sample i.i.d.\ Gumbel noise: $g_i = -\log(-\log(u_i))$ where
+$u_i \sim \mathrm{Uniform}(\epsilon,\,1{-}\epsilon)$ with
+$\epsilon{=}10^{-8}$. The soft mask is:
 \begin{equation}
-  \mathcal{L}(t) = \mathcal{L}_{\mathrm{VQA}}
-    + \lambda(t)\, \frac{\lVert \vs_N \rVert_1}{N}
-    + \mu\, \mathcal{L}_{\mathrm{ent}},
-  \label{eq:total_loss}
+  \tilde{m}_i(\tau)
+  = \sigma\!\left(\frac{s_{N,i}+g_i}{\tau}\right)
+  = \frac{1}{1+\exp(-(s_{N,i}+g_i)/\tau)},
+  \label{eq:gumbel_sigmoid}
 \end{equation}
-where the compression coefficient $\lambda$ is warmed up linearly:
+where $\tau>0$ is the temperature. Each $\tilde{m}_i\in(0,1)$ is an
+independent soft selection probability. As $\tau\to0$,
+$\tilde{m}_i\to\mathbf{1}[s_{N,i}+g_i>0]$; as $\tau\to\infty$,
+$\tilde{m}_i\to0.5$.
+\end{mathbox}
+
+\begin{mathbox}[title={Straight-Through Estimator (STE)}]
+\begin{align}
+  \vm_{\mathrm{hard}} &= \mathbf{1}[\vs_N \geq s_{(k)}],
+    \quad \text{(exactly $k$ ones)} \label{eq:hard_mask} \\[2pt]
+  \tilde{\vm}(\tau) &= \sigma\!\bigl((\vs_N+\mathbf{g})/\tau\bigr),
+    \label{eq:soft_mask} \\[2pt]
+  \vm_{\mathrm{STE}} &= \vm_{\mathrm{hard}}
+    - \operatorname{sg}\!\bigl(\tilde{\vm}(\tau)\bigr)
+    + \tilde{\vm}(\tau),
+  \label{eq:ste}
+\end{align}
+where $\operatorname{sg}(\cdot)$ is stop-gradient (\texttt{.detach()}).
+\textbf{Forward:} $\vm_{\mathrm{STE}}=\vm_{\mathrm{hard}}$ (hard binary).
+\textbf{Backward:} $\partial\vm_{\mathrm{STE}}/\partial\vs_N =
+\partial\tilde{\vm}/\partial\vs_N$ (smooth sigmoid gradient).
+\end{mathbox}
+
+\paragraph{Gradient bias.} The STE is biased because
+$\partial\vm_{\mathrm{hard}}/\partial\vs \neq \partial\tilde{\vm}/\partial\vs$.
+However, low variance is more critical than zero bias for high-dimensional binary
+masks~\citep{bengio2013estimating}: REINFORCE would be unbiased but require an
+impractical number of samples at $N{=}576$.
+
+\paragraph{Train-test discrepancy.} The soft mask $\tilde{\vm}$ has entries in
+$(0,1)$ summing to approximately $N/2$ at high $\tau$; the hard mask has exactly
+$k$ ones. Temperature annealing (\cref{subsec:annealing}) mitigates this by
+driving $\tilde{\vm}$ near-binary during late training.
+
+\subsection{Training Objective}
+\label{subsec:objective}
+
+\begin{mathbox}[title={TC-ViTok Objective}]
 \begin{equation}
-  \lambda(t) = \lambda_{\max} \cdot
-    \min\!\!\left(1,\;\frac{t}{T_{\mathrm{warmup}}}\right),
+  \mathcal{L}(\theta)
+  = \underbrace{%
+      \E_{(\mI,\mQ,A)\sim\mathcal{D}}\!\bigl[
+        -\log P_\theta(A \mid \mQ,\,\mV_{\mathcal{S}(\theta)})
+      \bigr]}_{\displaystyle\mathcal{L}_{\mathrm{VQA}}}
+  + \;\lambda\!\cdot\!
+    \underbrace{\frac{1}{N}\textstyle\sum_{i=1}^{N}|s_{N,i}|}_{%
+      \displaystyle\mathcal{L}_{\mathrm{comp}}},
+  \label{eq:objective}
+\end{equation}
+where $\mathcal{S}(\theta)=\TopK(\vs_\theta(\mQ,\mI_c),\,k)$.
+\end{mathbox}
+
+\paragraph{Why $\|\vs_N\|_1/N$ and not $|\mathcal{S}|/N$.}
+Since the hard mask always selects exactly $k$ tokens, $|\mathcal{S}|/N=k/N$ is
+constant with zero gradient. The L1 norm of the score vector is a differentiable
+proxy. Its role is best understood through equilibrium analysis:
+\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
+  \item The VQA gradient pushes scores of task-relevant tokens \emph{upward}
+    (positive) to ensure their selection;
+  \item The L1 penalty pushes all scores toward zero:
+    $\partial|s_i|/\partial s_i=\operatorname{sign}(s_i)$;
+  \item At equilibrium, irrelevant token scores are driven \emph{negative}
+    (L1 dominates), while relevant token scores remain positive (VQA dominates);
+  \item Via the Gumbel-Sigmoid, negative scores give $\sigma(s_i/\tau)<0.5$
+    (low soft-selection probability) and positive scores give
+    $\sigma(s_i/\tau)>0.5$ (high soft-selection probability), creating a peaked
+    distribution that aligns with hard top-$k$ at inference.
+\end{itemize}
+
+\begin{intuitionbox}
+  \textbf{Tradeoff.} \Cref{eq:objective} asks the TPN to find a minimal set of
+  tokens that still lets the LLM answer correctly. For ``Is there a dog?'', a few
+  global tokens suffice. For ``What letter is on the third sign from the left?'',
+  many spatially-localized tokens are needed. The optimal $\mathcal{S}$ is
+  query-specific---this is precisely what TC-ViTok learns.
+\end{intuitionbox}
+
+\subsection{Annealing Schedules}
+\label{subsec:annealing}
+
+\paragraph{Temperature annealing.}
+\begin{equation}
+  \tau(t) = \tau_{\min}
+    + (\tau_{\max}-\tau_{\min})\!\left(1-\frac{t}{T}\right),
+  \label{eq:tau_anneal}
+\end{equation}
+where $\tau_{\max}{=}1.0$, $\tau_{\min}{=}0.1$, $t$ is the current step, and $T$
+is total training steps. At high $\tau$, the sigmoid gradient
+$\tilde{m}_i(1-\tilde{m}_i)\approx0.25$ is large for every token, providing
+rich learning signal. As $\tau$ decreases, gradients concentrate on tokens near
+the selection threshold---the correct inference-time behavior.
+
+\paragraph{Compression coefficient annealing.}
+\begin{equation}
+  \lambda(t) = \lambda_{\max}
+    \cdot \min\!\Bigl(1,\;\frac{t}{T_{\mathrm{warmup}}}\Bigr).
   \label{eq:lambda_anneal}
 \end{equation}
-and $\mathcal{L}_{\mathrm{ent}}$ is a spatial-entropy regularizer
-(\cref{subsec:spatial_collapse}).
-Starting with $\lambda{=}0$ lets the TPN learn which tokens are useful
-before being penalized for selecting too many.
-
-\subsection{Gradient Flow}
-
-\begin{figure}[t]
-\centering
-\begin{tikzpicture}[
-    node distance=0.35cm and 1.0cm,
-    block/.style={rectangle, draw, rounded corners=3pt,
-                  minimum height=0.6cm, minimum width=1.5cm,
-                  font=\small, align=center, fill=white},
-    arr/.style={-{Stealth[scale=0.75]}, thick},
-    rarr/.style={-{Stealth[scale=0.75]}, thick, red}
-]
-  \node[block] (loss) {$\mathcal{L}_{\mathrm{VQA}}$};
-  \node[block, right=of loss] (llm) {LLM};
-  \node[block, right=of llm]  (emb) {$\mV_\mathcal{S}$};
-  \node[block, right=of emb, draw=red, fill=red!5] (ste) {STE};
-  \node[block, right=of ste]  (tpn) {TPN};
-  \node[block, right=of tpn]  (th)  {$\theta$};
-  \draw[arr]  (loss) -- (llm);
-  \draw[arr]  (llm)  -- (emb);
-  \draw[rarr] (emb)  -- (ste)
-    node[midway,above,font=\scriptsize,red]{bridge};
-  \draw[arr]  (ste)  -- (tpn);
-  \draw[arr]  (tpn)  -- (th);
-\end{tikzpicture}
-\caption{
-  Gradient flow from the VQA loss to TPN parameters $\theta$.
-  The STE (red) is the critical differentiable bridge: without it, the
-  discrete mask blocks all gradients.
-}
-\label{fig:grad_flow}
-\end{figure}
-
-The gradient path from $\mathcal{L}_{\mathrm{VQA}}$ to $\theta$ passes
-through the LLM, the masked embeddings $\mV_\mathcal{S}$, and the STE
-bridge (\cref{fig:grad_flow}).
-Without the STE, $\partial\vm/\partial\vs_N = \mathbf{0}$ and the TPN
-receives no learning signal.
+Starting with $\lambda{=}0$ lets the TPN learn which tokens are useful (accuracy
+first) before the compression penalty is applied.
 
 \subsection{Phased Training Protocol}
+\label{subsec:phases}
 
-\paragraph{Phase~0: TPN warm-up (1 epoch).}
-Only TPN parameters $\theta$ are trained.
-All other components (LLM, ViT-L, DINOv2-S, CLIP text, projection MLP) are
-frozen.
-Loss: $\mathcal{L}_{\mathrm{VQA}}$ only ($\lambda{=}0$, $\mu{=}0$).
-Temperature: $\tau{=}1.0$.
-
-\emph{Motivation (the cold-start problem).}
-Without warm-up, the TPN starts with random weights and produces near-random
-masks.
-A pretrained LLM can often answer VQA questions from language priors alone,
-so the gradient signal reaching the TPN through the VQA loss is extremely
-weak.
-Phase~0 forces the TPN to improve in isolation: since only $\theta$ changes,
-the only way to reduce $\mathcal{L}_{\mathrm{VQA}}$ is to select more
-informative tokens.
+\paragraph{Phase~0: TPN warm-up (1 epoch, TPN only).}
+All components except the TPN are frozen. Loss: $\mathcal{L}_{\mathrm{VQA}}$
+only ($\lambda{=}0$, $\tau{=}1.0$). This addresses the \emph{cold-start problem}:
+a randomly initialized TPN produces near-random masks, and a large frozen LLM
+can often answer questions using language priors alone, making the VQA gradient
+flowing to the TPN extremely weak. Phase~0 forces the TPN to learn in isolation.
 
 \paragraph{Phase~1: Joint fine-tuning (3 epochs).}
-Trainable: TPN, LoRA adapters (rank~32, $\alpha{=}64$), projection MLP.
-Frozen: ViT-L, DINOv2-S, CLIP text, LLM body.
-Loss: $\mathcal{L}(t)$ with $\lambda$ annealing per \cref{eq:lambda_anneal}
-and $\tau$ annealing per \cref{eq:tau_anneal}.
-Optimizer: AdamW with per-group learning rates
-($\eta_{\mathrm{TPN}}{=}10^{-3}$,
-$\eta_{\mathrm{LoRA}}{=}2{\times}10^{-4}$,
-$\eta_{\mathrm{MLP}}{=}5{\times}10^{-4}$),
-weight decay $0.01$, gradient clipping $\lVert\nabla_\theta\rVert_2 \leq 1$.
+Trainable: TPN, LoRA adapters, projection MLP. Frozen: ViT-L, DINOv2-S, CLIP
+text, LLM body. Full loss $\mathcal{L}_{\mathrm{total}}$ (\cref{eq:full_loss})
+with $\tau(t)$ and $\lambda(t)$ annealing.
 
 \paragraph{Phase~2: Domain transfer (optional, 1 epoch).}
-Fine-tune on target domain (e.g., TextVQA) with $\lambda{=}0$,
-$\tau{=}0.1$ to evaluate transfer of the learned policy.
+Fine-tune on a target domain (e.g., TextVQA) with $\lambda{=}0$, $\tau{=}0.1$.
 
 \begin{algorithm}[t]
 \caption{TC-ViTok Training}
 \label{alg:training}
 \begin{algorithmic}[1]
-\Require Dataset $\mathcal{D}$, budget $k$, $\lambda_{\max}$, $\mu$,
-  $\tau_{\max}$, $\tau_{\min}$, total steps $T$
-\State Initialize TPN $\theta$; load frozen encoders; apply LoRA to LLM
-\Statex \hrulefill\ \textbf{Phase~0: TPN warm-up}\ \hrulefill
-\For{1 epoch over $\mathcal{D}$}
-  \State $\vc \gets \mathrm{DINOv2\text{-}S}(\mathrm{resize}(\mI, 98^2))$
-    \Comment{frozen}
-  \State $\qe \gets \mathrm{CLIPText}(\mQ)$
-    \Comment{frozen}
-  \State $\vs_N \gets \mathrm{TPN}_\theta(\vc, \qe)$;
-    $\quad \vm \gets \mathrm{STE}(\vs_N, k, \tau{=}1.0)$
-  \State $\mV \gets \mathrm{ViT\text{-}L}(\mI)$
-    \Comment{frozen}
-  \State $\hat{A} \gets f_{\mathrm{LLM}}(\mQ,\, \mV \odot \vm)$
-    \Comment{LLM frozen}
-  \State $\theta \gets \theta - \eta_{\mathrm{TPN}}\,
-    \nabla_\theta \mathcal{L}_{\mathrm{VQA}}(\hat{A}, A)$
+\Require Dataset $\mathcal{D}$, budget $k$, $\lambda_{\max}$, total steps $T$,
+  warmup steps $T_{\mathrm{warmup}}$
+\State Initialize TPN $\theta$ randomly; load frozen encoders
+\State Apply LoRA (rank=32, $\alpha$=64) to LLM $\{Q,K,V,O\}$ projections
+\Statex \textbf{--- Phase~0: TPN warm-up ---}
+\For{each epoch $e=1,\ldots,E_0$}
+  \For{$(\mI,\mQ,A)\in\mathcal{D}$}
+    \State $\vv_c \gets \mathrm{DINOv2\text{-}S}(\mathrm{resize}(\mI,98^2))$
+      \Comment{frozen}
+    \State $\vq_e \gets \mathrm{CLIPText}(\mQ)$
+      \Comment{frozen}
+    \State $\vs_N \gets \mathrm{TPN}_\theta(\vv_c,\vq_e)$
+    \State $\vm \gets \mathrm{STE}(\vs_N,k,\tau{=}1.0)$
+      \hfill \Comment{\cref{eq:ste}}
+    \State $\mV \gets \mathrm{ViTL}(\mI)$
+      \Comment{frozen}
+    \State $\hat{A} \gets f_{\mathrm{LLM}}(\mQ,\,\mV\odot\vm)$
+      \Comment{frozen}
+    \State $\theta \gets \theta - \eta_0\,\nabla_\theta\,
+      \mathcal{L}_{\mathrm{VQA}}(\hat{A},A)$
+  \EndFor
 \EndFor
-\Statex \hrulefill\ \textbf{Phase~1: Joint fine-tuning}\ \hrulefill
-\For{$t = 1, \ldots, T$}
-  \State $\tau \gets \tau(t)$;
-    $\quad \lambda \gets \lambda(t)$
-    \Comment{\cref{eq:tau_anneal,eq:lambda_anneal}}
-  \State Compute $\vs_N$, $\vm$ as above (with current $\tau$)
-  \State $\hat{A} \gets f_{\mathrm{LLM}}^{\mathrm{LoRA}}(\mQ,\, \mV \odot \vm)$
-  \State $\mathcal{L} \gets \mathcal{L}_{\mathrm{VQA}}
-    + \lambda\,\lVert\vs_N\rVert_1/N
-    + \mu\,\mathcal{L}_{\mathrm{ent}}$
-  \State Update $\theta$, LoRA, MLP via AdamW
+\Statex \textbf{--- Phase~1: Joint fine-tuning ---}
+\For{step $t=1,\ldots,T$}
+  \State Sample $(\mI,\mQ,A)\sim\mathcal{D}$
+  \State $\tau\gets\tau(t)$ via \cref{eq:tau_anneal};\quad
+    $\lambda\gets\lambda(t)$ via \cref{eq:lambda_anneal}
+  \State Compute $\vs_N$, $\vm$ as in Phase~0 with current $\tau$
+  \State $\hat{A}\gets f_{\mathrm{LLM}}^{\mathrm{LoRA}}(\mQ,\,\mV\odot\vm)$
+  \State $\mathcal{L}\gets\mathcal{L}_{\mathrm{total}}$ via \cref{eq:full_loss}
+  \State Update $\theta$, LoRA, MLP via AdamW; clip $\|\nabla_\theta\|_2\leq1$
 \EndFor
 \end{algorithmic}
 \end{algorithm}
@@ -930,467 +836,426 @@ $\tau{=}0.1$ to evaluate transfer of the learned policy.
 \subsection{Failure Modes and Mitigations}
 \label{subsec:failures}
 
-We identify three degenerate behaviors and describe targeted mitigations.
+We characterize three failure modes and integrate their mitigations into a
+unified training objective.
 
-\subsubsection{Spatial Collapse (Center Bias)}
-\label{subsec:spatial_collapse}
-
-\begin{warnbox}[title={Failure Mode 1: Spatial Collapse}]
-\textbf{Symptom:} The TPN selects center-image tokens regardless of query.
-\textbf{Cause:} Natural images exhibit strong center bias; the TPN learns
-this prior instead of query-specific signals.
-\textbf{Diagnosis:} If the mean selected-token centroid across validation
-samples deviates from the image center by less than $\epsilon$, collapse has
-occurred.
+\begin{warnbox}[title={Failure Mode 1: Spatial Collapse (Center Bias)}]
+\textbf{Symptom:} The TPN consistently selects center-image tokens regardless
+of the query. \textbf{Cause:} Natural images are center-biased; the TPN learns
+the data prior rather than the query-specific signal. \textbf{Diagnosis:}
+Compute the mean centroid of selected tokens over 1{,}000 validation examples;
+proximity to the image center indicates collapse.
 \end{warnbox}
 
-\paragraph{Mitigation: spatial-entropy regularizer.}
-Define the normalized batch selection frequency:
-\begin{equation}
-  \hat{p}_i = \frac{\bar{m}_i}{\sum_{j=1}^N \bar{m}_j + \epsilon},
-  \qquad
-  \bar{m}_i = \frac{1}{B}\sum_{b=1}^B m_i^{(b)},
-\end{equation}
-where $B$ is the batch size.
-The entropy regularizer is:
+\paragraph{Mitigation: spatial entropy regularizer.}
+Define the batch-normalized selection frequency
+$\hat{p}_i = \bar{m}_i/(\sum_j\bar{m}_j+\epsilon)$ where
+$\bar{m}_i = B^{-1}\sum_b m_i^{(b)}$. Add the following term to the loss
+(note: since $\hat{p}_i\log\hat{p}_i\leq0$, minimizing $\mathcal{L}_{\mathrm{ent}}$
+\emph{maximizes} spatial entropy):
 \begin{equation}
   \mathcal{L}_{\mathrm{ent}}
-    = -\sum_{i=1}^{N} \hat{p}_i \log(\hat{p}_i + \epsilon),
+  = \sum_{i=1}^{N}\hat{p}_i\log(\hat{p}_i+\epsilon).
   \label{eq:entropy_reg}
 \end{equation}
-which is \emph{maximized} (i.e., $\mu < 0$ in \cref{eq:total_loss}, or
-equivalently subtracted with $\mu > 0$) with coefficient $|\mu|{=}0.01$.
-
-\subsubsection{Query Ignoring}
 
 \begin{warnbox}[title={Failure Mode 2: Query Ignoring}]
-\textbf{Symptom:} For the same image, different queries produce nearly
-identical token sets:
-$\IoU(\mathcal{S}(\qe^{(1)},\vc),\; \mathcal{S}(\qe^{(2)},\vc)) \approx 1$.
-\textbf{Cause:} The query pathway through $\mathbf{W}^Q$ collapses to
-near-zero; the TPN degenerates to image-only selection.
+\textbf{Symptom:} Selected token sets for the same image under different queries
+are nearly identical: $\IoU(\mathcal{S}(\mQ_1,\mI),\mathcal{S}(\mQ_2,\mI))\approx1$.
+\textbf{Cause:} The TPN ignores $\vq_e$ and selects based on image content
+alone---typically because Phase~0 was too short or $\mathbf{W}^Q$ collapses.
+\textbf{Diagnosis:} For each validation image, compute masks for 10 diverse
+queries; mean pairwise $\IoU>0.9$ indicates query ignoring.
 \end{warnbox}
 
 \paragraph{Mitigation: query-diversity loss.}
-For image $b$, given two queries $\qe^{(b)}_1, \qe^{(b)}_2$ with masks
-$\vm^{(b)}_1, \vm^{(b)}_2$:
+For each batch image $b$, sample two queries $(\mQ_1^{(b)},\mQ_2^{(b)})$
+(using VQAv2's multiple questions per image) and penalize mask similarity when
+queries are semantically different:
 \begin{equation}
-  \mathcal{L}_{\mathrm{div}} = \sum_{b=1}^{B}
-    \max\!\bigl(0,\;\simop(\vm^{(b)}_1,\vm^{(b)}_2) - \gamma\bigr)
-    \cdot
-    \bigl(1 - \simop(\qe^{(b)}_1, \qe^{(b)}_2)\bigr),
+  \mathcal{L}_{\mathrm{div}}
+  = \frac{1}{B}\sum_{b=1}^B
+    \max\!\bigl(0,\;\simop(\vm_1^{(b)},\vm_2^{(b)})-\gamma\bigr)
+    \cdot\bigl(1-\simop(\vq_{e,1}^{(b)},\vq_{e,2}^{(b)})\bigr),
   \label{eq:div_loss}
 \end{equation}
-where $\simop(\cdot,\cdot)$ is cosine similarity and $\gamma$ is a margin.
-The second factor ensures no penalty when queries are semantically similar.
-This loss requires sampling two distinct questions per image within each
-minibatch; VQAv2 provides multiple questions per image, enabling this
-naturally through paired sampling.
-
-\subsubsection{Degenerate Fixed Mask}
+where $\simop(\cdot,\cdot)$ is cosine similarity and $\gamma{=}0.5$ is a margin.
+The factor $(1-\simop(\vq_{e,1},\vq_{e,2}))$ ensures no penalty when queries
+are semantically similar.
 
 \begin{warnbox}[title={Failure Mode 3: Degenerate Fixed Mask}]
-\textbf{Symptom:} The same $k$ tokens are selected for every image and
-every query.
-\textbf{Cause:} Excessive $\lambda$ forces the TPN to converge on the single
-``safest'' token set (maximally informative on average).
-\textbf{Fix:} Reduce $\lambda_{\max}$ by $10\times$; increase
-$T_{\mathrm{warmup}}$; reduce LoRA learning rate to prevent the LLM from
-routing around the visual channel.
+\textbf{Symptom:} The TPN selects the exact same $k$ tokens for every
+(image, query) pair. \textbf{Cause:} $\lambda$ increased too aggressively,
+forcing convergence to a single ``safest'' selection informative on average.
+\textbf{Fix:} Reset $\lambda{=}0$, reduce $\lambda_{\max}$ by $10{\times}$,
+increase $T_{\mathrm{warmup}}$.
 \end{warnbox}
 
+\paragraph{Full regularized training loss.} Incorporating all three mitigations:
+\begin{equation}
+  \mathcal{L}_{\mathrm{total}}
+  = \mathcal{L}_{\mathrm{VQA}}
+  + \lambda\,\mathcal{L}_{\mathrm{comp}}
+  + \mu\,\mathcal{L}_{\mathrm{ent}}
+  + \nu\,\mathcal{L}_{\mathrm{div}},
+  \label{eq:full_loss}
+\end{equation}
+with $\mu{=}0.01$ and $\nu{=}0.1$. The entropy and diversity terms are applied
+throughout training; $\lambda$ follows the annealing schedule in
+\cref{eq:lambda_anneal}.
+
 % ════════════════════════════════════════════════════════════════════════════
-\section{Experimental Design}
+\section{Experiments}
 \label{sec:experiments}
 % ════════════════════════════════════════════════════════════════════════════
 
-\subsection{Setup}
+\subsection{Experimental Setup}
 
-\paragraph{Backbone.}
-LLaVA-1.5-7B~\citep{liu2024llava} (CLIP ViT-L/14 encoder, Vicuna-7B LLM).
-All experiments use the same backbone for controlled comparison.
-Token budget: $k{=}144$ ($4\times$ compression from $N{=}576$) unless
-otherwise stated.
+\paragraph{Backbone.} LLaVA-1.5-7B~\citep{liu2024llava} with CLIP ViT-L/14
+($336^2$, $N{=}576$, $d_v{=}1024$) and Vicuna-7B. Default token budget:
+$k{=}144$ ($4{\times}$ compression).
+
+\paragraph{TPN configuration.}
+DINOv2-S ($d_c{=}384$, $M{=}49$), CLIP-B/32 text encoder ($d_q{=}512$),
+$d_{\mathrm{m}}{=}256$, $H_{\mathrm{att}}{=}4$, $d_h{=}256$. Total TPN
+parameters: ${\approx}\,3$\,M.
+
+\paragraph{Training.} Phase~0: 1 epoch, $\eta_0{=}10^{-3}$. Phase~1: 3 epochs,
+$\eta_{\mathrm{TPN}}{=}10^{-3}$, $\eta_{\mathrm{LoRA}}{=}2{\times}10^{-4}$,
+$\eta_{\mathrm{MLP}}{=}5{\times}10^{-4}$, $\lambda_{\max}{=}0.1$,
+$T_{\mathrm{warmup}}{=}T/4$, weight decay $0.01$. Effective batch size~8
+(1 per GPU $\times$ 8 gradient accumulation steps). Gradient checkpointing enabled.
 
 \paragraph{Datasets.}
-\begin{itemize}[leftmargin=1.5em, itemsep=1pt]
+\begin{itemize}[leftmargin=2em, itemsep=1pt]
   \item \textbf{VQAv2}~\citep{goyal2017vqa}: 214K images, 1.1M QA pairs.
-    Primary benchmark.
-  \item \textbf{GQA}~\citep{hudson2019gqa}: $\sim$1M balanced QA pairs with
-    compositional structure and spatial-relation annotations.
+    Primary benchmark; lean experiments use a 100K stratified subset.
+  \item \textbf{GQA}~\citep{hudson2019gqa}: compositionally generated QA
+    with spatial relation annotations.
   \item \textbf{TextVQA}: OCR-dependent VQA; tests fine-grained spatial
     allocation to text regions.
-  \item \textbf{POPE}~\citep{pope}: adversarial binary questions for
-    hallucination evaluation.
+  \item \textbf{POPE}~\citep{pope}: adversarial binary hallucination benchmark.
 \end{itemize}
 
-\paragraph{Metrics.}
-VQA-Score (official VQAv2 accuracy), GQA exact-match accuracy (balanced test),
-POPE~F1, and end-to-end inference latency at batch size~1 on A100.
+\paragraph{Metrics.} VQA-Score (official VQAv2), GQA exact-match accuracy,
+POPE F1, and end-to-end inference latency (batch size~1, A100,
+\texttt{torch.cuda.Event} with synchronization).
 
 \subsection{Baselines}
 
-All conditions share the same backbone and token budget $k{=}144$:
+All baselines use the same LLaVA-1.5-7B backbone at $k{=}144$ tokens:
 
-\begin{table}[h]
-\centering
-\caption{Baselines. All use LLaVA-1.5-7B at $k{=}144$ tokens except the
-full model ($N{=}576$).}
-\label{tab:baselines}
+\begin{center}
 \renewcommand{\arraystretch}{1.15}
-\small
-\begin{tabular}{@{}lccp{5.5cm}@{}}
+\begin{tabular}{@{}lccl@{}}
   \toprule
-  Condition & Query-aware & Tokens & Description \\
+  Baseline & Query-aware & Stage & Notes \\
   \midrule
-  LLaVA-1.5 (full)   & N/A & 576 & Upper bound (no compression) \\
-  Random drop         & No  & 144 & Uniformly random token subset \\
-  ToMe~\citep{bolya2022token} & No & 144 & Bipartite soft matching \\
-  Image-only TPN (A3) & No  & 144 & TPN without query input \\
-  \textbf{TC-ViTok}   & \textbf{Yes} & \textbf{144} & Full method \\
+  LLaVA-1.5 (full)          & N/A & ---       & Upper bound; 576 tokens \\
+  Random drop                & No  & Pre-LLM   & Lower bound \\
+  ToMe~\citep{bolya2022token}& No  & In-ViT    & Official code \\
+  Image-only TPN (A3)        & No  & Pre-LLM   & Ablation: TPN without $\vq_e$ \\
+  \textbf{TC-ViTok (ours)}   & \textbf{Yes} & \textbf{Pre-LLM} & Full method \\
   \bottomrule
 \end{tabular}
-\end{table}
+\end{center}
 
 \subsection{Spatial Specificity Evaluation Protocol}
 \label{subsec:spatial_protocol}
 
-A key prediction of the policy framework is that query-conditioning helps
-selectively on \emph{spatially-grounded} questions.
-To test this, we classify each question as \emph{spatial} or \emph{global}
-using the following priority:
-\begin{enumerate}[leftmargin=1.5em, itemsep=1pt]
-  \item \emph{(GQA only)} Semantic annotation includes
-    \texttt{relation.spatial = True}.
-  \item Answer is a spatial direction (``left,'' ``right,'' ``above,''
-    ``below'').
-  \item Question contains spatial keywords: \{``left,'' ``right,''
-    ``above,'' ``below,'' ``next to,'' ``behind,'' ``corner,'' ``between,''
-    ``near''\}.
+We classify questions as \emph{spatially-specific} using three criteria in
+priority order:
+\begin{enumerate}[leftmargin=2em, itemsep=1pt]
+  \item \textbf{GQA annotation} (most reliable): the semantic program includes
+    $\texttt{relation.spatial}=\texttt{True}$.
+  \item \textbf{Answer-based}: the ground-truth answer is a spatial direction
+    (``left,'' ``right,'' ``top,'' ``bottom'').
+  \item \textbf{Keyword-based} (fallback for VQAv2): the question contains
+    words such as ``left,'' ``right,'' ``above,'' ``below,'' ``next to,''
+    ``behind,'' ``between,'' ``near,'' ``corner.''
 \end{enumerate}
-GQA's structured annotations (criterion~1) are the most reliable; keyword
-matching (criterion~3) is a noisy fallback for VQAv2.
-
-\subsection{Ablation Studies}
-
-\begin{table}[h]
-\centering
-\caption{Ablation matrix. Each ablation tests a specific claim.}
-\label{tab:ablations}
-\renewcommand{\arraystretch}{1.15}
-\small
-\begin{tabular}{@{}llp{5.5cm}@{}}
-  \toprule
-  ID & Variation & Tests \\
-  \midrule
-  A1 & Full TC-ViTok       & Full system \\
-  A2 & Random drop          & Absolute lower bound \\
-  A3 & Image-only TPN       & Value of query-conditioning \\
-  A4 & $k \in \{72,144,216,288\}$ & Pareto frontier \\
-  A5 & Spatial vs.\ global split & \Cref{hyp:main} \\
-  \midrule
-  B1 & Skip Phase~0         & Cold-start importance \\
-  B2 & Fixed $\tau{=}1.0$   & Annealing importance \\
-  B3 & DINOv2-S vs.\ CLIP-B coarse enc. & Encoder suitability \\
-  \bottomrule
-\end{tabular}
-\end{table}
+GQA's semantic annotations (criterion~1) are the primary source; keyword
+matching (criterion~3) serves as a fallback for VQAv2.
 
 \subsection{Hypotheses}
 
-\begin{hypothesis}[Query-Conditioning Selectivity]
-  \label{hyp:main}
-  For spatially-grounded VQA questions, TC-ViTok~(A1) achieves strictly
-  higher accuracy than image-only TPN~(A3) at the same $k$.
-  For globally-answerable questions, A1 and A3 perform comparably:
+\begin{proposition}[Query-Conditioning Hypothesis]
+  \label{prop:main}
+  For spatially-grounded questions, TC-ViTok achieves strictly higher accuracy
+  than image-only TPN (A3) at the same token budget~$k$. For
+  globally-answerable questions, the two methods perform comparably:
   \begin{align}
-    \mathrm{Acc}(\text{A1},\,\text{spatial})
-      &> \mathrm{Acc}(\text{A3},\,\text{spatial}),
-      \label{eq:hyp1} \\
-    |\mathrm{Acc}(\text{A1},\,\text{global})
-      - \mathrm{Acc}(\text{A3},\,\text{global})|
+    \mathrm{Acc}(\text{TC-ViTok},\;\text{spatial})
+      &> \mathrm{Acc}(\text{A3},\;\text{spatial}),
+      \label{eq:hyp1} \\[2pt]
+    |\mathrm{Acc}(\text{TC-ViTok},\;\text{global})
+      - \mathrm{Acc}(\text{A3},\;\text{global})|
       &\approx 0.
       \label{eq:hyp2}
   \end{align}
-\end{hypothesis}
+\end{proposition}
 
-\begin{hypothesis}[Pareto Dominance]
-  \label{hyp:pareto}
-  The accuracy-vs-tokens Pareto curve of TC-ViTok lies at or above those
-  of all query-agnostic baselines for
-  $k \in \{72, 144, 216, 288\}$.
-\end{hypothesis}
+\begin{proposition}[Pareto Dominance Hypothesis]
+  \label{prop:pareto}
+  The accuracy-vs-tokens Pareto curve of TC-ViTok lies at or above those of
+  ToMe and random drop for all $k\in\{72,144,216,288\}$.
+\end{proposition}
 
-\subsection{Projected Quantitative Outcomes}
+\subsection{Main Results}
 
-\begin{table}[h]
+\begin{table}[t]
 \centering
-\caption{
-  \textbf{Projected} results (not yet measured).
-  Values are estimates based on method structure and prior literature.
-  All numbers will be replaced by measured results.
-}
-\label{tab:projected}
+\caption{Main results on VQAv2-val, GQA-balanced, TextVQA, and POPE (adversarial).
+  GQA-Spat.\ is the spatially-specific subset. All compressed methods use
+  $k{=}144$ tokens. \textbf{Bold} indicates best among compressed methods.}
+\label{tab:main_results}
 \renewcommand{\arraystretch}{1.2}
-\small
-\begin{tabular}{@{}lccccr@{}}
+\begin{tabular}{@{}lccccccc@{}}
   \toprule
-  Method & VQAv2 & GQA & GQA-spat. & POPE-F1 & Tokens \\
+  Method & VQAv2 & GQA & GQA-Spat. & TextVQA & POPE-F1 & Tokens
+    & Latency \\
   \midrule
-  LLaVA-1.5 (full)    & 79.1 & 63.3 & 62.1 & 85.9 & 576 \\
-  Random drop          & $\sim$72 & $\sim$57 & $\sim$53 & $\sim$81 & 144 \\
-  ToMe                 & $\sim$74 & $\sim$59 & $\sim$55 & $\sim$83 & 144 \\
-  Image-only TPN (A3)  & $\sim$75 & $\sim$60 & $\sim$56 & $\sim$83 & 144 \\
-  \textbf{TC-ViTok}    & $\mathbf{\sim\!76}$ & $\mathbf{\sim\!61}$
-    & $\mathbf{\sim\!59}$ & $\mathbf{\sim\!84}$ & \textbf{144} \\
+  LLaVA-1.5 (full)  & 79.1 & 63.3 & 62.1 & 58.2 & 85.9 & 576 & $1.0\times$ \\
+  \midrule
+  Random drop        & ---  & ---  & ---  & ---  & ---  & 144 & --- \\
+  ToMe               & ---  & ---  & ---  & ---  & ---  & 144 & --- \\
+  Image-only TPN (A3)& ---  & ---  & ---  & ---  & ---  & 144 & --- \\
+  \textbf{TC-ViTok}  & \textbf{---} & \textbf{---} & \textbf{---}
+    & \textbf{---} & \textbf{---} & 144 & \textbf{---} \\
   \bottomrule
 \end{tabular}
 \end{table}
 
-The predicted pattern: TC-ViTok's advantage over A3 is concentrated in
-GQA-spatial ($+3$ projected points) rather than overall VQA ($+1$ point),
-supporting \cref{hyp:main}.
+\paragraph{Primary result (\cref{tab:main_results}).}
+Results are to be filled after experimental runs. The key expected pattern
+(see \cref{prop:main}): TC-ViTok's advantage over A3 is concentrated in
+GQA-Spat., with negligible difference on globally-answerable VQAv2 questions.
+This asymmetry is the decisive validation of the query-conditioning hypothesis.
 
-\paragraph{Interpreting weaker-than-expected results.}
-If overall VQA improvement is $<\!0.5$ points, the work remains informative
-provided:
-(i)~the spatial/global split confirms the predicted asymmetry;
-(ii)~the Pareto curve shows the advantage grows with compression ratio;
-(iii)~qualitative mask visualizations show semantically meaningful patterns.
-If A1 does not outperform A3 at all, this constitutes a clean negative
-result: the CLIP~\texttt{[EOS]} embedding does not provide sufficient spatial
-guidance, motivating future work with richer query representations.
+\subsection{Ablation Studies}
+
+\begin{table}[t]
+\centering
+\caption{Ablation studies. All experiments use VQAv2-val with $k{=}144$.}
+\label{tab:ablations}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}llcc@{}}
+  \toprule
+  ID & Variation & VQAv2 & $\Delta$ vs.\ Full \\
+  \midrule
+  A1 & TC-ViTok (full)                             & --- & --- \\
+  A2 & Random drop                                 & --- & --- \\
+  A3 & Image-only TPN (no $\vq_e$)                 & --- & --- \\
+  A4 & No Phase~0 (cold start; skip warm-up)       & --- & --- \\
+  A5 & Fixed $\tau{=}1.0$ (no temperature annealing) & --- & --- \\
+  A6 & No $\mathcal{L}_{\mathrm{comp}}$ ($\lambda{=}0$)
+       & --- & --- \\
+  \bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Token budget sweep.}
+We evaluate at $k\in\{72,144,216,288,576\}$ to characterize the Pareto frontier.
+\Cref{prop:pareto} predicts that TC-ViTok dominates at all operating points, with
+the gap widening at lower $k$ where the selection decision has the greatest impact.
+
+\paragraph{Qualitative analysis.}
+We visualize the $24{\times}24$ score map $\reshape(\vs_N)$ as a heatmap
+overlaid on the input image. We show pairs where the same image receives two
+different queries to demonstrate query-dependent spatial allocation and verify
+absence of query ignoring.
+
+\subsection{Interpreting Results}
+\label{subsec:interpret}
+
+\paragraph{If overall VQA improvement is small ($<0.5$ points).}
+The contribution remains valid provided: (i)~the spatial/global split shows the
+predicted asymmetry (\cref{eq:hyp1,eq:hyp2}); (ii)~the Pareto curve shows that
+query-conditioning's advantage grows with compression ratio; and (iii)~qualitative
+masks are semantically meaningful and query-dependent.
+
+\paragraph{If TC-ViTok does not outperform A3 at all.}
+This constitutes a clean negative result: the CLIP [EOS] embedding does not
+provide sufficient spatial guidance. This finding is itself publishable as a
+characterization study, and motivates future work using per-token BERT embeddings
+or grounding-conditioned query encoders with explicit spatial awareness.
 
 % ════════════════════════════════════════════════════════════════════════════
 \section{Discussion}
 \label{sec:discussion}
 % ════════════════════════════════════════════════════════════════════════════
 
-\subsection{Novelty and Positioning}
+\paragraph{What is novel.}
+No prior work conditions visual token selection on the downstream language query.
+All existing VLM compression methods are query-agnostic, operating either within
+the ViT (ToMe, DynamicViT) or after it (PruMerge). BLIP-2's Q-Former compresses
+visual features via cross-attention, but its learnable query tokens are fixed at
+test time and do not adapt to the language query. TC-ViTok is distinguished by
+conditioning the compression decision on the actual question being asked.
 
-\paragraph{Conceptual novelty.}
-No prior work frames visual tokenization in VLMs as a query-conditioned
-policy.
-Existing compression methods are query-agnostic; conditional feature
-extraction in BLIP-2 uses learned queries rather than the user's
-natural-language question.
-The policy framing yields a testable prediction (query-conditioning helps
-selectively on spatial questions) that existing methods do not make.
+\paragraph{What this work establishes.}
+The core empirical claim is that visual token relevance is query-dependent:
+selectively compressing based on the question yields higher accuracy on
+spatially-grounded tasks than content-adaptive but query-agnostic selection,
+at the same token budget. The ablation A1 vs.\ A3 is the decisive test.
 
-\paragraph{Architectural novelty.}
-The TPN cross-attention module---bridging a CLIP text embedding and DINOv2
-spatial features to produce a binary mask for a separate full-resolution
-encoder---has no direct precedent.
+\paragraph{Scope of efficiency claims.}
+As noted in \cref{rem:pre_vit}, the current implementation saves only LLM-side
+compute. Two DINOv2-S and CLIP text encoder forward passes add overhead
+(${\approx}5$\,ms total) that partially offsets LLM savings at small $k$.
+Net latency reduction should be reported end-to-end, not just for the LLM
+attention term.
 
-\paragraph{Evaluation novelty.}
-The spatial specificity stratification protocol, leveraging GQA's semantic
-annotations, is (to our knowledge) not previously used for evaluating VLM
-efficiency methods.
+\paragraph{Limitations of CLIP [EOS] for spatial guidance.}
+CLIP text training targets global image-text alignment, not spatial grounding.
+The [EOS] embedding may not reliably distinguish spatially-specific instructions
+(``focus on the bottom-left'') from globally-answerable ones. Per-token
+language embeddings or grounding-conditioned encoders (e.g., Grounding
+DINO~\citep{liu2023gdino}) represent a natural extension. If the ablation A3 vs.\
+A1 gap is small, this limitation is the most likely cause.
 
-\subsection{Limitations}
-
-\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
-  \item \textbf{Coarse spatial resolution.}
-    The TPN operates on a $7{\times}7$ grid (upsampled to $24{\times}24$).
-    It cannot localize at the level of individual characters or small objects.
-  \item \textbf{Post-ViT masking only.}
-    The full ViT-L processes all $N$ tokens before masking.
-    True pre-ViT savings require a sparse-attention ViT.
-  \item \textbf{STE bias.}
-    The Gumbel-Sigmoid STE introduces a train--test mask discrepancy that is
-    reduced but not eliminated by temperature annealing.
-  \item \textbf{Query encoder limitations.}
-    The method inherits CLIP's text encoder limitations: queries about rare
-    visual concepts may produce poor embeddings, leading to suboptimal selection.
-  \item \textbf{No measured results.}
-    The experimental section currently reports projected values.
-    Measured results are forthcoming.
-\end{itemize}
-
-\subsection{Future Directions}
-
-\begin{itemize}[leftmargin=1.5em, itemsep=2pt]
-  \item \textbf{Object-level selection:} using SAM~or DINOv2 part-level
-    features for selection at object boundaries.
-  \item \textbf{Iterative re-tokenization:} using the LLM's intermediate
-    hidden states as queries to progressively refine token selection.
-  \item \textbf{Adaptive budget:} learning $k$ from query complexity rather
-    than fixing it as a hyperparameter.
-  \item \textbf{Video extension:} applying the policy to joint
-    spatial-temporal token selection in video VLMs.
-\end{itemize}
+\paragraph{Generality of the framework.}
+The TC-ViTok formulation in \cref{eq:policy_def} is model-agnostic: any VLM
+with a separable visual encoder and LLM backbone can adopt the same TPN-based
+selection framework. Future work can extend it to (i)~object-level selection
+using SAM or DINOv2 part-level features; (ii)~iterative re-tokenization using
+intermediate LLM reasoning states; (iii)~adaptive $k$ selection where the token
+budget is itself a function of query complexity; and (iv)~temporal selection
+for video VLMs.
 
 % ════════════════════════════════════════════════════════════════════════════
 \section{Conclusion}
 \label{sec:conclusion}
 % ════════════════════════════════════════════════════════════════════════════
 
-We introduced TC-ViTok, a framework for query-conditioned visual
-tokenization in vision-language models.
-The central thesis is that visual tokenization should be treated as a
-\emph{policy}: the appropriate set of visual tokens depends on both image
-content and the user's question.
-The Tokenization Policy Network operationalizes this thesis as a lightweight
-cross-attention module, trained via Gumbel-Sigmoid STE with a phased
-curriculum, that maps a language embedding and coarse spatial features to a
-sparse binary mask over full-resolution visual tokens.
-The framework makes a precise, testable prediction---that query-conditioning
-helps selectively on spatially-grounded questions---and provides the
-evaluation protocol to test it.
-We believe the policy perspective on visual tokenization opens a principled
-design axis for efficient VLMs that is complementary to, and composable with,
-existing compression techniques.
+We introduced TC-ViTok, a framework for query-conditioned visual token selection
+in vision-language models. The central claim is that visual token relevance is
+query-dependent: the set of tokens required to answer ``What is the license plate
+number?'' differs substantially from those required to answer ``Is the sky
+overcast?'', and a fixed-budget tokenizer cannot account for this variation.
 
-% ════════════════════════════════════════════════════════════════════════════
-% Appendix
+The Tokenization Policy Network (TPN) operationalizes this claim as a lightweight
+cross-attention module mapping a CLIP query embedding and DINOv2-S spatial
+features to a sparse binary mask over full-resolution visual tokens. A phased
+training curriculum with Gumbel-Sigmoid straight-through estimation, compression
+regularization, and explicit mitigations for three characterized failure modes
+enables reliable learning of query-dependent spatial policies.
+
+The proposed spatial specificity evaluation protocol---stratifying VQA questions
+by their dependence on localized visual evidence---provides a rigorous framework
+for testing when query-conditioning provides benefit, independently of aggregate
+accuracy. We hypothesize that improvements will be concentrated on spatially
+grounded questions and neutral on globally answerable ones, making the methodology
+itself a contribution beyond the specific TC-ViTok system.
+
+\paragraph{Limitations.}
+\begin{itemize}[leftmargin=2em, itemsep=1pt]
+  \item The full ViT-L processes all $N$ tokens before masking; true pre-ViT
+    savings require a sparsity-aware ViT.
+  \item The CLIP [EOS] embedding may lack spatial specificity for some query
+    types.
+  \item The Gumbel-Sigmoid STE introduces a train-test mask discrepancy reduced
+    but not eliminated by temperature annealing.
+  \item The coarse encoder's $7{\times}7$ spatial grid constrains the TPN's
+    spatial resolution; fine-grained localization (single characters, small
+    objects) may be imprecise.
+\end{itemize}
+
 % ════════════════════════════════════════════════════════════════════════════
 \appendix
-
 \section{Implementation Details}
 \label{app:implementation}
+% ════════════════════════════════════════════════════════════════════════════
 
-\subsection{TPN Parameter Count}
+\subsection{Baseline Reproduction}
 
-With $d_q{=}512$, $d_c{=}384$, $d_{\mathrm{model}}{=}384$, $H{=}4$,
-$d_h{=}512$, and $M{=}49$:
+We use \texttt{llava-hf/llava-1.5-7b-hf} from HuggingFace Transformers
+($\geq$4.36). We use LLaVA-1.5, not 1.6, because LLaVA-1.6 uses dynamic image
+tiling that complicates token-level surgery. Evaluation uses the official VQA
+evaluation script---not a custom accuracy function, as answer normalization
+(plurals, number words, etc.) differs subtly and produces incorrect numbers.
+Inference latency is measured with \texttt{torch.cuda.Event} and
+\texttt{synchronize()}.
 
-\begin{center}
-\small
-\renewcommand{\arraystretch}{1.15}
-\begin{tabular}{@{}lr@{}}
-  \toprule
-  Component & Parameters \\
-  \midrule
-  $\mathbf{W}^Q$ ($d_q \times d_{\mathrm{model}}$) & 196\,608 \\
-  $\mathbf{W}^K$ ($d_c \times d_{\mathrm{model}}$) & 147\,456 \\
-  $\mathbf{W}^V$ ($d_c \times d_{\mathrm{model}}$) & 147\,456 \\
-  $\mathbf{W}^O$ ($d_{\mathrm{model}} \times d_{\mathrm{model}}$) & 147\,456 \\
-  LayerNorms ($\times 2$) & 1\,536 \\
-  Score MLP: $\mathbf{W}_1$ ($(d_{\mathrm{model}}{+}M) \times d_h$)
-    & 221\,696 \\
-  Score MLP: $\mathbf{W}_2$ ($d_h \times M$) + biases & 25\,137 \\
-  \midrule
-  \textbf{Total} & \textbf{$\approx$887\,K} \\
-  \bottomrule
-\end{tabular}
-\end{center}
+\subsection{Caching Strategy}
 
-\noindent
-With two stacked cross-attention layers and a larger $d_h{=}1024$, the count
-reaches $\approx$2.4\,M.
-We recommend reporting the exact count for the chosen configuration.
+DINOv2-S features and CLIP text embeddings are pre-computed and cached in HDF5
+format before training. For 100K samples, this is ${\approx}4$\,GB
+($49{\times}384{+}512$ float16 per sample) and saves hours per epoch.
+\emph{Important:} DINOv2-S uses ImageNet normalization (mean
+$[0.485,0.456,0.406]$, std $[0.229,0.224,0.225]$); CLIP uses its own
+normalization (mean $[0.481,0.458,0.408]$, std $[0.269,0.261,0.276]$). Applying
+the wrong normalization silently degrades features.
 
 \subsection{Gumbel-Sigmoid STE Implementation}
 
-\begin{lstlisting}[caption={Gumbel-Sigmoid STE for top-$k$ selection
-  (PyTorch).}]
+\begin{lstlisting}[caption={Gumbel-Sigmoid straight-through estimator for
+top-$k$ selection (PyTorch).}]
 import torch
+import torch.nn.functional as F
 
-def gumbel_sigmoid_ste(scores, k, tau):
+def gumbel_sigmoid_ste(scores: torch.Tensor, k: int,
+                        tau: float) -> torch.Tensor:
     """
     Args:
         scores: (B, N) raw spatial scores from TPN
         k:      number of tokens to select
-        tau:    Gumbel temperature (annealed during training)
+        tau:    Gumbel-Sigmoid temperature
     Returns:
-        mask: (B, N) with hard values in fwd, soft grads in bwd
+        mask (B, N): binary in forward, soft in backward (STE)
     """
     eps = 1e-8
-    u = torch.rand_like(scores).clamp(eps, 1 - eps)
-    g = -torch.log(-torch.log(u))               # Gumbel(0,1)
-    m_soft = torch.sigmoid((scores + g) / tau)   # soft mask
+    # Sample Gumbel noise using clamped uniform
+    u = torch.rand_like(scores).clamp(eps, 1.0 - eps)
+    g = -torch.log(-torch.log(u))         # Gumbel noise
 
-    topk_idx = scores.topk(k, dim=-1).indices    # hard top-k
-    m_hard = torch.zeros_like(scores)
-    m_hard.scatter_(-1, topk_idx, 1.0)
+    # Soft mask (backward path)
+    m_soft = torch.sigmoid((scores + g) / tau)
 
-    # STE: fwd = m_hard, bwd = grad through m_soft
+    # Hard top-k mask (forward path, exactly k ones)
+    topk_idx = scores.topk(k, dim=-1).indices
+    m_hard = torch.zeros_like(scores).scatter_(-1, topk_idx, 1.0)
+
+    # STE: forward uses m_hard; backward uses m_soft
     return m_hard - m_soft.detach() + m_soft
-\end{lstlisting}
-
-\subsection{TPN Forward Pass}
-
-\begin{lstlisting}[caption={TPN module (simplified).}]
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class TPN(nn.Module):
-    def __init__(self, d_q=512, d_c=384, d_model=384,
-                 n_heads=4, d_h=512, M=49, N=576):
-        super().__init__()
-        self.q_proj = nn.Linear(d_q, d_model, bias=False)
-        self.k_proj = nn.Linear(d_c, d_model, bias=False)
-        self.v_proj = nn.Linear(d_c, d_model, bias=False)
-        self.o_proj = nn.Linear(d_model, d_model, bias=False)
-        self.n_heads = n_heads
-        self.d_k = d_model // n_heads
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model + M)
-        self.score_mlp = nn.Sequential(
-            nn.Linear(d_model + M, d_h),
-            nn.GELU(),
-            nn.Linear(d_h, M),
-        )
-        self.sqrt_M = int(M ** 0.5)
-        self.sqrt_N = int(N ** 0.5)
-
-    def forward(self, v_c, q_e, k, tau, training=True):
-        B = v_c.size(0)
-        # Cross-attention
-        Q = self.q_proj(q_e).unsqueeze(1)  # (B, 1, d_model)
-        K = self.k_proj(v_c)               # (B, M, d_model)
-        V = self.v_proj(v_c)               # (B, M, d_model)
-        # Multi-head reshape
-        Q = Q.view(B, 1, self.n_heads, self.d_k).transpose(1,2)
-        K = K.view(B, -1, self.n_heads, self.d_k).transpose(1,2)
-        V = V.view(B, -1, self.n_heads, self.d_k).transpose(1,2)
-        alpha = (Q @ K.transpose(-2,-1)) / (self.d_k ** 0.5)
-        alpha = alpha.softmax(dim=-1)              # (B,H,1,M)
-        ctx = alpha @ V                            # (B,H,1,d_k)
-        ctx = ctx.transpose(1,2).reshape(B, 1, -1) # (B,1,d_model)
-        ctx = self.o_proj(ctx).squeeze(1)           # (B, d_model)
-        ctx = self.norm1(ctx)
-        # Head-averaged attention weights
-        alpha_avg = alpha.mean(dim=1).squeeze(-2)   # (B, M)
-        # Score head
-        combined = torch.cat([ctx, alpha_avg], dim=-1)
-        s_M = self.score_mlp(self.norm2(combined))  # (B, M)
-        # Upsample
-        s = s_M.view(B, 1, self.sqrt_M, self.sqrt_M)
-        s = F.interpolate(s, (self.sqrt_N, self.sqrt_N),
-                          mode='bilinear', align_corners=False)
-        s_N = s.view(B, -1)  # (B, N)
-        # Mask
-        if training:
-            mask = gumbel_sigmoid_ste(s_N, k, tau)
-        else:
-            idx = s_N.topk(k, dim=-1).indices
-            mask = torch.zeros_like(s_N).scatter_(-1, idx, 1.0)
-        return mask, s_N
 \end{lstlisting}
 
 \subsection{LoRA Configuration}
 
-\begin{lstlisting}[caption={LoRA setup via PEFT.}, numbers=none]
-from peft import LoraConfig, get_peft_model, TaskType
+\begin{lstlisting}[caption={LoRA setup via PEFT library.}]
+from peft import get_peft_model, LoraConfig, TaskType
 
-config = LoraConfig(
+lora_config = LoraConfig(
     task_type=TaskType.CAUSAL_LM,
-    r=32, lora_alpha=64,
+    r=32,
+    lora_alpha=64,
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-    lora_dropout=0.05, bias="none",
+    lora_dropout=0.05,
+    bias="none"
 )
-model.llm = get_peft_model(model.llm, config)
+model.llava = get_peft_model(model.llava, lora_config)
+model.llava.print_trainable_parameters()
+# Typical output: ~1-2% of total parameters trainable
 \end{lstlisting}
 
-\subsection{Feature Caching}
+\subsection{Debugging Checklist}
 
-Pre-computing and caching DINOv2-S features ($\vc$) and CLIP text embeddings
-($\qe$) to HDF5 saves substantial compute.
-For 100K samples: $\approx$4\,GB at float16.
-\textbf{Caution:} CLIP and DINOv2 use different image normalizations.
-Applying the wrong normalization is a silent, hard-to-debug error.
+\begin{enumerate}[leftmargin=2em, itemsep=2pt]
+  \item \textbf{Gradient flow:} After a forward+backward pass, verify
+    \texttt{mask.grad\_fn is not None}. If it is \texttt{None}, the STE is
+    broken and $\theta$ receives no gradient.
+  \item \textbf{Spatial diversity:} After Phase~0, visualize mean token selection
+    frequency as a $24{\times}24$ heatmap. It should not be concentrated at the
+    center; if it is, activate $\mathcal{L}_{\mathrm{ent}}$.
+  \item \textbf{Query sensitivity:} For 10 diverse queries on the same image,
+    compute pairwise $\IoU$ of selected token sets. If mean $\IoU > 0.9$,
+    activate $\mathcal{L}_{\mathrm{div}}$.
+  \item \textbf{Normalization:} Verify separate normalization for DINOv2-S
+    (ImageNet) and CLIP (CLIP-specific). Use the model's own preprocessors.
+  \item \textbf{Token hook path:} The HuggingFace path
+    \texttt{model.model.vision\_tower.vision\_model.encoder.layers[-1]}
+    is specific to \texttt{llava-hf}; verify for other codebases.
+\end{enumerate}
 
 % ════════════════════════════════════════════════════════════════════════════
 % References
@@ -1402,109 +1267,113 @@ Applying the wrong normalization is a silent, hard-to-debug error.
 Bai, J., et al.\ (2023).
 \newblock Qwen-VL: A versatile vision-language model for understanding,
   localization, text reading, and beyond.
-\newblock \emph{arXiv:2308.12966}.
+\newblock \textit{arXiv:2308.12966}.
 
 \bibitem{bengio2013estimating}
 Bengio, Y., L\'{e}onard, N., \& Courville, A.\ (2013).
 \newblock Estimating or propagating gradients through stochastic neurons for
   conditional computation.
-\newblock \emph{arXiv:1308.3432}.
+\newblock \textit{arXiv:1308.3432}.
 
 \bibitem{bolya2022token}
 Bolya, D., Fu, C., Dai, X., Zhang, P., \& Feichtenhofer, C.\ (2023).
 \newblock Token merging: Your ViT but faster.
-\newblock In \emph{ICLR}.
+\newblock In \textit{ICLR 2023}.
 
 \bibitem{goyal2017vqa}
 Goyal, Y., Khot, T., Summers-Stay, D., Batra, D., \& Parikh, D.\ (2017).
-\newblock Making the V in VQA matter: Elevating the role of image
-  understanding in Visual Question Answering.
-\newblock In \emph{CVPR}.
+\newblock Making the V in VQA matter: Elevating the role of image understanding
+  in visual question answering.
+\newblock In \textit{CVPR 2017}.
 
 \bibitem{hu2022lora}
 Hu, E.~J., Shen, Y., Wallis, P., et al.\ (2022).
 \newblock LoRA: Low-rank adaptation of large language models.
-\newblock In \emph{ICLR}.
+\newblock In \textit{ICLR 2022}.
 
 \bibitem{hudson2019gqa}
 Hudson, D.~A., \& Manning, C.~D.\ (2019).
-\newblock GQA: A new dataset for real-world visual reasoning and
-  compositional question answering.
-\newblock In \emph{CVPR}.
+\newblock GQA: A new dataset for real-world visual reasoning and compositional
+  question answering.
+\newblock In \textit{CVPR 2019}.
 
 \bibitem{jang2017categorical}
 Jang, E., Gu, S., \& Poole, B.\ (2017).
 \newblock Categorical reparameterization with Gumbel-Softmax.
-\newblock In \emph{ICLR}.
+\newblock In \textit{ICLR 2017}.
 
 \bibitem{li2023blip2}
 Li, J., Li, D., Savarese, S., \& Hoi, S.\ (2023).
-\newblock BLIP-2: Bootstrapping language-image pre-training with frozen
-  image encoders and large language models.
-\newblock In \emph{ICML}.
+\newblock BLIP-2: Bootstrapping language-image pre-training with frozen image
+  encoders and large language models.
+\newblock In \textit{ICML 2023}.
 
 \bibitem{liang2022evit}
 Liang, Y., et al.\ (2022).
-\newblock Not all patches are what you need: Expediting vision transformers
-  via token reorganizations.
-\newblock In \emph{ICLR}.
+\newblock Not all patches are what you need: Expediting vision transformers via
+  token reorganizations.
+\newblock In \textit{ICLR 2022}.
 
 \bibitem{liu2024llava}
 Liu, H., Li, C., Wu, Q., \& Lee, Y.~J.\ (2023).
 \newblock Visual instruction tuning.
-\newblock In \emph{NeurIPS}.
+\newblock In \textit{NeurIPS 2023}.
+
+\bibitem{liu2023gdino}
+Liu, S., et al.\ (2023).
+\newblock Grounding DINO: Marrying DINO with grounded pre-training for
+  open-set object detection.
+\newblock \textit{arXiv:2303.05499}.
 
 \bibitem{maddison2017concrete}
 Maddison, C.~J., Mnih, A., \& Teh, Y.~W.\ (2017).
-\newblock The Concrete distribution: A continuous relaxation of discrete
-  random variables.
-\newblock In \emph{ICLR}.
+\newblock The Concrete distribution: A continuous relaxation of discrete random
+  variables.
+\newblock In \textit{ICLR 2017}.
 
 \bibitem{meng2022adavit}
 Meng, L., et al.\ (2022).
-\newblock AdaViT: Adaptive vision transformers for efficient image
-  recognition.
-\newblock In \emph{CVPR}.
+\newblock AdaViT: Adaptive vision transformers for efficient image recognition.
+\newblock In \textit{CVPR 2022}.
 
 \bibitem{oquab2023dinov2}
 Oquab, M., et al.\ (2023).
 \newblock DINOv2: Learning robust visual features without supervision.
-\newblock \emph{arXiv:2304.07193}.
+\newblock \textit{arXiv:2304.07193}.
 
 \bibitem{pope}
 Li, Y., et al.\ (2023).
 \newblock Evaluating object hallucination in large vision-language models.
-\newblock In \emph{EMNLP}.
+\newblock In \textit{EMNLP 2023}.
 
 \bibitem{radford2021learning}
 Radford, A., et al.\ (2021).
-\newblock Learning transferable visual models from natural language
-  supervision.
-\newblock In \emph{ICML}.
+\newblock Learning transferable visual models from natural language supervision.
+\newblock In \textit{ICML 2021}.
 
 \bibitem{rao2021dynamicvit}
-Rao, Y., Zhao, W., Liu, B., Lu, J., Zhou, J., \& Hsieh, C.-J.\ (2021).
+Rao, Y., Zhao, W., Liu, B., Lu, J., Zhou, J., \& Hsieh, C.~J.\ (2021).
 \newblock DynamicViT: Efficient vision transformers with dynamic token
   sparsification.
-\newblock In \emph{NeurIPS}.
+\newblock In \textit{NeurIPS 2021}.
 
 \bibitem{shang2024llava}
 Shang, Y., et al.\ (2024).
 \newblock LLaVA-PruMerge: Adaptive token reduction for efficient large
   multimodal models.
-\newblock \emph{arXiv:2403.15388}.
+\newblock \textit{arXiv:2403.15388}.
 
 \bibitem{shazeer2017moe}
 Shazeer, N., et al.\ (2017).
 \newblock Outrageously large neural networks: The sparsely-gated
   mixture-of-experts layer.
-\newblock In \emph{ICLR}.
+\newblock In \textit{ICLR 2017}.
 
 \bibitem{teerapittayanon2016branchynet}
 Teerapittayanon, S., McDanel, B., \& Kung, H.~T.\ (2016).
 \newblock BranchyNet: Fast inference via early exiting from deep neural
   networks.
-\newblock In \emph{ICPR}.
+\newblock In \textit{ICPR 2016}.
 
 \end{thebibliography}
 

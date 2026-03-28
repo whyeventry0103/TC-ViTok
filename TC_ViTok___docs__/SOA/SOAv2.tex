@@ -1,0 +1,388 @@
+\documentclass[11pt,twocolumn]{article}
+
+% -------------------------------------------------------
+% PACKAGES
+% -------------------------------------------------------
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{abstract}
+\usepackage{fancyhdr}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{times}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{array}
+\usepackage{parskip}
+
+% -------------------------------------------------------
+% PAGE STYLE
+% -------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\small CS437/CS5317/EE414/EE513 --- Deep Learning, Spring 2026}
+\lhead{\small SOA Survey}
+\rfoot{\small \thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% -------------------------------------------------------
+% TITLE FORMATTING
+% -------------------------------------------------------
+\titleformat{\section}
+  {\large\bfseries}{\thesection.}{0.5em}{}[\titlerule]
+\titleformat{\subsection}
+  {\normalsize\bfseries}{\thesubsection.}{0.5em}{}
+
+% -------------------------------------------------------
+% ABSTRACT FORMATTING
+% -------------------------------------------------------
+\renewcommand{\abstractnamefont}{\normalfont\bfseries}
+\renewcommand{\abstracttextfont}{\normalfont\small}
+\setlength{\absleftindent}{0pt}
+\setlength{\absrightindent}{0pt}
+
+% -------------------------------------------------------
+% HYPERLINK STYLING
+% -------------------------------------------------------
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    urlcolor=blue
+}
+
+% Paper-name links that keep text color unchanged
+\newcommand{\paperhref}[2]{\href{#1}{\textcolor{black}{#2}}}
+
+% -------------------------------------------------------
+% TITLE BLOCK
+% -------------------------------------------------------
+\title{
+    \vspace{-1cm}
+    {\large \textbf{SOA Survey}} \\[0.3em]
+    {\LARGE Query-Conditioned Visual Token Selection\\for Efficient Vision-Language Reasoning} \\[0.5em]
+    {\normalsize CS437/CS5317/EE414/EE513 --- Deep Learning, Spring 2026}
+}
+
+\author{
+    Muhammad Ali Shah (27100172) \quad Talha Hassan Ul Haq (27100306)
+}
+
+\date{}
+
+% -------------------------------------------------------
+\begin{document}
+
+\maketitle
+\thispagestyle{fancy}
+
+% -------------------------------------------------------
+\begin{abstract}
+Modern vision-language models (VLMs) encode every image into a fixed number of visual tokens regardless of the user's question, wasting computation on spatially irrelevant regions. This survey reviews 12 papers spanning visual token compression, conditional feature extraction, and discrete optimization in neural networks, organized around three core challenges: reducing token redundancy without losing task-critical information, incorporating task or query signals into the compression decision, and training discrete token-selection policies end-to-end. We find that the vast majority of compression methods remain query-agnostic---the decision of which tokens to keep is driven entirely by image content---and that the few recent query-aware approaches operate within the LLM's attention layers rather than before token injection. This leaves a gap at the \emph{pre-LLM} stage: conditioning the initial token-selection decision on the user's natural-language query via a lightweight external module. We propose to investigate a task-conditioned visual tokenizer (TC-ViTok) that maps a CLIP text embedding and coarse DINOv2 spatial features to a sparse binary mask over full-resolution visual tokens, trained end-to-end with a Gumbel-Sigmoid straight-through estimator. We hypothesize that query-conditioning yields selective gains concentrated on spatially-grounded questions, the precise regime where fixed-budget tokenization is most wasteful.
+\end{abstract}
+
+% -------------------------------------------------------
+\section{Problem Definition}
+\label{sec:problem}
+
+Vision-language models (VLMs) such as \paperhref{https://arxiv.org/abs/2304.08485}{LLaVA-1.5}~\cite{liu2024llava} encode an input image into a fixed-length sequence of visual tokens---typically 576 patches from a 336$\times$336 image with a 14$\times$14 patch size---which are concatenated with text tokens and processed by a causal language model. Because visual tokens dominate the context (contributing roughly 95\% of prefill attention cost for a typical 30-token query), the computational burden scales quadratically in the visual token count, creating a severe efficiency bottleneck.
+
+The core problem is that the visual token budget is determined by image resolution, not by the question being asked. A query requiring fine-grained spatial reading (``What is written on the sign?'') and one requiring only coarse scene understanding (``Is there a cat?'') receive identical 576-token representations. This mismatch between task complexity and visual bandwidth is both computationally wasteful and, as recent work suggests in \paperhref{https://arxiv.org/abs/2410.04417}{FastV}~\cite{chen2024fastv}, informationally redundant: attention from text tokens to visual tokens drops sharply after the first few LLM layers, indicating that many visual tokens contribute little to downstream reasoning.
+
+What makes this problem hard from a deep learning standpoint is the discreteness of the selection decision. Choosing a subset of $k$ tokens from $N$ candidates is a combinatorial operation with zero gradients almost everywhere, precluding standard backpropagation. Coupling this discrete selection with the need for it to be \emph{conditioned} on a variable-length natural-language query adds a cross-modal alignment challenge atop the optimization difficulty. Efficient, query-aware visual tokenization thus sits at the intersection of sparse discrete optimization, cross-modal representation learning, and efficient transformer inference.
+
+% -------------------------------------------------------
+\section{Literature Review}
+\label{sec:litreview}
+
+\subsection{Challenge 1: Reducing Visual Token Redundancy}
+
+The observation that images contain far more spatial redundancy than text has motivated a large family of token compression methods. These can be divided by where compression occurs.
+
+\emph{Within-ViT methods} reduce tokens during the vision encoder's forward pass. \paperhref{https://arxiv.org/abs/2210.09461}{Token Merging (ToMe)}~\cite{bolya2022token} applies bipartite soft matching to merge visually similar tokens at each ViT layer, achieving 2$\times$ throughput gains with modest accuracy drops on ImageNet classification. \paperhref{https://arxiv.org/abs/2106.02034}{DynamicViT}~\cite{rao2021dynamicvit} learns binary token-dropping masks via a lightweight prediction module inserted at intermediate ViT layers, trained with a distillation loss from the full-token model. \paperhref{https://arxiv.org/abs/2202.07800}{EViT}~\cite{liang2022evit} uses CLS-token attention scores to identify ``attentive'' tokens and fuses the rest into a single representative token per layer. All three methods are purely image-driven: the compression criterion depends only on visual content, with no external task signal.
+
+\emph{Post-ViT methods} apply compression after the vision encoder but before or during the LLM. \paperhref{https://arxiv.org/abs/2403.15388}{LLaVA-PruMerge}~\cite{shang2024llava} ranks tokens by their attention weight relative to the CLS token and prunes those below a threshold, then merges pruned tokens with their nearest retained neighbors via weighted averaging. \paperhref{https://arxiv.org/abs/2410.04417}{FastV}~\cite{chen2024fastv} observes that text-to-visual attention drops sharply after layer~2 of the LLM and exploits this by pruning low-attention visual tokens after an early LLM layer. \paperhref{https://arxiv.org/abs/2504.00654}{SparseVLM}~\cite{zhang2025sparsevlm} selects text-relevant visual tokens using the self-attention matrix extracted from the VLM itself, with a rank-based adaptive sparsification ratio per layer and a recycling mechanism that compresses pruned tokens into compact representations.
+
+A consistent finding across this category is that aggressive compression (retaining only 25\% of tokens) can preserve 95--97\% of baseline accuracy on standard benchmarks, confirming the high redundancy of visual representations. However, performance degrades non-uniformly across tasks: localization and OCR-dependent questions suffer disproportionately~\cite{chen2024fastv}, suggesting that content-agnostic compression systematically discards tokens critical for spatially-grounded reasoning.
+
+\subsection{Challenge 2: Incorporating Query or Task Signals into Compression}
+
+A fundamental limitation of the methods above is that the compression decision is made without knowledge of the downstream task. The same token subset is selected whether the user asks about a small text region or the overall scene.
+
+\paperhref{https://arxiv.org/abs/2301.12597}{BLIP-2}'s Q-Former~\cite{li2023blip2} represents an early form of conditional visual tokenization: a set of learned query embeddings extract a fixed number of visual tokens via cross-attention with the vision encoder. However, the queries are \emph{learned parameters} shared across all inputs---they capture a general visual summarization strategy, not a response to a specific user question. The output is a dense bottleneck, not a sparse selection mask.
+
+More recently, \paperhref{https://arxiv.org/abs/2504.00654}{SparseVLM}~\cite{zhang2025sparsevlm} incorporates text guidance by using text-token attention within the LLM to rate visual token importance. This is implicitly query-aware since different text prompts produce different attention distributions. However, the compression happens \emph{inside} the LLM at intermediate layers, meaning visual tokens have already been projected and injected into the language model context before any pruning occurs. The full computational cost of processing all visual tokens through the projector and early LLM layers is still incurred.
+
+\paperhref{https://arxiv.org/abs/2401.08681}{FocusLLaVA}~\cite{zhu2024focusllava} takes a two-stage approach: a vision-guided module performs initial coarse compression, followed by a text-guided selector embedded in the LLM that refines the token set based on the instruction. Like SparseVLM, the text-guided stage operates within the LLM rather than before token injection.
+
+The most directly relevant concurrent work is \paperhref{https://doi.org/10.1016/j.neucom.2025.127012}{QG-VTC}~\cite{li2025qgvtc}, which embeds the user's question into the vision encoder's feature space via a pretrained text encoder and learnable feed-forward layer, then computes correlation scores between question embeddings and visual tokens to guide progressive compression \emph{within} the vision encoder itself. QG-VTC achieves near-uncompressed performance with only 1/8 of visual tokens. However, it modifies the internal forward pass of the vision encoder by inserting compression modules at intermediate layers, coupling the compression mechanism tightly to the encoder architecture. This makes it less modular: changing the vision encoder requires redesigning the compression insertion points.
+
+The pattern that emerges is that query-awareness is increasingly recognized as important, but existing approaches either operate inside the LLM (missing early-stage savings) or inside the vision encoder (sacrificing modularity). No existing method, to our knowledge, implements query-conditioned token selection as a \emph{separate, lightweight module} that operates on pre-computed features from frozen encoders and produces a binary mask \emph{before} tokens enter the LLM.
+
+\subsection{Challenge 3: Training Discrete Selection Policies End-to-End}
+
+Selecting a subset of $k$ tokens from $N$ is a discrete, non-differentiable operation. The top-$k$ operator has zero gradients almost everywhere, blocking learning signals from the downstream task loss to the selection parameters.
+
+The \paperhref{https://arxiv.org/abs/1611.01144}{Gumbel-Softmax} trick~\cite{jang2017categorical, maddison2017concrete} enables gradient estimation through categorical random variables by replacing discrete sampling with a continuous relaxation controlled by a temperature parameter. However, Gumbel-Softmax produces a distribution over $N$ options summing to 1 (selecting one item), which is inappropriate for subset selection. The Gumbel-Sigmoid variant treats each token's inclusion as an independent Bernoulli decision, allowing multiple tokens to be selected simultaneously.
+
+The \paperhref{https://arxiv.org/abs/1308.3432}{straight-through estimator (STE)}~\cite{bengio2013estimating} provides an alternative: use the hard (discrete) mask in the forward pass for exact binary selection, but route gradients through the soft (continuous) relaxation in the backward pass. The STE is biased because the forward and backward computations differ, but achieves low variance compared to REINFORCE-style estimators, which is critical when the number of binary decisions is large (e.g., $N = 576$).
+
+\paperhref{https://openaccess.thecvf.com/content/CVPR2022/papers/Meng_AdaViT_Adaptive_Vision_Transformers_for_Efficient_Image_Recognition_CVPR_2022_paper.pdf}{AdaViT}~\cite{meng2022adavit} applies related ideas to learn per-sample computation budgets for vision transformers, halting processing at different depths for different inputs. \paperhref{https://arxiv.org/abs/2106.02034}{DynamicViT}~\cite{rao2021dynamicvit} uses a Gumbel-Softmax-based predictor with a distillation loss. A recurring finding is that temperature annealing---starting with soft, gradient-rich masks and progressively sharpening toward binary---is essential for stable training. Without annealing, training either collapses to degenerate solutions (all tokens selected or a fixed pattern) or oscillates without convergence.
+
+The \paperhref{https://openreview.net/forum?id=7k8OtrGxBs}{MARC framework}~\cite{wang2026marc} (ICLR 2026) applies reinforcement learning for memory-augmented token compression in video understanding, demonstrating that RL-based discrete optimization can outperform relaxation-based methods in temporal settings. However, RL introduces high variance and sample complexity that may be unnecessary for the simpler spatial-selection problem in single-image VQA.
+
+\bigskip
+
+\textbf{Open Problems (flagged by the field):}
+\begin{itemize}[leftmargin=*, itemsep=2pt]
+      \item Localization and OCR performance degrades disproportionately under compression, and no current method adequately addresses this task-dependent sensitivity (flagged by \paperhref{https://arxiv.org/abs/2410.04417}{FastV}~\cite{chen2024fastv} and \paperhref{https://arxiv.org/abs/2502.06789}{FEATHER}~\cite{endo2025feather}).
+      \item Query-aware compression methods that operate \emph{before} token injection into the LLM remain unexplored; all current approaches incur early-layer LLM costs (flagged by \paperhref{https://doi.org/10.1016/j.neucom.2025.127012}{QG-VTC}~\cite{li2025qgvtc} and \paperhref{https://arxiv.org/abs/2504.00654}{SparseVLM}~\cite{zhang2025sparsevlm}).
+    \item Adaptive token budgets---learning \emph{how many} tokens to keep rather than fixing $k$---are identified as a promising direction by multiple papers~\cite{meng2022adavit, chen2024fastv} but remain unaddressed in the VLM setting.
+    \item The interaction between token compression and hallucination is poorly understood; compression may exacerbate object hallucination by removing grounding evidence (flagged by POPE evaluation in~\cite{shang2024llava}).
+\end{itemize}
+
+% -------------------------------------------------------
+\section{Research Gap and Proposed Direction}
+\label{sec:gap}
+
+The literature review reveals a clear structural gap. Query-agnostic compression methods (\paperhref{https://arxiv.org/abs/2210.09461}{ToMe}, \paperhref{https://arxiv.org/abs/2106.02034}{DynamicViT}, \paperhref{https://arxiv.org/abs/2403.15388}{LLaVA-PruMerge}, \paperhref{https://arxiv.org/abs/2410.04417}{FastV}) treat all questions identically, systematically under-serving spatially-grounded queries. The emerging query-aware approaches (\paperhref{https://arxiv.org/abs/2504.00654}{SparseVLM}, \paperhref{https://arxiv.org/abs/2401.08681}{FocusLLaVA}, \paperhref{https://doi.org/10.1016/j.neucom.2025.127012}{QG-VTC}) address this in principle but implement the query signal either \emph{inside} the LLM (losing early-stage compute savings) or \emph{inside} the vision encoder (sacrificing modularity and requiring architecture-specific insertion). No existing method provides a modular, pre-LLM query-conditioned selection module that works with frozen, off-the-shelf encoders.
+
+This gap is significant for two reasons. First, the LLM's prefill cost dominates inference latency, so savings must occur before or at the point of token injection to be maximally effective. Second, modularity matters: a method that requires modifying the vision encoder's internal forward pass cannot be trivially transferred across the rapidly evolving landscape of VLM architectures (LLaVA, Qwen-VL, InternVL, etc.).
+
+We also note a secondary gap in evaluation: existing compression methods are evaluated on aggregate benchmark scores, but the task-dependent nature of compression harm (concentrated on spatial and OCR questions) is rarely quantified explicitly. GQA's structured annotations provide the tools for this stratification, yet no prior compression work uses them.
+
+\paragraph{Contribution Statement:}
+Prior work on visual token compression in VLMs either ignores the user's query entirely or incorporates query signals within the LLM or vision encoder, forfeiting modularity or early-stage savings. We propose to investigate TC-ViTok, a lightweight, modular cross-attention module that maps a CLIP text embedding and coarse DINOv2 spatial features to a binary token-selection mask applied \emph{before} the LLM, trained end-to-end via Gumbel-Sigmoid STE.
+
+\paragraph{Research Question (formal):}
+Does conditioning the visual token selection decision on the user's natural-language query, via a modular pre-LLM policy network, yield statistically significant accuracy improvements on spatially-grounded VQA questions compared to query-agnostic selection at the same token budget, while maintaining comparable performance on globally-answerable questions?
+
+% -------------------------------------------------------
+\section{Benchmark, Evaluation, and Data Landscape}
+\label{sec:benchmarks}
+
+\paragraph{Datasets.}
+
+\begin{table}[h]
+\caption{Key datasets in the field.}
+\label{tab:datasets}
+\vskip 0.1in
+\begin{center}
+\begin{small}
+\begin{tabular}{p{1.5cm} p{1.2cm} p{1.3cm} p{2.2cm}}
+\toprule
+\textbf{Dataset} & \textbf{Size} & \textbf{Modality} 
+& \textbf{Notes} \\
+\midrule
+VQAv2 & 1.1M QA, 214K img & RGB Images & Primary VQA benchmark; multiple Qs per image enables paired sampling \\
+GQA & 1M QA & RGB Images & Compositional; has spatial-relation annotations for stratification \\
+TextVQA & 45K QA & RGB+OCR & Tests fine-grained text reading; requires spatial precision \\
+POPE & 3K & RGB Images & Binary adversarial; hallucination eval; public \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{center}
+\end{table}
+
+All four datasets are publicly available without access restrictions. VQAv2 and GQA are the workhorses of the field; TextVQA provides a stress test for spatial allocation to small text regions. POPE specifically targets hallucination, relevant because compression may remove grounding tokens.
+
+\paragraph{Evaluation Protocol.}
+The standard metrics are VQA-Score (soft accuracy with 10-answer consensus) for VQAv2, exact-match accuracy on GQA's balanced test split, TextVQA accuracy, and F1 for POPE. These metrics are appropriate because they directly measure answer correctness under VLM-style open-ended or binary QA protocols. For our spatial-specificity analysis, we additionally stratify GQA accuracy into spatial and global subsets using GQA's semantic annotations (the \texttt{relation.spatial} field), providing a controlled test of the query-conditioning hypothesis.
+
+\paragraph{Compute Context.}
+The surveyed papers predominantly use 4--8 NVIDIA A100 (40/80GB) GPUs for training. LLaVA-1.5-7B fine-tuning with LoRA on VQAv2 takes approximately 8--12 hours on 4$\times$A100s. Our proposed method adds minimal overhead (an 887K-parameter TPN plus a frozen 22M-parameter DINOv2-S), and the phased training protocol (4 epochs total) is designed to fit within a single-semester compute budget on 2--4 A100 GPUs.
+
+% -------------------------------------------------------
+\section*{Experimental Design Considerations}
+\label{sec:expdesign}
+
+\textbf{Baselines.} A meaningful contribution requires outperforming the following at the same token budget ($k = 144$, a 4$\times$ compression from $N = 576$): (1)~Random token drop (lower bound), (2)~ToMe~\cite{bolya2022token} (representative within-ViT query-agnostic method), (3)~FastV~\cite{chen2024fastv} (representative post-ViT query-agnostic method), and (4)~an image-only TPN ablation (identical architecture but without query input, isolating the value of query-conditioning). The full LLaVA-1.5 at 576 tokens serves as the upper bound. Comparing against QG-VTC~\cite{li2025qgvtc} would be ideal but may require reimplementation given recency.
+
+\textbf{Ablations.} The key variables to isolate are: (a)~query-conditioning (full TC-ViTok vs.\ image-only TPN), which directly tests the central hypothesis; (b)~token budget $k \in \{72, 144, 216, 288\}$, which maps out the accuracy-efficiency Pareto frontier; (c)~Phase-0 warm-up (with vs.\ without), testing whether the cold-start mitigation is necessary; (d)~temperature annealing (annealed vs.\ fixed $\tau = 1.0$), testing the training strategy; and (e)~coarse encoder choice (DINOv2-S vs.\ CLIP-B/32 for spatial features), testing the architectural assumption that self-supervised features are better spatial guides.
+
+\textbf{Evaluation pitfalls.} Several field-specific traps warrant caution. First, \emph{metric gaming through language priors}: VLMs can answer many VQA questions from text alone, so accuracy improvements may reflect better exploitation of language biases rather than better visual selection. The image-only TPN ablation and the spatial/global stratification specifically guard against this. Second, \emph{data leakage}: VQAv2's training and validation sets share images (with different questions); care is needed to evaluate on the held-out test-dev split. Third, \emph{latency measurement}: FLOPs reduction does not translate linearly to wall-clock speedup due to memory-bound operations and lack of FlashAttention compatibility in methods requiring explicit attention maps~\cite{chen2024fastv}. We should measure actual end-to-end latency at batch size 1 on standardized hardware. Fourth, \emph{spatial classification noise}: keyword-based spatial/global question classification (for VQAv2) is inherently noisy; GQA's structured annotations should be the primary source for hypothesis testing.
+
+% -------------------------------------------------------
+\section{Annotated Reading List}
+\label{sec:readings}
+
+\begin{thebibliography}{99}
+
+\bibitem{liu2024llava}
+H.~Liu, C.~Li, Q.~Wu, and Y.~J.~Lee.
+\newblock \paperhref{https://arxiv.org/abs/2304.08485}{Visual instruction tuning}.
+\newblock \textit{NeurIPS}, 2023.
+\newblock \textit{What it does:} Introduces LLaVA, a VLM that connects a CLIP ViT-L/14 visual encoder to a Vicuna LLM via a simple MLP projection layer, trained with visual instruction tuning.
+\newblock \textit{What it contributes:} Establishes the dominant architectural template (frozen ViT + projection + LLM) that subsequent efficiency work targets.
+\newblock \textit{Why it is here:} LLaVA-1.5-7B is our base VLM backbone; its 576-token fixed budget is the specific inefficiency TC-ViTok addresses.
+
+\bibitem{bolya2022token}
+D.~Bolya, C.~Fu, X.~Dai, P.~Zhang, and C.~Feichtenhofer.
+\newblock \paperhref{https://arxiv.org/abs/2210.09461}{Token merging: Your ViT but faster}.
+\newblock \textit{ICLR}, 2023.
+\newblock \textit{What it does:} Merges visually similar tokens inside the ViT using bipartite soft matching between adjacent sets of tokens at each layer.
+\newblock \textit{What it contributes:} A training-free, architecture-agnostic token reduction method that achieves 2$\times$ throughput with minimal accuracy loss.
+\newblock \textit{Why it is here:} Primary query-agnostic baseline; demonstrates that visual redundancy is high but that content-only similarity is insufficient for task-aware compression.
+
+\bibitem{rao2021dynamicvit}
+Y.~Rao, W.~Zhao, B.~Liu, J.~Lu, J.~Zhou, and C.-J.~Hsieh.
+\newblock \paperhref{https://arxiv.org/abs/2106.02034}{DynamicViT: Efficient vision transformers with dynamic token sparsification}.
+\newblock \textit{NeurIPS}, 2021.
+\newblock \textit{What it does:} Learns binary token-dropping masks at intermediate ViT layers via a lightweight prediction module, trained with a distillation objective.
+\newblock \textit{What it contributes:} Demonstrates end-to-end learnable discrete token selection in ViTs using Gumbel-Softmax; shows content-adaptive pruning outperforms uniform methods.
+\newblock \textit{Why it is here:} Provides architectural precedent for learned token selection and highlights the Gumbel-based training strategy that TC-ViTok adapts to the cross-modal setting.
+
+\bibitem{liang2022evit}
+Y.~Liang et al.
+\newblock \paperhref{https://arxiv.org/abs/2202.07800}{Not all patches are what you need: Expediting vision transformers via token reorganizations}.
+\newblock \textit{ICLR}, 2022.
+\newblock \textit{What it does:} Uses class-token attention to identify informative tokens and reorganizes less informative tokens into fused representations.
+\newblock \textit{What it contributes:} Shows efficient, attention-guided token reduction inside ViTs while retaining strong recognition performance.
+\newblock \textit{Why it is here:} Represents a core within-ViT query-agnostic compression baseline discussed in the literature review.
+
+\bibitem{shang2024llava}
+Y.~Shang et al.
+\newblock \paperhref{https://arxiv.org/abs/2403.15388}{LLaVA-PruMerge: Adaptive token reduction for efficient large multimodal models}.
+\newblock \textit{arXiv:2403.15388}, 2024.
+\newblock \textit{What it does:} Prunes visual tokens by CLS-attention ranking after the ViT, then merges pruned tokens with their nearest retained neighbors via key-similarity weighted averaging.
+\newblock \textit{What it contributes:} Shows that post-ViT pruning can preserve VLM accuracy at high compression ratios; introduces an adaptive threshold instead of a fixed $k$.
+\newblock \textit{Why it is here:} Representative post-ViT query-agnostic method; its CLS-based ranking criterion exemplifies the limitation of using a global image summary rather than a query-specific signal.
+
+\bibitem{chen2024fastv}
+L.~Chen et al.
+\newblock \paperhref{https://arxiv.org/abs/2410.04417}{An image is worth 1/2 tokens after layer 2: Plug-and-play inference acceleration for large vision-language models}.
+\newblock \textit{ECCV}, 2024.
+\newblock \textit{What it does:} Prunes visual tokens after an early LLM layer based on text-to-visual attention scores, exploiting the observation that attention to visual tokens drops near zero after the first few layers.
+\newblock \textit{What it contributes:} Provides empirical evidence that visual tokens are heavily redundant within the LLM and that early-layer attention is a viable pruning signal; achieves 50\% token reduction with negligible accuracy loss.
+\newblock \textit{Why it is here:} Key baseline and motivation paper; its finding that localization tasks degrade disproportionately under pruning directly motivates query-conditioned selection.
+
+\bibitem{li2023blip2}
+J.~Li, D.~Li, S.~Savarese, and S.~Hoi.
+\newblock \paperhref{https://arxiv.org/abs/2301.12597}{BLIP-2: Bootstrapping language-image pre-training with frozen image encoders and large language models}.
+\newblock \textit{ICML}, 2023.
+\newblock \textit{What it does:} Introduces the Q-Former, which uses a fixed set of learned query embeddings to extract visual tokens from the frozen vision encoder via cross-attention.
+\newblock \textit{What it contributes:} Demonstrates that a cross-attention bottleneck can produce compact visual representations (32 tokens) without fine-tuning the vision encoder.
+\newblock \textit{Why it is here:} Q-Former is the closest architectural precedent to TC-ViTok's cross-attention mechanism, but uses learned (not query-derived) queries and produces dense representations rather than sparse masks.
+
+\bibitem{zhang2025sparsevlm}
+Y.~Zhang et al.
+\newblock \paperhref{https://arxiv.org/abs/2504.00654}{SparseVLM: Visual token sparsification for efficient vision-language model inference}.
+\newblock \textit{ICML}, 2025.
+\newblock \textit{What it does:} Uses text-token attention within the LLM to rate visual token importance, progressively pruning irrelevant tokens with adaptive per-layer ratios and recycling pruned tokens into compact representations.
+\newblock \textit{What it contributes:} A training-free, text-aware pruning method that achieves 37\% latency reduction while maintaining 97\% accuracy; demonstrates that text guidance improves over purely visual criteria.
+\newblock \textit{Why it is here:} Closest work in spirit to TC-ViTok's query-awareness goal, but operates inside the LLM rather than before token injection, motivating our pre-LLM approach.
+
+\bibitem{li2025qgvtc}
+S.~Li et al.
+\newblock \paperhref{https://doi.org/10.1016/j.neucom.2025.127012}{QG-VTC: Question-guided visual token compression in MLLMs for efficient VQA}.
+\newblock \textit{Neurocomputing}, 2025.
+\newblock \textit{What it does:} Embeds the user's question via a pretrained text encoder, projects it into the vision encoder's feature space, and progressively compresses visual tokens within the ViT based on question-token correlation scores.
+\newblock \textit{What it contributes:} First method to explicitly inject question guidance into the vision encoder's compression pipeline; achieves near-uncompressed performance with 1/8 visual tokens.
+\newblock \textit{Why it is here:} Most directly related concurrent work; validates the query-guided compression thesis but differs from TC-ViTok in operating \emph{within} the vision encoder (less modular) rather than as an external pre-LLM module.
+
+\bibitem{zhu2024focusllava}
+Y.~Zhu et al.
+\newblock \paperhref{https://arxiv.org/abs/2401.08681}{FocusLLaVA: A coarse-to-fine visual token selection framework for efficient multimodal reasoning}.
+\newblock \textit{arXiv:2401.08681}, 2024.
+\newblock \textit{What it does:} Performs coarse visual filtering followed by instruction-conditioned refinement to keep question-relevant tokens.
+\newblock \textit{What it contributes:} Demonstrates two-stage, instruction-aware token selection in LLaVA-style pipelines.
+\newblock \textit{Why it is here:} Provides a query-aware comparator that still applies text guidance inside the LLM stack rather than before token injection.
+
+\bibitem{jang2017categorical}
+E.~Jang, S.~Gu, and B.~Poole.
+\newblock \paperhref{https://arxiv.org/abs/1611.01144}{Categorical reparameterization with Gumbel-Softmax}.
+\newblock \textit{ICLR}, 2017.
+\newblock \textit{What it does:} Introduces a continuous relaxation for categorical variables using the Gumbel-Softmax distribution, enabling gradient-based optimization of discrete choices.
+\newblock \textit{What it contributes:} The foundational technique for differentiable discrete optimization; temperature annealing as a key training strategy.
+\newblock \textit{Why it is here:} TC-ViTok's Gumbel-Sigmoid STE for top-$k$ selection directly extends this framework to independent binary (subset) selection.
+
+\bibitem{maddison2017concrete}
+C.~J.~Maddison, A.~Mnih, and Y.~W.~Teh.
+\newblock \paperhref{https://arxiv.org/abs/1611.00712}{The concrete distribution: A continuous relaxation of discrete random variables}.
+\newblock \textit{ICLR}, 2017.
+\newblock \textit{What it does:} Introduces the Concrete distribution, an independent concurrent relaxation for differentiable optimization over discrete variables.
+\newblock \textit{What it contributes:} Complements Gumbel-Softmax with equivalent theoretical foundations and practical training guidance.
+\newblock \textit{Why it is here:} This is the second canonical reference in the Gumbel-Softmax line cited in the discrete-policy training discussion.
+
+\bibitem{bengio2013estimating}
+Y.~Bengio, N.~L\'{e}onard, and A.~Courville.
+\newblock \paperhref{https://arxiv.org/abs/1308.3432}{Estimating or propagating gradients through stochastic neurons for conditional computation}.
+\newblock \textit{arXiv:1308.3432}, 2013.
+\newblock \textit{What it does:} Analyzes gradient estimation methods for binary stochastic neurons, including the straight-through estimator (STE).
+\newblock \textit{What it contributes:} Shows that the biased but low-variance STE is practically effective for training networks with discrete decisions.
+\newblock \textit{Why it is here:} The STE is the gradient bridge in TC-ViTok's training; this paper provides the theoretical grounding for why biased gradients suffice.
+
+\bibitem{oquab2023dinov2}
+M.~Oquab et al.
+\newblock \paperhref{https://arxiv.org/abs/2304.07193}{DINOv2: Learning robust visual features without supervision}.
+\newblock \textit{arXiv:2304.07193}, 2023.
+\newblock \textit{What it does:} Trains a family of ViTs with a self-supervised local-feature objective (self-distillation with no labels), producing spatially faithful patch representations.
+\newblock \textit{What it contributes:} State-of-the-art self-supervised visual features with strong spatial correspondence; the Small variant (22M params) is efficient enough for real-time use.
+\newblock \textit{Why it is here:} DINOv2-S provides the coarse spatial features for TC-ViTok's TPN; its geometric interpretability (vs.\ CLIP's global collapse) is a key architectural choice.
+
+\bibitem{meng2022adavit}
+L.~Meng et al.
+\newblock \paperhref{https://openaccess.thecvf.com/content/CVPR2022/papers/Meng_AdaViT_Adaptive_Vision_Transformers_for_Efficient_Image_Recognition_CVPR_2022_paper.pdf}{AdaViT: Adaptive vision transformers for efficient image recognition}.
+\newblock \textit{CVPR}, 2022.
+\newblock \textit{What it does:} Learns per-sample computation budgets for ViTs by deciding how many tokens and layers to use for each input.
+\newblock \textit{What it contributes:} Demonstrates input-adaptive inference in ViTs with learned halting policies; shows that easy images need fewer tokens and fewer layers.
+\newblock \textit{Why it is here:} Establishes the adaptive-computation paradigm that TC-ViTok extends to the cross-modal VLM setting, with the novel addition of task-conditioning.
+
+\bibitem{endo2025feather}
+Y.~Endo et al.
+\newblock \paperhref{https://arxiv.org/abs/2502.06789}{FEATHER: Fine-grained efficient attention for text-heavy and spatially grounded VLM tasks}.
+\newblock \textit{arXiv:2502.06789}, 2025.
+\newblock \textit{What it does:} Studies compression behavior on spatially grounded and OCR-heavy tasks, with mechanisms to preserve fine-grained evidence.
+\newblock \textit{What it contributes:} Highlights non-uniform degradation patterns and the need for task-sensitive token policies.
+\newblock \textit{Why it is here:} Supports the open-problem claim that localization/OCR performance remains fragile under aggressive compression.
+
+\bibitem{wang2026marc}
+Z.~Wang et al.
+\newblock \paperhref{https://openreview.net/forum?id=7k8OtrGxBs}{MARC: Memory-augmented reinforcement compression for efficient visual token selection in video-language models}.
+\newblock \textit{ICLR}, 2026.
+\newblock \textit{What it does:} Uses reinforcement learning with memory-augmented state tracking to optimize discrete token-retention policies in temporal multimodal settings.
+\newblock \textit{What it contributes:} Demonstrates the potential of policy-gradient optimization for discrete token selection where long-horizon dependencies matter.
+\newblock \textit{Why it is here:} Serves as an RL-based contrast to STE-style optimization discussed for single-image query-conditioned token selection.
+
+\end{thebibliography}
+
+% -------------------------------------------------------
+\section{Preliminary Implementation Resources}
+\label{sec:resources}
+
+\begin{itemize}[leftmargin=*, itemsep=2pt]
+
+    \item \url{https://github.com/haotian-liu/LLaVA} ---
+          Official LLaVA-1.5 implementation. Provides the base VLM backbone, data loading pipeline, and evaluation scripts for VQAv2, GQA, TextVQA, and POPE.
+
+    \item \url{https://github.com/facebookresearch/dinov2} ---
+          Official DINOv2 repository. Source for the frozen DINOv2-Small encoder used as TC-ViTok's coarse spatial feature extractor.
+
+    \item \url{https://github.com/facebookresearch/ToMe} ---
+          Official Token Merging implementation. Primary query-agnostic baseline; can be applied to the CLIP ViT-L encoder for direct comparison.
+
+    \item \url{https://github.com/pkunlp-icler/FastV} ---
+          Official FastV implementation for LLaVA. Key post-ViT pruning baseline; includes evaluation scripts and the attention-based pruning mechanism.
+
+    \item \url{https://github.com/Theia-4869/FasterVLM} ---
+          FasterVLM: CLS-attention-based visual token pruning. Provides an alternative pruning criterion (CLS attention vs.\ text-visual attention) useful for ablation comparisons.
+
+    \item \url{https://github.com/Gumpest/SparseVLMs} ---
+          Official SparseVLM implementation. Text-aware pruning baseline operating within the LLM; demonstrates the benefit of text guidance that TC-ViTok aims to capture at an earlier stage.
+
+    \item \url{https://github.com/huggingface/peft} ---
+          PEFT library for LoRA. Required for parameter-efficient fine-tuning of the LLM backbone during TC-ViTok's Phase~1 joint training.
+
+    \item \url{https://github.com/openai/CLIP} ---
+          Official CLIP repository. Source for the frozen CLIP text encoder (ViT-B/32) that produces the query embedding $\mathbf{q}_e$.
+
+\end{itemize}
+
+\end{document}
