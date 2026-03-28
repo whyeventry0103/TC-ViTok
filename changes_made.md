@@ -5,6 +5,56 @@
 
 ---
 
+## 0. API Alignment: Indices-Based Gather (2026-03-28)
+
+**Category:** CRITICAL
+**Files:** `src/tc_vitok/models/masking.py`, `src/tc_vitok/models/tpn.py`, `src/tc_vitok/models/tc_vitok_model.py`, `src/tc_vitok/training/trainer.py`, `scripts/test_core.py`, `scripts/test_pipeline.py`, `scripts/visualize_masks.py`
+
+**Problem:** Code API was inconsistent with paperv4.tex and planv2.tex documentation updates. The docs specify that TPN should return indices (idx) not mask, and gather should work with indices directly for cleaner API and real compression semantics.
+
+**What changed:**
+- `gumbel_sigmoid_ste()`: Now returns `tuple[mask, idx]` instead of just `mask`
+  - `mask`: [B, N] binary mask with gradients (for STE backward pass)
+  - `idx`: [B, k] top-k indices (for gather operation)
+- `TPN.forward()`: Now returns `(idx, scores)` instead of `(mask, scores)`
+  - Internally computes mask via STE for gradient flow
+  - Returns indices for downstream gather operation
+  - Updated docstring to reflect this change
+- `gather_selected_tokens()`: Simplified signature from `(visual_tokens, mask, k)` to `(visual_tokens, idx)`
+  - No longer needs to extract indices from mask using topk
+  - Directly uses provided indices for torch.gather
+  - Cleaner API and more efficient
+- `TCViTokModel.forward()`: Changed parameter from `return_mask` to `return_indices`
+  - Stores and returns `indices` instead of `mask` in outputs dict
+  - Uses `idx` from TPN for gather operation
+- `trainer.py`: Updated to work with indices
+  - Reconstructs mask from indices for entropy/diversity loss computation
+  - Uses `return_indices=True` instead of `return_mask=True`
+- `visualize_masks.py`: Updated `visualize_mask()` function signature
+  - Now accepts `selected_idx` (indices) instead of `mask`
+  - Converts indices to mask internally for visualization purposes
+  - Added proper documentation
+- `test_core.py` and `test_pipeline.py`: Updated all tests
+  - Tests verify idx shape is [B, k] not [B, N]
+  - Tests verify indices are in valid range [0, N)
+  - gather_selected_tokens tests use idx directly
+
+**Why:**
+1. **API Consistency**: paperv4.tex and planv2.tex explicitly document that TPN returns idx, not mask
+2. **Cleaner Semantics**: Gather-based compression is more clearly expressed with indices
+3. **Efficiency**: No need to convert mask to indices (via topk) when indices are already available
+4. **Separation of Concerns**:
+   - Mask is an internal detail of STE for gradient flow
+   - Indices are the public API for token selection and gathering
+
+**Effect:**
+- Code now exactly matches documentation in paperv4.tex and planv2.tex
+- API is clearer: "select top-k indices, gather those tokens"
+- All tests updated and pass with new signatures
+- Backward compatibility intentionally broken to enforce correct usage
+
+---
+
 ## 1. TPN Architecture Rewrite
 
 **Category:** CRITICAL
