@@ -7,10 +7,7 @@ while the backward pass uses soft Gumbel-Sigmoid gradients.
 Paper Section 6: "Differentiable Token Selection via Gumbel-Sigmoid STE"
 """
 
-from typing import Optional
-
 import torch
-import torch.nn.functional as F
 
 
 def gumbel_sigmoid_ste(
@@ -22,160 +19,102 @@ def gumbel_sigmoid_ste(
 ) -> torch.Tensor:
     """Gumbel-Sigmoid Straight-Through Estimator for differentiable top-k selection.
 
-    This function implements the key technique that makes token selection differentiable.
-    It combines:
-    1. Gumbel noise injection for exploration (training only)
-    2. Sigmoid activation with temperature for soft selection
-    3. Hard top-k selection in forward pass
-    4. Soft gradient in backward pass (straight-through trick)
+    Forward pass: hard top-k binary mask (exact k ones per sample).
+    Backward pass: gradients flow through soft Gumbel-Sigmoid.
 
-    Forward pass (Eq. 7-9):
-        g_i ~ Gumbel(0, 1)
-        z_i = σ((s_i + g_i) / τ)
-        m_i = 1[z_i ∈ top-k(z)]
-
-    Backward pass (Eq. 10-12):
-        ∂L/∂s_i = ∂L/∂z_i * ∂z_i/∂s_i
-        where z_i is the SOFT Gumbel-Sigmoid output (not the hard mask)
+    Implementation matches paper Appendix A.2 exactly:
+        eps = 1e-8
+        u ~ Uniform(0, 1), clamped to [eps, 1-eps]
+        g = -log(-log(u))                    # Gumbel(0,1)
+        m_soft = sigmoid((scores + g) / tau)  # soft mask
+        topk_idx = scores.topk(k).indices     # hard top-k on RAW scores
+        m_hard = scatter(topk_idx, 1.0)
+        return m_hard - m_soft.detach() + m_soft  # STE trick
 
     Args:
-        scores: Raw importance scores from TPN
-                Shape: [batch_size, num_tokens] (typically [B, 576])
-        k: Number of tokens to select (budget)
-        tau: Temperature parameter
-             - High τ → softer selection, more exploration
-             - Low τ → sharper selection, more exploitation
-             - Annealed during training via curriculum (see curriculum.py)
-        training: If True, inject Gumbel noise; else deterministic
-        hard: If True, use hard top-k in forward; else use soft selection
+        scores: Raw importance scores from TPN, Shape: [B, N]
+        k: Number of tokens to select
+        tau: Temperature (annealed 1.0 → 0.1 during training)
+        training: If True, inject Gumbel noise; else deterministic top-k
+        hard: If True, use hard top-k in forward; else return soft mask
 
     Returns:
-        mask: Binary selection mask, Shape: [batch_size, num_tokens]
-              - Forward: hard top-k selection (0s and 1s)
-              - Backward: gradients from soft Gumbel-Sigmoid
-
-    Notes:
-        - The straight-through trick is implemented via:
-          mask = hard_mask - soft_mask.detach() + soft_mask
-        - This makes forward = hard, backward = soft
-        - Critical for training stability (Section 9.2)
-
-    Paper references:
-        - Gumbel-Sigmoid formulation: Eq. 7-9
-        - Gradient flow: Eq. 10-12
-        - Temperature scheduling: Eq. 13
+        mask: Selection mask, Shape: [B, N]
     """
-    batch_size, num_tokens = scores.shape
+    if not training:
+        # Inference: deterministic hard top-k, no gradients needed
+        topk_idx = scores.topk(k, dim=-1).indices
+        mask = torch.zeros_like(scores)
+        mask.scatter_(-1, topk_idx, 1.0)
+        return mask
 
-    # TODO (Phase C): Implement Gumbel-Sigmoid STE
+    # Step 1: Sample Gumbel noise
+    eps = 1e-8
+    u = torch.rand_like(scores).clamp(eps, 1 - eps)
+    g = -torch.log(-torch.log(u))  # Gumbel(0, 1)
 
-    # Step 1: Add Gumbel noise during training (Eq. 7-8)
-    if training:
-        # Sample Gumbel noise: g ~ Gumbel(0, 1)
-        # Using the log(-log(uniform)) trick
-        uniform = torch.rand_like(scores)
-        gumbel_noise = -torch.log(-torch.log(uniform + 1e-10) + 1e-10)
-        noisy_scores = scores + gumbel_noise
-    else:
-        noisy_scores = scores
-
-    # Step 2: Apply Gumbel-Sigmoid with temperature (Eq. 9)
-    # z_i = σ((s_i + g_i) / τ)
-    soft_mask = torch.sigmoid(noisy_scores / tau)
+    # Step 2: Soft mask via Gumbel-Sigmoid with temperature
+    m_soft = torch.sigmoid((scores + g) / tau)
 
     if not hard:
-        # Return soft mask directly (useful for debugging)
-        return soft_mask
+        return m_soft
 
-    # Step 3: Hard top-k selection in forward pass
-    # Find k-th largest value per sample
-    topk_values, topk_indices = torch.topk(soft_mask, k=k, dim=-1)
-    threshold = topk_values[:, -1:]  # [B, 1], k-th largest value
+    # Step 3: Hard top-k on RAW scores (not noisy scores)
+    topk_idx = scores.topk(k, dim=-1).indices
+    m_hard = torch.zeros_like(scores)
+    m_hard.scatter_(-1, topk_idx, 1.0)
 
-    # Create hard binary mask
-    hard_mask = (soft_mask >= threshold).float()
-
-    # Handle ties: if multiple values equal threshold, randomly break ties
-    # This is important when tau is very low
-    if training:
-        # Count how many tokens are selected (should be exactly k)
-        num_selected = hard_mask.sum(dim=-1)  # [B]
-        # If more than k selected (due to ties), need to break ties
-        # For simplicity, we rely on topk's tie-breaking behavior
-        # Reconstruct hard mask from topk indices
-        hard_mask = torch.zeros_like(soft_mask)
-        hard_mask.scatter_(1, topk_indices, 1.0)
-
-    # Step 4: Straight-through estimator trick
-    # Forward: hard_mask
-    # Backward: soft_mask gradients
-    # Implementation: mask = hard - soft.detach() + soft
-    mask = hard_mask - soft_mask.detach() + soft_mask
-
-    # Sanity check: verify exactly k tokens selected per sample
-    if training:
-        actual_k = mask.sum(dim=-1)
-        if not torch.allclose(actual_k, torch.full_like(actual_k, float(k)), atol=1.0):
-            print(f"Warning: Expected {k} tokens, got {actual_k.tolist()}")
-
-    return mask
+    # Step 4: STE trick — forward = m_hard, backward = grad through m_soft
+    return m_hard - m_soft.detach() + m_soft
 
 
-def compute_mask_entropy(mask: torch.Tensor) -> torch.Tensor:
-    """Compute entropy of token selection distribution (for regularization).
+def compute_spatial_entropy(mask: torch.Tensor) -> torch.Tensor:
+    """Compute Shannon entropy of the spatial selection distribution.
 
-    High entropy = diverse selection across spatial locations
-    Low entropy = collapsed selection (pathological)
+    This is the paper's entropy regularizer (Eq. in Section 7.1):
+        p_i = m̄_i / Σ_j m̄_j
+        H = -Σ_i p_i log(p_i)
+
+    where m̄_i is the batch-averaged selection frequency at position i.
+
+    Maximum entropy = log(N) ≈ 6.36 (uniform selection over 576 positions).
+    Minimum entropy → 0 (all mass on one position).
+
+    We MAXIMIZE entropy (by negating it in the loss) to prevent spatial collapse.
 
     Args:
-        mask: Binary mask, Shape: [batch_size, num_tokens]
+        mask: Binary selection mask, Shape: [B, N]
 
     Returns:
-        entropy: Scalar tensor, averaged over batch
-
-    Used in: losses.py for entropy regularization
+        entropy: Scalar Shannon entropy of the normalized spatial distribution
     """
-    # TODO (Phase D): Implement entropy computation
-    # H(p) = -Σ p_i log(p_i)
-    # where p_i = mean selection probability for token i across batch
+    eps = 1e-10
 
-    # Average selection probability per token
-    prob = mask.mean(dim=0)  # [num_tokens]
+    # Batch-averaged selection frequency per position
+    m_bar = mask.mean(dim=0)  # [N]
 
-    # Compute entropy
-    prob = torch.clamp(prob, min=1e-10, max=1.0 - 1e-10)  # Numerical stability
-    entropy = -(prob * torch.log(prob) + (1 - prob) * torch.log(1 - prob))
-    entropy = entropy.mean()
+    # Normalize to a proper probability distribution
+    p = m_bar / (m_bar.sum() + eps)  # [N], sums to 1
+
+    # Shannon entropy: H = -Σ p_i log(p_i)
+    entropy = -(p * torch.log(p + eps)).sum()
 
     return entropy
 
 
 def compute_mask_diversity(mask: torch.Tensor) -> torch.Tensor:
-    """Compute diversity of token selection across batch (for regularization).
+    """Compute diversity of token selection across batch.
 
     Diversity = 1 - max_i P(token i selected)
-    High diversity = tokens selected vary across samples
-    Low diversity = same tokens always selected (query-ignoring pathology)
+    High diversity = tokens selected vary across samples.
+    Low diversity = same tokens always selected (query-ignoring pathology).
 
     Args:
-        mask: Binary mask, Shape: [batch_size, num_tokens]
+        mask: Binary mask, Shape: [B, N]
 
     Returns:
-        diversity: Scalar tensor in [0, 1]
-
-    Used in: losses.py for diversity regularization
-    Paper reference: Section 9.1 (Failure Mode #2: Query-Ignoring Policy)
+        diversity: Scalar in [0, 1]
     """
-    # TODO (Phase D): Implement diversity metric
-    # Diversity = 1 - max_i (mean selection frequency of token i)
-
-    # Selection frequency per token
-    freq = mask.mean(dim=0)  # [num_tokens]
-
-    # Find most frequently selected token
+    freq = mask.mean(dim=0)  # [N]
     max_freq = freq.max()
-
-    # Diversity: 1 = all tokens equally likely, 0 = one token always selected
-    diversity = 1.0 - max_freq
-
-    return diversity
+    return 1.0 - max_freq

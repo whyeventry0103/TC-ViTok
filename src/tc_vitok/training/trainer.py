@@ -181,21 +181,22 @@ class TCViTokTrainer:
         questions = batch["questions"]
         labels = batch["labels"].to(self.device)
 
-        # Forward pass
+        # Forward pass (always return mask for loss computation)
         outputs = self.model(
             images_coarse=images_coarse,
             images_full=images_full,
             questions=questions,
             labels=labels,
             tau=tau,
-            return_mask=True,
+            return_mask=True,  # needed for entropy/diversity losses
         )
 
-        # Compute losses
+        # Compute losses (scores required for L1 sparsity on raw scores)
         loss_dict = compute_total_loss(
             logits=outputs.get("logits"),
             labels=labels,
-            mask=outputs["mask"],
+            scores=outputs["scores"],
+            mask=outputs.get("mask", outputs["scores"]),
             k=self.model.k,
             lambda_sparsity=lambda_sparsity,
             lambda_entropy=self.lambda_entropy,

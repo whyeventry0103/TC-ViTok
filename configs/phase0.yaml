@@ -1,34 +1,33 @@
-# Phase 0: TPN Warmup
-# Train only the Tokenization Policy Network with frozen LLaVA backbone
+# Phase 0: TPN Warmup — paper Section 7.3, Phase 0
+# Train only TPN with frozen LLaVA backbone.
+# Loss: L_VQA only (λ=0, μ=0). Temperature: τ=1.0 (fixed).
 
-# Inherit from base config
 defaults:
   - base
 
-# Override for Phase 0
 phase: 0
-description: "TPN warmup with frozen LLaVA backbone"
+description: "TPN warmup with frozen backbone (paper Phase 0: 1 epoch)"
 
 training:
   max_steps: 10000
 
-  # Only train TPN, freeze everything else
   trainable_components:
     - tpn
 
-  # Aggressive lambda to encourage sparsity learning
-  lambda_max: 0.02
-  T_warmup: 2000
+  # Paper Phase 0: λ=0, μ=0 (VQA loss only)
+  lambda_max: 0.0
+  lambda_entropy: 0.0
+  lambda_diversity: 0.0
+  T_warmup: 1  # irrelevant since lambda_max=0
 
-  # Higher learning rate for faster convergence
-  lr_tpn: 2e-4
+  # Paper Phase 0: τ=1.0 fixed
+  tau_max: 1.0
+  tau_min: 1.0  # No annealing in Phase 0
 
-  # Start with higher temperature for exploration
-  tau_max: 10.0
-  tau_min: 1.0
+  # Paper: η_TPN = 1e-3
+  lr_tpn: 1e-3
 
 data:
-  # Use smaller training subset for warmup
   train_samples: 100000  # subsample from VQAv2 train
   datasets: ["vqav2"]
 

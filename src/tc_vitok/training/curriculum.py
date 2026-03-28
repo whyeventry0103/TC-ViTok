@@ -15,8 +15,8 @@ import math
 def get_tau(
     step: int,
     T: int,
-    tau_min: float = 0.5,
-    tau_max: float = 5.0,
+    tau_min: float = 0.1,
+    tau_max: float = 1.0,
 ) -> float:
     """Compute Gumbel-Sigmoid temperature at given training step.
 
@@ -41,10 +41,10 @@ def get_tau(
         tau: Temperature at current step
 
     Example:
-        >>> get_tau(step=0, T=10000, tau_min=0.5, tau_max=5.0)
-        5.0  # Start with high temperature
-        >>> get_tau(step=10000, T=10000, tau_min=0.5, tau_max=5.0)
-        0.5  # End with low temperature
+        >>> get_tau(step=0, T=10000, tau_min=0.1, tau_max=1.0)
+        1.0  # Start with high temperature
+        >>> get_tau(step=10000, T=10000, tau_min=0.1, tau_max=1.0)
+        0.1  # End with low temperature
 
     Paper reference: Eq. 13, Section 7.2
     """

@@ -6,7 +6,7 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 ![Institution: LUMS](https://img.shields.io/badge/Institution-LUMS-red.svg)
 
-Vision-Language Models like LLaVA encode a fixed 576 visual tokens for every image, regardless of query complexity. **TC-ViTok** introduces a lightweight Tokenization Policy Network (TPN, ~3M params) that learns a query-conditioned token selection policy, dynamically choosing only k << 576 relevant tokens. This reduces computational cost by up to 75% while maintaining competitive VQA accuracy. Our approach frames visual tokenization as a learned policy problem and trains the TPN via Gumbel-Sigmoid straight-through estimation with a phased curriculum.
+Vision-Language Models like LLaVA encode a fixed 576 visual tokens for every image, regardless of query complexity. **TC-ViTok** introduces a lightweight Tokenization Policy Network (TPN, ~887K params) that learns a query-conditioned token selection policy, dynamically choosing only k << 576 relevant tokens. This reduces **LLM-side** computational cost by up to 75% (note: the full ViT-L encoder still processes all tokens; net end-to-end savings depend on LLM prefill dominance). Our approach frames visual tokenization as a learned policy problem and trains the TPN via Gumbel-Sigmoid straight-through estimation with a phased curriculum.
 
 ---
 
@@ -59,10 +59,10 @@ TC-ViTok consists of five main components:
 - **Purpose:** Question representation for conditional selection
 
 ### 3. Tokenization Policy Network (TPN)
-- **Architecture:** Cross-attention + MLP score head + bilinear upsample
+- **Architecture:** Cross-attention (4 heads) + concat [ctx; alpha_avg] + Score MLP + bilinear upsample
 - **Input:** Coarse visual (49×384) + text embedding (512)
 - **Output:** Selection mask (576 binary values)
-- **Parameters:** ~3M (trainable)
+- **Parameters:** ~887K (trainable)
 - **Key innovation:** Gumbel-Sigmoid STE for differentiable top-k
 
 ### 4. Full Visual Encoder
@@ -83,10 +83,10 @@ TC-ViTok consists of five main components:
 |-------------------------|------------|-----------|---------------|----------------|
 | DINOv2-S (coarse)       | 22M        | ✗ Frozen  | 98×98×3       | 49×384         |
 | CLIP Text               | 63M        | ✗ Frozen  | text          | 512            |
-| **TPN**                 | **3M**     | **✓ Yes** | 49×384 + 512  | 576 (binary)   |
+| **TPN**                 | **~887K**  | **✓ Yes** | 49×384 + 512  | 576 (binary)   |
 | CLIP ViT-L/14 (full)    | 304M       | ✗ Frozen  | 336×336×3     | 576×1024       |
 | LLaVA (LoRA + proj)     | 35M        | **✓ Yes** | k×1024        | text           |
-| **Total Trainable**     | **~38M**   | **—**     | **—**         | **—**          |
+| **Total Trainable**     | **~34M**   | **—**     | **—**         | **—**          |
 
 **Architecture Diagram:** See `assets/architecture_diagram.png` (placeholder — to be added)
 
@@ -107,28 +107,28 @@ The core technical challenge is making discrete token selection differentiable. 
    - Gradient flows through soft z, not hard m
    - Implemented via: m = hard - soft.detach() + soft
 
-3. **Temperature annealing:** tau: 5.0 → 0.5 (cosine schedule)
-   - High tau → exploration (soft selection)
-   - Low tau → exploitation (sharp selection)
+3. **Temperature annealing:** tau: 1.0 → 0.1 (linear/cosine schedule)
+   - High tau → exploration (soft selection, rich gradients)
+   - Low tau → exploitation (sharp selection, near-binary masks)
 
 ### Three-Phase Training Curriculum
 
-**Phase 0: TPN Warmup (10k steps)**
+**Phase 0: TPN Warmup (1 epoch, ~10k steps)**
 1. Freeze LLaVA backbone completely
 2. Train only TPN on VQAv2 subset
 3. Learn basic token selection patterns
-4. High temperature (tau=10.0) for exploration
+4. Fixed temperature tau=1.0; loss = L_VQA only (lambda=0, mu=0)
 
-**Phase 1: Joint Finetuning (50k steps)**
+**Phase 1: Joint Finetuning (3 epochs, ~50k steps)**
 1. Train TPN + LoRA + vision projector jointly
 2. Full VQAv2 + GQA training sets
-3. Standard temperature schedule (tau: 5.0 → 0.5)
-4. Sparsity regularization warmup (lambda: 0 → 0.01)
+3. Temperature annealing (tau: 1.0 → 0.1)
+4. Sparsity regularization warmup (lambda: 0 → 0.1)
 
-**Phase 2: Domain Transfer (10k steps, optional)**
+**Phase 2: Domain Transfer (1 epoch, ~10k steps, optional)**
 1. Finetune on TextVQA for OCR-heavy questions
 2. Lower learning rates (TPN: 5e-5, LoRA: 2e-5)
-3. Tighter temperature (tau: 2.0 → 0.3)
+3. Fixed temperature tau=0.1; lambda=0
 
 ### Known Failure Modes & Mitigations
 
@@ -344,7 +344,8 @@ python scripts/evaluate.py \
 
 ## Experiments & Results
 
-**Note:** Results below are **projected estimates** based on preliminary experiments and will be updated with measured results after full training.
+**WARNING: ALL RESULTS BELOW ARE PROJECTED -- NOT MEASURED.**
+No experiments have been run yet. These numbers are theoretical estimates based on method structure and prior literature. They will be replaced with measured results after implementation and training are complete. Do not cite these numbers.
 
 ### Main Results
 
@@ -356,10 +357,10 @@ python scripts/evaluate.py \
 | **TC-ViTok (k=144)**    | **76.2** | **58.9** | **58.1** | **84.3** | **144** |
 | TC-ViTok (k=72)         | 73.1  | 55.4 | 53.8        | 81.7    | 72     |
 
-**Key findings:**
-- **k=144 (25% tokens)** achieves 96.3% of baseline accuracy with 75% fewer tokens
-- **k=288 (50% tokens)** achieves 99.0% of baseline accuracy
-- Spatial accuracy (GQA-Spatial) degrades slightly more than global, indicating mild spatial collapse
+**PROJECTED findings (not yet validated):**
+- **k=144 (25% tokens)** projected to achieve ~96% of baseline accuracy with 75% fewer LLM-side tokens
+- **k=288 (50% tokens)** projected to achieve ~99% of baseline accuracy
+- Spatial accuracy (GQA-Spatial) expected to degrade more than global — the key hypothesis to test
 
 ### Token Budget Sweep
 
@@ -426,21 +427,21 @@ Complete hyperparameter table (see `configs/base.yaml` for defaults):
 | Hyperparameter | Symbol | Value | Description |
 |----------------|--------|-------|-------------|
 | Token budget | k | 144 | Number of tokens to select |
-| Temperature (max) | tau_max | 5.0 | Initial Gumbel-Sigmoid temp |
-| Temperature (min) | tau_min | 0.5 | Final temp after annealing |
-| Sparsity weight | lambda_max | 0.01 | L1 sparsity regularization |
+| Temperature (max) | tau_max | 1.0 | Initial Gumbel-Sigmoid temp |
+| Temperature (min) | tau_min | 0.1 | Final temp after annealing |
+| Sparsity weight | lambda_max | 0.1 | L1 sparsity on raw scores |
 | Warmup steps | T_warmup | 5000 | Steps for lambda warmup |
-| Diversity weight | lambda_div | 0.001 | Diversity loss weight |
-| Entropy weight | lambda_ent | 0.0001 | Entropy loss weight |
-| Learning rate (TPN) | lr_tpn | 1e-4 | TPN optimizer LR |
-| Learning rate (LoRA) | lr_lora | 5e-5 | LoRA adapter LR |
-| Learning rate (MLP) | lr_mlp | 1e-4 | Vision projector LR |
+| Diversity weight | nu | 0.01 | Diversity loss weight |
+| Entropy weight | |mu| | 0.01 | Entropy loss weight |
+| Learning rate (TPN) | lr_tpn | 1e-3 | TPN optimizer LR |
+| Learning rate (LoRA) | lr_lora | 2e-4 | LoRA adapter LR |
+| Learning rate (MLP) | lr_mlp | 5e-4 | Vision projector LR |
 | LoRA rank | r | 32 | Rank of LoRA adapters |
 | LoRA alpha | alpha | 64 | LoRA scaling factor |
 | Batch size | B | 16 | Per-device batch size |
 | Grad accum steps | — | 4 | Effective batch = 64 |
-| TPN heads | n_heads | 8 | Cross-attention heads |
-| TPN hidden dim | d_h | 512 | Cross-attention hidden dim |
+| TPN heads | n_heads | 4 | Cross-attention heads |
+| TPN hidden dim | d_h | 512 | Score MLP hidden dim |
 
 ---
 

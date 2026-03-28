@@ -17,9 +17,9 @@ from torch.optim import AdamW, Optimizer
 
 def create_optimizer(
     model: nn.Module,
-    lr_tpn: float = 1e-4,
-    lr_lora: float = 5e-5,
-    lr_mlp: float = 1e-4,
+    lr_tpn: float = 1e-3,
+    lr_lora: float = 2e-4,
+    lr_mlp: float = 5e-4,
     weight_decay: float = 0.01,
     phase: int = 1,
 ) -> Optimizer:

@@ -1,38 +1,37 @@
-# Phase 1: Joint Finetuning
-# Train TPN + LoRA + projection MLP together on full VQAv2 + GQA
+# Phase 1: Joint Fine-tuning — paper Section 7.3, Phase 1
+# Train TPN + LoRA + projection MLP together on VQAv2 + GQA.
+# Full loss with τ annealing (1.0→0.1) and λ warmup (0→0.1).
 
-# Inherit from base config
 defaults:
   - base
 
-# Override for Phase 1
 phase: 1
-description: "Joint finetuning of TPN + LoRA + MLP"
+description: "Joint finetuning of TPN + LoRA + MLP (paper Phase 1: 3 epochs)"
 
 training:
   max_steps: 50000
 
-  # Train TPN, LoRA, and projection MLP
   trainable_components:
     - tpn
     - lora
     - vision_projector
 
-  # Standard regularization
-  lambda_max: 0.01
+  # Paper Phase 1: full regularization with warmup
+  lambda_max: 0.1
   T_warmup: 5000
+  lambda_entropy: 0.01
+  lambda_diversity: 0.01
 
-  # Balanced learning rates
-  lr_tpn: 1e-4
-  lr_lora: 5e-5
-  lr_mlp: 1e-4
+  # Paper: per-group learning rates
+  lr_tpn: 1e-3
+  lr_lora: 2e-4
+  lr_mlp: 5e-4
 
-  # Standard temperature schedule
-  tau_max: 5.0
-  tau_min: 0.5
+  # Paper: τ annealed 1.0 → 0.1 over training
+  tau_max: 1.0
+  tau_min: 0.1
 
 data:
-  # Full training datasets
   datasets: ["vqav2", "gqa"]
   train_samples: null  # use full dataset
 
@@ -40,7 +39,6 @@ logging:
   wandb_run_name: "phase1_joint_finetune"
   eval_interval: 1000
 
-# Load Phase 0 checkpoint
 checkpoint:
   load_from: "runs/phase0/best.ckpt"
-  strict: false  # Allow loading subset of weights
+  strict: false

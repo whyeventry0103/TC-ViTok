@@ -1,17 +1,20 @@
 # TC-ViTok Base Configuration
-# Default hyperparameters for all training phases
+# Default hyperparameters — ALIGNED WITH PAPER (paperv2.tex)
 
 # Model architecture
 model:
   # Token budget (number of tokens to select from 576 total)
   k: 144  # {72, 144, 216, 288, 576}
 
-  # Tokenization Policy Network (TPN)
+  # Tokenization Policy Network (TPN) — paper Section 5.3
   tpn:
-    n_heads: 8
-    d_model: 384  # DINOv2-S feature dimension
-    d_h: 512      # Hidden dimension for cross-attention
-    d_text: 512   # CLIP text embedding dimension
+    n_heads: 4        # Paper specifies 4 heads (NOT 8)
+    d_model: 384      # Shared attention dimension
+    d_coarse: 384     # DINOv2-S feature dimension
+    d_h: 512          # Score MLP hidden dimension
+    d_text: 512       # CLIP text embedding dimension
+    M: 49             # Coarse spatial tokens (7×7)
+    N: 576            # Full resolution tokens (24×24)
 
   # LoRA configuration for LLaVA backbone
   lora:
@@ -20,30 +23,35 @@ model:
     targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
     dropout: 0.05
 
-# Training dynamics
+# Training dynamics — paper Section 7
 training:
-  # Gumbel-Sigmoid temperature schedule (Eq. 13)
-  tau_max: 5.0
-  tau_min: 0.5
+  # Gumbel-Sigmoid temperature schedule (paper Eq. 13)
+  # Paper: τ annealed linearly from 1.0 to 0.1
+  tau_max: 1.0
+  tau_min: 0.1
 
-  # Sparsity regularization schedule (Eq. 14)
-  lambda_max: 0.01
+  # Sparsity regularization schedule (paper Eq. 14)
+  # Paper: λ_max = 0.1, linear warmup
+  lambda_max: 0.1
   T_warmup: 5000  # steps for lambda warmup
 
-  # Diversity and entropy regularization
-  lambda_diversity: 0.001
-  lambda_entropy: 0.0001
+  # Entropy regularization (paper: |μ| = 0.01)
+  lambda_entropy: 0.01
 
-  # Optimization
+  # Diversity regularization (paper: ν = 0.01)
+  lambda_diversity: 0.01
+
+  # Optimization — paper Section 7.3
   batch_size: 16
   grad_accum_steps: 4  # effective batch size = 64
   max_steps: 50000
   warmup_steps: 1000
 
-  # Learning rates (per-group)
-  lr_tpn: 1e-4
-  lr_lora: 5e-5
-  lr_mlp: 1e-4
+  # Learning rates (per-group) — paper Section 7.3
+  # Paper: η_TPN = 1e-3, η_LoRA = 2e-4, η_MLP = 5e-4
+  lr_tpn: 1e-3
+  lr_lora: 2e-4
+  lr_mlp: 5e-4
   weight_decay: 0.01
 
   # Gradient clipping
@@ -76,4 +84,4 @@ evaluation:
 
 # Reproducibility
 seed: 42
-deterministic: false  # Set true for full reproducibility (slower)
+deterministic: false
