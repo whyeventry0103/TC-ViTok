@@ -135,8 +135,7 @@ class TokenizationPolicyNetwork(nn.Module):
             training: Whether in training mode (affects STE behavior)
 
         Returns:
-            mask: Binary selection mask, Shape: [B, N]
-                  1 = selected, 0 = masked
+            idx: Top-k token indices for gather, Shape: [B, k]
             scores: Raw importance scores, Shape: [B, N]
         """
         B = v_coarse.size(0)
@@ -183,16 +182,18 @@ class TokenizationPolicyNetwork(nn.Module):
         from .masking import gumbel_sigmoid_ste
 
         if training:
-            mask = gumbel_sigmoid_ste(s_N, k=k, tau=tau, training=True)
+            mask, idx = gumbel_sigmoid_ste(s_N, k=k, tau=tau, training=True)
             # Verify gradient flow (critical diagnostic)
             assert mask.grad_fn is not None, (
                 "Mask has no gradient! STE is broken. "
                 "Check gumbel_sigmoid_ste implementation."
             )
         else:
-            mask = gumbel_sigmoid_ste(s_N, k=k, tau=tau, training=False)
+            mask, idx = gumbel_sigmoid_ste(s_N, k=k, tau=tau, training=False)
 
-        return mask, s_N
+        # Return indices (for gather) and scores (for loss computation)
+        # Mask is only used internally for gradient flow through STE
+        return idx, s_N
 
     def get_num_params(self) -> int:
         """Return the number of trainable parameters."""

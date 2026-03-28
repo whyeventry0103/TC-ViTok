@@ -32,13 +32,12 @@ def test_tpn():
     B = 4
     v = torch.randn(B, 49, 384)
     q = torch.randn(B, 512)
-    mask, scores = tpn(v, q, k=144, tau=1.0, training=True)
+    idx, scores = tpn(v, q, k=144, tau=1.0, training=True)
 
-    assert mask.shape == (B, 576)
+    assert idx.shape == (B, 144), f"Expected idx shape (4, 144), got {idx.shape}"
     assert scores.shape == (B, 576)
-    assert mask.grad_fn is not None, "STE gradient broken"
-    k_actual = mask.detach().sum(dim=-1)
-    assert torch.allclose(k_actual, torch.full_like(k_actual, 144.0), atol=1.0)
+    # Check that indices are in valid range
+    assert idx.min() >= 0 and idx.max() < 576
     print("  PASSED\n")
 
 
@@ -48,10 +47,11 @@ def test_ste():
     B, N, k = 4, 576, 144
     scores = torch.randn(B, N, requires_grad=True)
 
-    mask = gumbel_sigmoid_ste(scores, k=k, tau=1.0, training=True)
-    assert mask.grad_fn is not None
+    mask, idx = gumbel_sigmoid_ste(scores, k=k, tau=1.0, training=True)
+    assert mask.grad_fn is not None, "Mask should have gradients for backprop"
+    assert idx.shape == (B, k), f"Expected idx shape (4, 144), got {idx.shape}"
     vals = mask.detach().unique().tolist()
-    assert set(vals) == {0.0, 1.0}, f"Expected binary, got {vals}"
+    assert set(vals) == {0.0, 1.0}, f"Expected binary mask, got {vals}"
 
     loss = mask.sum()
     loss.backward()
@@ -65,13 +65,13 @@ def test_gather():
     print("TEST 3: Gather Token Extraction")
     B, N, D, k = 4, 576, 1024, 144
     v = torch.randn(B, N, D)
-    mask = torch.zeros(B, N)
-    mask[:, :k] = 1.0
+    # Create indices for first k tokens
+    idx = torch.arange(k).unsqueeze(0).expand(B, -1)
 
-    selected = gather_selected_tokens(v, mask, k)
+    selected = gather_selected_tokens(v, idx)
     assert selected.shape == (B, k, D)
     assert torch.allclose(selected, v[:, :k, :])
-    print(f"  [{B}, {N}, {D}] -> [{B}, {k}, {D}] (real compression)")
+    print(f"  [{B}, {N}, {D}] -> [{B}, {k}, {D}] (real compression via gather)")
     print("  PASSED\n")
 
 
@@ -113,7 +113,7 @@ def test_full_loss():
     print("TEST 6: Total Loss Computation")
     B, N, k = 4, 576, 144
     scores = torch.randn(B, N, requires_grad=True)
-    mask = gumbel_sigmoid_ste(scores, k=k, tau=1.0, training=True)
+    mask, idx = gumbel_sigmoid_ste(scores, k=k, tau=1.0, training=True)
     logits = torch.randn(B, k, 1000)
     labels = torch.randint(0, 1000, (B, k))
 

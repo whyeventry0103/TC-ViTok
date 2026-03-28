@@ -67,15 +67,23 @@ def parse_args():
     return parser.parse_args()
 
 
-def visualize_mask(image, mask, output_path, question=""):
+def visualize_mask(image, selected_idx, output_path, question="", k=144, N=576):
     """Create overlay visualization of selected tokens.
 
     Args:
         image: PIL Image
-        mask: Selection mask [576] (24×24 grid)
+        selected_idx: Selected token indices [k] (indices into 24×24 grid)
         output_path: Where to save visualization
         question: Question text for title
+        k: Number of selected tokens (default 144)
+        N: Total number of tokens (default 576 = 24×24)
     """
+    # Convert indices to binary mask for visualization
+    # NOTE: The code now works with indices directly (gather-based approach)
+    # but we convert to mask here just for visualization purposes
+    mask = torch.zeros(N)
+    mask[selected_idx.cpu().long()] = 1.0
+
     # TODO (Phase D): Implement mask visualization
     # 1. Reshape mask to 24×24 spatial grid
     # 2. Upsample to image resolution
@@ -92,7 +100,7 @@ def visualize_mask(image, mask, output_path, question=""):
     # Mask heatmap
     mask_grid = mask.reshape(24, 24)
     axes[1].imshow(mask_grid, cmap="hot", interpolation="nearest")
-    axes[1].set_title(f"Selected Tokens (k={mask.sum():.0f})")
+    axes[1].set_title(f"Selected Tokens (k={k})")
     axes[1].axis("off")
 
     # Overlay
