@@ -12,7 +12,7 @@ setup(
     name="tc-vitok",
     version="0.1.0",
     author="Muhammad Ali Shah, Talha Hassan Ul Haq",
-    author_email="",
+    author_email="27100172@lums.edu.pk",
     description="Task-Conditioned Visual Tokenizer for Efficient Vision-Language Reasoning",
     long_description=long_description,
     long_description_content_type="text/markdown",
