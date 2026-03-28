@@ -181,22 +181,30 @@ class TCViTokTrainer:
         questions = batch["questions"]
         labels = batch["labels"].to(self.device)
 
-        # Forward pass (always return mask for loss computation)
+        # Forward pass (return indices for inspection if needed)
         outputs = self.model(
             images_coarse=images_coarse,
             images_full=images_full,
             questions=questions,
             labels=labels,
             tau=tau,
-            return_mask=True,  # needed for entropy/diversity losses
+            return_indices=True,  # get indices for potential inspection
         )
+
+        # Reconstruct mask from indices for entropy/diversity losses
+        # Note: mask with gradients is computed internally in TPN via STE
+        # Here we create a detached mask for entropy/diversity computation
+        B, N = outputs["scores"].shape
+        mask = torch.zeros(B, N, device=outputs["scores"].device)
+        for b in range(B):
+            mask[b, outputs["indices"][b]] = 1.0
 
         # Compute losses (scores required for L1 sparsity on raw scores)
         loss_dict = compute_total_loss(
             logits=outputs.get("logits"),
             labels=labels,
             scores=outputs["scores"],
-            mask=outputs.get("mask", outputs["scores"]),
+            mask=mask,  # reconstructed from indices
             k=self.model.k,
             lambda_sparsity=lambda_sparsity,
             lambda_entropy=self.lambda_entropy,

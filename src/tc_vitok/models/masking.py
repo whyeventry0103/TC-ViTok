@@ -16,7 +16,7 @@ def gumbel_sigmoid_ste(
     tau: float = 1.0,
     training: bool = True,
     hard: bool = True,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Gumbel-Sigmoid Straight-Through Estimator for differentiable top-k selection.
 
     Forward pass: hard top-k binary mask (exact k ones per sample).
@@ -29,7 +29,7 @@ def gumbel_sigmoid_ste(
         m_soft = sigmoid((scores + g) / tau)  # soft mask
         topk_idx = scores.topk(k).indices     # hard top-k on RAW scores
         m_hard = scatter(topk_idx, 1.0)
-        return m_hard - m_soft.detach() + m_soft  # STE trick
+        return m_hard - m_soft.detach() + m_soft, topk_idx  # STE trick + indices
 
     Args:
         scores: Raw importance scores from TPN, Shape: [B, N]
@@ -40,13 +40,14 @@ def gumbel_sigmoid_ste(
 
     Returns:
         mask: Selection mask, Shape: [B, N]
+        idx: Top-k indices, Shape: [B, k]
     """
     if not training:
         # Inference: deterministic hard top-k, no gradients needed
         topk_idx = scores.topk(k, dim=-1).indices
         mask = torch.zeros_like(scores)
         mask.scatter_(-1, topk_idx, 1.0)
-        return mask
+        return mask, topk_idx
 
     # Step 1: Sample Gumbel noise
     eps = 1e-8
@@ -57,7 +58,9 @@ def gumbel_sigmoid_ste(
     m_soft = torch.sigmoid((scores + g) / tau)
 
     if not hard:
-        return m_soft
+        # Return soft mask without indices (rarely used)
+        topk_idx = scores.topk(k, dim=-1).indices
+        return m_soft, topk_idx
 
     # Step 3: Hard top-k on RAW scores (not noisy scores)
     topk_idx = scores.topk(k, dim=-1).indices
@@ -65,7 +68,8 @@ def gumbel_sigmoid_ste(
     m_hard.scatter_(-1, topk_idx, 1.0)
 
     # Step 4: STE trick — forward = m_hard, backward = grad through m_soft
-    return m_hard - m_soft.detach() + m_soft
+    # Return both mask (for gradient flow) and indices (for gather operation)
+    return m_hard - m_soft.detach() + m_soft, topk_idx
 
 
 def compute_spatial_entropy(mask: torch.Tensor) -> torch.Tensor:
