@@ -48,6 +48,9 @@ def detect_spatial_collapse(
 
     batch_size, num_tokens = masks.shape
     h, w = grid_size
+    assert num_tokens == h * w, (
+        f"detect_spatial_collapse: expected {h*w} tokens for {h}×{w} grid, got {num_tokens}"
+    )
 
     # Reshape to spatial grid: [batch_size, 24, 24]
     masks_spatial = masks.view(batch_size, h, w)

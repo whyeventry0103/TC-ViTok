@@ -2,14 +2,15 @@
 """CLI entry point for training TC-ViTok.
 
 Usage:
-    python scripts/train.py --config configs/base.yaml --output runs/phase1/
-    python scripts/train.py --config configs/base.yaml --resume runs/phase0/best.ckpt
-    python scripts/train.py --config configs/base.yaml --stub  # Use StubLLM for testing
+    python scripts/train.py --config configs/phase0.yaml --output runs/phase0/
+    python scripts/train.py --config configs/phase0.yaml --output runs/ --run-both-phases
+    python scripts/train.py --config configs/phase1.yaml --resume runs/phase0/best.ckpt
+    python scripts/train.py --config configs/base.yaml --max-steps 1 --stub --dummy-data
 
 This script:
 1. Loads configuration from YAML
 2. Initializes model, datasets, and trainer
-3. Runs multi-phase training loop
+3. Runs Phase 0 (TPN warmup) and optionally Phase 1 (joint finetuning)
 4. Saves checkpoints and logs to WandB
 
 Paper reference: Section 7 (Training Procedure)
@@ -18,7 +19,6 @@ Paper reference: Section 7 (Training Procedure)
 import argparse
 import os
 from pathlib import Path
-import yaml
 import torch
 import wandb
 from omegaconf import OmegaConf
@@ -37,7 +37,7 @@ def parse_args():
         "--config",
         type=str,
         required=True,
-        help="Path to config YAML file (e.g., configs/base.yaml)",
+        help="Path to config YAML file (e.g., configs/phase0.yaml)",
     )
     parser.add_argument(
         "--output",
@@ -56,6 +56,20 @@ def parse_args():
         type=str,
         default="tc-vitok",
         help="WandB project name",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Override max training steps from config (useful for dry runs: --max-steps 1)",
+    )
+    parser.add_argument(
+        "--run-both-phases",
+        action="store_true",
+        help=(
+            "When config is phase0.yaml, automatically run Phase 1 after Phase 0 "
+            "using configs/phase1.yaml from the same directory"
+        ),
     )
     parser.add_argument(
         "--device",
@@ -96,55 +110,12 @@ def detect_device():
     return "cpu"
 
 
-def main():
-    args = parse_args()
+def build_loaders(data_config, batch_size, num_workers, args):
+    """Build train and val DataLoaders from config and args.
 
-    # MPS/Apple Silicon compatibility
-    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
-
-    # Load config
-    config = OmegaConf.load(args.config)
-    config_dict = OmegaConf.to_container(config, resolve=True)
-
-    # Override output dir
-    config_dict["logging"]["output_dir"] = args.output
-
-    device = args.device or detect_device()
-    phase = config_dict.get("phase", 1)
-
-    print(f"Loaded config from {args.config}")
-    print(f"Phase: {phase}")
-    print(f"Device: {device}")
-
-    # Initialize WandB
-    if not args.no_wandb:
-        wandb.init(
-            project=args.wandb_project,
-            name=config_dict.get("logging", {}).get(
-                "wandb_run_name", f"phase{phase}"
-            ),
-            config=config_dict,
-        )
-
-    # Initialize model
-    tpn_config = config_dict.get("model", {}).get("tpn", {})
-    lora_config = config_dict.get("model", {}).get("lora", {})
-    k = config_dict.get("model", {}).get("k", 144)
-
-    model = TCViTokModel(
-        k=k,
-        tpn_config=tpn_config,
-        use_stub_llm=args.stub,
-        lora_config=lora_config,
-    )
-    print(f"Model created (stub={args.stub}, k={k})")
-    print(f"Trainable params: {model.get_num_params():,}")
-
-    # Load datasets
-    data_config = config_dict.get("data", {})
-    batch_size = config_dict.get("training", {}).get("batch_size", 16)
-    num_workers = data_config.get("num_workers", 0)
-
+    Returns:
+        train_loader, val_loader (val_loader may be None)
+    """
     if args.dummy_data:
         print("Using DummyVQADataset for pipeline testing")
         train_dataset = DummyVQADataset(num_samples=256)
@@ -195,9 +166,6 @@ def main():
         train_collate = collate_fn
         val_collate = collate_fn
 
-    # Create data loaders
-    from tc_vitok.data.caching import cached_collate_fn
-
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=batch_size,
@@ -218,7 +186,24 @@ def main():
             pin_memory=data_config.get("pin_memory", False),
         )
 
-    # Create trainer
+    return train_loader, val_loader
+
+
+def run_phase(model, config_dict, train_loader, val_loader, device, resume=None):
+    """Create trainer, optionally resume, and run one training phase.
+
+    Args:
+        model: TCViTokModel instance (will have set_training_phase called by trainer)
+        config_dict: Config dict for this phase
+        train_loader: Training DataLoader
+        val_loader: Validation DataLoader (may be None)
+        device: Training device
+        resume: Optional checkpoint path to resume from
+
+    Returns:
+        final_metrics: Dict from trainer.train()
+        phase_output_dir: Path where checkpoints were saved
+    """
     trainer = TCViTokTrainer(
         model=model,
         config=config_dict,
@@ -227,18 +212,126 @@ def main():
         device=device,
     )
 
-    # Resume from checkpoint if provided
-    if args.resume:
-        trainer.load_checkpoint(args.resume)
+    if resume:
+        trainer.load_checkpoint(resume)
 
-    # Run training
     final_metrics = trainer.train()
+    return final_metrics, trainer.output_dir
 
-    print("Training complete!")
-    print(f"Final metrics: {final_metrics}")
+
+def main():
+    args = parse_args()
+
+    # MPS/Apple Silicon compatibility
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+    # Load config
+    config = OmegaConf.load(args.config)
+    config_dict = OmegaConf.to_container(config, resolve=True)
+    config_path = Path(args.config)
+    phase = config_dict.get("phase", 1)
+
+    # Apply --max-steps override (useful for dry runs: --max-steps 1)
+    if args.max_steps is not None:
+        config_dict["training"]["max_steps"] = args.max_steps
+
+    device = args.device or detect_device()
+
+    print(f"Loaded config from {args.config}")
+    print(f"Phase: {phase}")
+    print(f"Device: {device}")
+    if args.max_steps is not None:
+        print(f"max_steps overridden to {args.max_steps}")
+
+    # Initialize model (shared across phases when running both)
+    tpn_config = config_dict.get("model", {}).get("tpn", {})
+    lora_config = config_dict.get("model", {}).get("lora", {})
+    k = config_dict.get("model", {}).get("k", 144)
+
+    model = TCViTokModel(
+        k=k,
+        tpn_config=tpn_config,
+        use_stub_llm=args.stub,
+        lora_config=lora_config,
+    )
+    print(f"Model created (stub={args.stub}, k={k})")
+    print(f"Trainable params: {model.get_num_params():,}")
+
+    # ------------------------------------------------------------------ #
+    # Phase 0 training                                                     #
+    # ------------------------------------------------------------------ #
+    phase0_output = Path(args.output) / "phase0"
+    config_dict["logging"]["output_dir"] = str(phase0_output)
+
+    # Initialize WandB for Phase 0
+    if not args.no_wandb:
+        run_name = config_dict.get("logging", {}).get("wandb_run_name", f"phase{phase}")
+        wandb.init(project=args.wandb_project, name=run_name, config=config_dict)
+
+    data_config = config_dict.get("data", {})
+    batch_size = config_dict.get("training", {}).get("batch_size", 16)
+    num_workers = data_config.get("num_workers", 0)
+
+    train_loader, val_loader = build_loaders(data_config, batch_size, num_workers, args)
+
+    phase0_metrics, phase0_dir = run_phase(
+        model, config_dict, train_loader, val_loader, device, resume=args.resume
+    )
+    print(f"Phase {phase} complete. Metrics: {phase0_metrics}")
 
     if not args.no_wandb and wandb.run is not None:
         wandb.finish()
+
+    # ------------------------------------------------------------------ #
+    # Phase 1 training (only when --run-both-phases and config is Phase 0) #
+    # ------------------------------------------------------------------ #
+    if args.run_both_phases and phase == 0:
+        phase1_config_path = config_path.parent / "phase1.yaml"
+        if not phase1_config_path.exists():
+            print(f"WARNING: --run-both-phases requested but {phase1_config_path} not found. Skipping Phase 1.")
+        else:
+            print(f"\nProceeding to Phase 1 using {phase1_config_path}")
+
+            phase1_config = OmegaConf.load(phase1_config_path)
+            phase1_dict = OmegaConf.to_container(phase1_config, resolve=True)
+
+            # Apply --max-steps override to Phase 1 too (for dry runs)
+            if args.max_steps is not None:
+                phase1_dict["training"]["max_steps"] = args.max_steps
+
+            phase1_output = Path(args.output) / "phase1"
+            phase1_dict["logging"]["output_dir"] = str(phase1_output)
+
+            # Phase 1 resumes from Phase 0 best checkpoint
+            phase0_best = phase0_dir / "best.ckpt"
+            phase1_resume = str(phase0_best) if phase0_best.exists() else None
+            if phase1_resume:
+                print(f"Phase 1 resuming from {phase1_resume}")
+            else:
+                print("WARNING: Phase 0 best.ckpt not found; Phase 1 starts from scratch")
+
+            if not args.no_wandb:
+                run_name1 = phase1_dict.get("logging", {}).get("wandb_run_name", "phase1")
+                wandb.init(project=args.wandb_project, name=run_name1, config=phase1_dict)
+
+            # Rebuild loaders with Phase 1 data config (may include GQA)
+            data_config1 = phase1_dict.get("data", {})
+            batch_size1 = phase1_dict.get("training", {}).get("batch_size", batch_size)
+            num_workers1 = data_config1.get("num_workers", num_workers)
+            train_loader1, val_loader1 = build_loaders(
+                data_config1, batch_size1, num_workers1, args
+            )
+
+            phase1_metrics, _ = run_phase(
+                model, phase1_dict, train_loader1, val_loader1, device,
+                resume=phase1_resume,
+            )
+            print(f"Phase 1 complete. Metrics: {phase1_metrics}")
+
+            if not args.no_wandb and wandb.run is not None:
+                wandb.finish()
+
+    print("\nTraining complete!")
 
 
 if __name__ == "__main__":
