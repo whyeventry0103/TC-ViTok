@@ -322,3 +322,111 @@ TEST 7: Curriculum — tau: 1.0→0.1, lambda: 0.0→0.1 ✓
 - `scripts/test_core.py`: **7/7 PASSED** (unchanged)
 - `tests/` (pytest): **52/52 PASSED** (all new)
 - Total test coverage: 59 passing tests
+
+---
+
+## Session 2026-04-01 (Sprint 2): T003–T005 Completion
+
+**Date:** 2026-04-01
+**Scope:** Confirmed T003/T004 done; implemented T005 (LLaVA-1.5-7B integration).
+
+---
+
+### 12. T003 & T004 — VQAv2 and GQA Dataset Loaders
+
+**Category:** CONFIRMED COMPLETE (were already implemented in prior session)
+**File:** `src/tc_vitok/data/datasets.py`
+
+Confirmed fully implemented:
+- `VQAv2Dataset`: JSON loading (questions + annotations), DINO_TRANSFORM (98×98, ImageNet norm)
+  + CLIP_TRANSFORM (336×336, CLIP norm), top-3129 answer vocabulary, `answers` list in output
+- `GQADataset`: GQA question JSON format, scene graph loading (optional), spatial annotation
+  in `gqa_annotation` output key for use with `classify_spatial()`
+- `TextVQADataset`: TextVQA JSON format, `.jpg`/`.png` fallback, top-5000 answer vocab
+- `POPEDataset`: JSONL format, binary yes/no vocabulary
+- `PairedVQADataset`: image→indices index for diversity loss
+- `collate_fn`: handles tensor stacking + metadata pass-through
+
+---
+
+### 13. T005 — LLaVA-1.5-7B Integration
+
+**Category:** CRITICAL
+**Files:** `src/tc_vitok/models/tc_vitok_model.py`, `src/tc_vitok/training/optimizer.py`,
+           `src/tc_vitok/training/trainer.py`
+
+**Problem:** `_llava_forward` only fed visual tokens as `inputs_embeds` — no question text,
+no proper label alignment. The `generate` method also ignored question text. The
+`set_training_phase` method didn't handle `mm_projector` or `vqa_head` freeze/unfreeze.
+`forward_cached` had no `questions` parameter.
+
+**What changed:**
+
+#### `_init_llava` (expanded)
+- Freeze `llava.vision_tower` parameters (LLaVA's ViT never used — TC-ViTok bypasses it)
+- Add `self.vqa_head = nn.Linear(llm_hidden_size, answer_vocab_size)`:
+  - `llm_hidden_size = 4096` (Vicuna-7B hidden size, read from `config.text_config.hidden_size`)
+  - `answer_vocab_size = 3129` by default (matches `VQAv2Dataset` top-answer vocab)
+  - Configurable via `lora_config["answer_vocab_size"]` for GQA (1878) or TextVQA (5000)
+
+#### `_llava_forward(v_selected, questions, labels)` (rewritten)
+Proper 5-step pipeline:
+1. Project k gathered tokens via `llava.multi_modal_projector` → `[B, k, 4096]`
+2. Tokenize `questions` via `processor.tokenizer` (max 128 tokens, padded) → `[B, T]`
+3. Embed text tokens via `lm.get_input_embeddings()` → `[B, T, 4096]`
+4. Concatenate `[visual_prefix | question_text]` → `[B, k+T, 4096]`, build combined attn mask
+5. Forward through LoRA-adapted LM with `output_hidden_states=True`
+6. Pool `last_hidden[:, :k, :]` over visual positions → `[B, 4096]`
+7. `vqa_head(pooled)` → `logits [B, 1, answer_vocab]`; cross-entropy against `labels [B, 1]`
+
+**Why pool over visual positions:** The visual tokens encode the query-conditioned spatial
+context from TPN; pooling them captures what the model "saw" given the question. This is
+more stable than using the last text token (variable position depending on question length).
+
+#### `_llava_generate(v_selected, questions, max_new_tokens)` (new method)
+Generative decode for evaluation:
+- Formats LLaVA-1.5 conversation template: `"USER: {question}\nASSISTANT:"`
+- Concatenates `[v_projected | prompt_embeds]`
+- Calls `lm.generate(inputs_embeds=..., attention_mask=..., do_sample=False)`
+- Strips `"ASSISTANT:"` prefix from decoded outputs
+
+#### `generate` method (updated)
+- StubLLM path unchanged
+- Real LLaVA path now calls `_llava_generate` (was incorrectly calling `_llava_forward` via visual-only inputs_embeds)
+
+#### `set_training_phase` (updated for Phase 0 / Phase 1+)
+| Phase | TPN | LoRA | mm_projector | vqa_head | vision_tower |
+|-------|-----|------|--------------|----------|--------------|
+| 0 | ✓ trainable | ✗ frozen | ✗ frozen | ✗ frozen | ✗ frozen |
+| 1/2 | ✓ trainable | ✓ (PEFT) | ✓ trainable | ✓ trainable | ✗ frozen |
+
+#### `forward_cached` (signature update)
+- Added `questions: Optional[list] = None` parameter
+- Passes `questions` to `_llava_forward`
+
+#### `optimizer.py` (minor update)
+- Phase 1+ projector group now includes `vqa_head` params (at `lr_mlp = 5e-4`)
+
+#### `trainer.py` (two sites updated)
+- `train_step` forward_cached call: `questions=batch.get("questions")`
+- `validate` forward_cached call: `questions=batch.get("questions")`
+
+**Effect:** Full end-to-end pipeline with real LLaVA-1.5-7B:
+- TPN selects k tokens from 576 (index-gather, no masking)
+- LLaVA mm_projector projects k×1024 → k×4096
+- Question tokenized separately, concatenated as text prefix
+- VQA head classifies over 3129-class answer vocabulary (compatible with `VQAv2Dataset`)
+- `generate()` produces natural language answers via LM.generate for evaluation
+
+---
+
+## System Readiness (Updated)
+
+- Architecture matches paper: **YES**
+- Core bugs fixed: **YES** (sparsity, entropy, gather, TPN)
+- API matches paperv4/planv2: **YES** (index-based gather throughout)
+- Pipeline runs minimally: **YES** (StubLLM, all 59 tests pass)
+- Token compression is real: **YES** (gather-based, [B,k,D] output)
+- Dataset loaders (T003/T004): **YES** (VQAv2, GQA, TextVQA, POPE fully implemented)
+- LLaVA integration (T005): **YES** (code complete; requires llava-hf/llava-1.5-7b-hf download to run)
+- Ready for first experiment: **YES** (pending downloads: LLaVA ~13.5GB + VQAv2/GQA datasets)

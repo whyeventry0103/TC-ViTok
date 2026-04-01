@@ -189,6 +189,7 @@ class TCViTokTrainer:
                 v_coarse=batch["v_coarse"].to(self.device),
                 q_embed=batch["q_embed"].to(self.device),
                 images_full=images_full,
+                questions=batch.get("questions"),  # needed for LLaVA text conditioning
                 labels=labels,
                 tau=tau,
                 return_idx=True,
@@ -283,6 +284,7 @@ class TCViTokTrainer:
                     v_coarse=batch["v_coarse"].to(self.device),
                     q_embed=batch["q_embed"].to(self.device),
                     images_full=images_full,
+                    questions=batch.get("questions"),
                     labels=labels,
                     tau=tau,
                     return_idx=True,

@@ -181,7 +181,17 @@ class TCViTokModel(nn.Module):
             self._init_llava(llava_model_name, lora_config or {})
 
     def _init_llava(self, model_name: str, lora_config: dict):
-        """Initialize LLaVA-1.5 with LoRA adapters."""
+        """Initialize LLaVA-1.5 with LoRA adapters and VQA classification head.
+
+        TC-ViTok replaces LLaVA's internal ViT with its own CLIP ViT-L/14 + TPN
+        pipeline. We therefore:
+          1. Load LlavaForConditionalGeneration (keeps mm_projector + LM)
+          2. Freeze LLaVA's vision_tower (never used — bypassed by our pipeline)
+          3. Apply LoRA to the language model (q/k/v/o_proj)
+          4. Add a VQA classification head: LLM hidden dim → answer vocabulary
+             This maps pooled LM hidden states to the VQAv2 answer vocabulary
+             (top-3129 answers by default, matching VQAv2Dataset)
+        """
         from transformers import LlavaForConditionalGeneration, LlavaProcessor
         from peft import get_peft_model, LoraConfig, TaskType
 
@@ -192,6 +202,13 @@ class TCViTokModel(nn.Module):
         )
         self.processor = LlavaProcessor.from_pretrained(model_name)
 
+        # Freeze LLaVA's internal ViT — TC-ViTok uses its own CLIP ViT-L/14
+        # via self.full_encoder; this ViT is never called in our forward pass
+        if hasattr(self.llava, "vision_tower"):
+            for param in self.llava.vision_tower.parameters():
+                param.requires_grad = False
+
+        # Apply LoRA (r=32, alpha=64) to language model q/k/v/o_proj
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
             inference_mode=False,
@@ -207,6 +224,13 @@ class TCViTokModel(nn.Module):
             self.llava.language_model,
             peft_config,
         )
+
+        # VQA classification head: LLM hidden size → answer vocabulary
+        # answer_vocab_size must match the dataset's answer_to_idx vocab
+        # (VQAv2Dataset defaults to top-3129; GQADataset to top-1878)
+        llm_hidden_size = self.llava.config.text_config.hidden_size  # 4096 for LLaVA-1.5-7B
+        answer_vocab_size = lora_config.get("answer_vocab_size", 3129)
+        self.vqa_head = nn.Linear(llm_hidden_size, answer_vocab_size)
 
     def forward(
         self,
@@ -261,7 +285,7 @@ class TCViTokModel(nn.Module):
         if self.use_stub_llm:
             llm_outputs = self.llm(visual_tokens=v_selected, labels=labels)
         else:
-            llm_outputs = self._llava_forward(v_selected, labels)
+            llm_outputs = self._llava_forward(v_selected, questions, labels)
 
         # Build output dict
         outputs = {
@@ -283,6 +307,7 @@ class TCViTokModel(nn.Module):
         v_coarse: torch.Tensor,
         q_embed: torch.Tensor,
         images_full: torch.Tensor,
+        questions: Optional[list] = None,
         labels: Optional[torch.Tensor] = None,
         tau: float = 1.0,
         return_idx: bool = False,
@@ -297,7 +322,8 @@ class TCViTokModel(nn.Module):
             v_coarse: Cached coarse features, Shape: [B, 49, 384]
             q_embed: Cached text embeddings, Shape: [B, 512]
             images_full: High-res images for CLIP ViT-L, Shape: [B, 3, 336, 336]
-            labels: Optional answer token IDs, Shape: [B, seq_len]
+            questions: List of question strings (needed for LLaVA text conditioning)
+            labels: Optional answer class indices, Shape: [B, 1]
             tau: Gumbel-Sigmoid temperature
             return_idx: If True, include idx and scores in output
 
@@ -323,7 +349,7 @@ class TCViTokModel(nn.Module):
         if self.use_stub_llm:
             llm_outputs = self.llm(visual_tokens=v_selected, labels=labels)
         else:
-            llm_outputs = self._llava_forward(v_selected, labels)
+            llm_outputs = self._llava_forward(v_selected, questions, labels)
 
         # Build output dict
         outputs = {
@@ -343,48 +369,168 @@ class TCViTokModel(nn.Module):
     def _llava_forward(
         self,
         v_selected: torch.Tensor,
+        questions: Optional[list] = None,
         labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Forward pass through real LLaVA with injected visual tokens.
+        """Forward pass through real LLaVA with injected visual tokens + question text.
 
-        Projects selected tokens through LLaVA's multi-modal projector,
-        then feeds them into the language model as visual prefix tokens.
+        Pipeline:
+          1. Project k gathered tokens through LLaVA's mm_projector → [B, k, H]
+          2. Tokenize question strings, embed via LM embedding layer → [B, T, H]
+          3. Concatenate [visual_prefix | question_text] → [B, k+T, H]
+          4. Forward through LoRA-adapted LM, collect last hidden states
+          5. Pool over visual positions → [B, H], apply VQA head → [B, answer_vocab]
+          6. Cross-entropy against classification labels [B, 1]
+
+        This keeps the training interface compatible with datasets.py (which stores
+        answer class indices, not tokenized sequences) while properly conditioning
+        the LM on both visual tokens and the question text.
 
         Args:
             v_selected: Selected visual tokens, Shape: [B, k, 1024]
-            labels: Optional answer token IDs, Shape: [B, seq_len]
+            questions: List of question strings, length B (optional; visual-only if None)
+            labels: Answer class indices, Shape: [B, 1], values in [0, answer_vocab_size)
 
         Returns:
-            outputs: Dict with 'logits' and optionally 'loss'
+            outputs: Dict with 'logits' [B, 1, answer_vocab] and optionally 'loss'
         """
-        # Project visual tokens through LLaVA's multi-modal projector
-        v_projected = self.llava.multi_modal_projector(v_selected)
-        # v_projected: [B, k, llm_hidden_size] (e.g., [B, 144, 4096])
+        import torch.nn.functional as F_local
 
-        # Get the language model hidden size
+        B, k, _ = v_selected.shape
+        device = v_selected.device
         lm = self.llava.language_model
-        if hasattr(lm, 'base_model'):
-            # LoRA-wrapped model
-            base_lm = lm.base_model.model
+
+        # Step 1: Project visual tokens through mm_projector
+        # mm_projector is a 2-layer MLP: 1024 → 4096 (LLaVA-1.5-7B)
+        v_projected = self.llava.multi_modal_projector(v_selected)  # [B, k, H]
+
+        # Step 2: Tokenize questions and embed (if provided)
+        if questions is not None:
+            tokenizer = self.processor.tokenizer
+            text_inputs = tokenizer(
+                list(questions),
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=128,
+                add_special_tokens=True,
+            )
+            input_ids = text_inputs.input_ids.to(device)           # [B, T]
+            text_attn = text_inputs.attention_mask.to(device)      # [B, T]
+
+            # Embed text tokens using the LM embedding layer
+            embed_fn = lm.get_input_embeddings()
+            text_embeds = embed_fn(input_ids)                      # [B, T, H]
+
+            # Concatenate: visual prefix first, then question text
+            combined_embeds = torch.cat([v_projected, text_embeds], dim=1)  # [B, k+T, H]
+            vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
+            combined_mask = torch.cat([vis_attn, text_attn], dim=1)        # [B, k+T]
         else:
-            base_lm = lm
+            # No question text — visual tokens only (not recommended for production)
+            combined_embeds = v_projected                                    # [B, k, H]
+            combined_mask = torch.ones(B, k, device=device, dtype=torch.long)
 
-        # Create attention mask for visual tokens
-        B, k_len = v_projected.shape[:2]
-        attention_mask = torch.ones(B, k_len, device=v_projected.device, dtype=torch.long)
-
-        # Forward through language model with visual tokens as inputs_embeds
+        # Step 3: Forward through LoRA-adapted language model
         lm_outputs = lm(
-            inputs_embeds=v_projected,
-            attention_mask=attention_mask,
-            labels=labels,
+            inputs_embeds=combined_embeds,
+            attention_mask=combined_mask,
+            output_hidden_states=True,
         )
 
-        result = {"logits": lm_outputs.logits}
-        if hasattr(lm_outputs, "loss") and lm_outputs.loss is not None:
-            result["loss"] = lm_outputs.loss
+        # Step 4: Pool last hidden state over visual token positions
+        # Using visual positions only (first k positions) focuses the pooling
+        # on the visual representation rather than the question text
+        last_hidden = lm_outputs.hidden_states[-1]   # [B, k+T, H] (or [B, k, H])
+        visual_hidden = last_hidden[:, :k, :]        # [B, k, H]
+        pooled = visual_hidden.mean(dim=1)           # [B, H]
+
+        # Step 5: VQA classification head: H → answer_vocab
+        logits = self.vqa_head(pooled).unsqueeze(1)  # [B, 1, answer_vocab]
+
+        result: Dict[str, torch.Tensor] = {"logits": logits}
+
+        # Step 6: Cross-entropy against answer class labels
+        if labels is not None:
+            loss = F_local.cross_entropy(
+                logits.squeeze(1),   # [B, answer_vocab]
+                labels.view(-1),     # [B]
+                ignore_index=-100,
+            )
+            result["loss"] = loss
 
         return result
+
+    def _llava_generate(
+        self,
+        v_selected: torch.Tensor,
+        questions: list,
+        max_new_tokens: int = 20,
+    ) -> list:
+        """Generative answer decoding using LLaVA backbone.
+
+        Constructs the LLaVA-1.5 conversation template, concatenates visual
+        prefix with question embeddings, and calls lm.generate. Used during
+        evaluation to produce natural language answers for VQA scoring.
+
+        Args:
+            v_selected: Selected visual tokens, Shape: [B, k, 1024]
+            questions: List of question strings, length B
+            max_new_tokens: Maximum tokens to generate per sample
+
+        Returns:
+            answers: List of decoded answer strings, length B
+        """
+        B, k, _ = v_selected.shape
+        device = v_selected.device
+        tokenizer = self.processor.tokenizer
+        lm = self.llava.language_model
+
+        # Project visual tokens
+        v_projected = self.llava.multi_modal_projector(v_selected)  # [B, k, H]
+
+        # Build LLaVA-1.5 conversation template (without <image> token —
+        # we inject visual tokens directly as embeddings)
+        prompts = [f"USER: {q}\nASSISTANT:" for q in questions]
+        text_inputs = tokenizer(
+            prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=128,
+            add_special_tokens=True,
+        )
+        input_ids = text_inputs.input_ids.to(device)
+        text_attn = text_inputs.attention_mask.to(device)
+
+        # Embed prompt tokens
+        embed_fn = lm.get_input_embeddings()
+        text_embeds = embed_fn(input_ids)  # [B, T, H]
+
+        # Concatenate: visual prefix + conversation prompt
+        combined_embeds = torch.cat([v_projected, text_embeds], dim=1)  # [B, k+T, H]
+        vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
+        combined_mask = torch.cat([vis_attn, text_attn], dim=1)        # [B, k+T]
+
+        # Generate answer tokens
+        generated_ids = lm.generate(
+            inputs_embeds=combined_embeds,
+            attention_mask=combined_mask,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+
+        # Decode and strip conversation template artifacts
+        raw_answers = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+        answers = []
+        for ans in raw_answers:
+            # Strip "ASSISTANT:" prefix and any leading/trailing whitespace
+            if "ASSISTANT:" in ans:
+                ans = ans.split("ASSISTANT:")[-1]
+            answers.append(ans.strip())
+
+        return answers
 
     @torch.no_grad()
     def generate(
@@ -425,26 +571,14 @@ class TCViTokModel(nn.Module):
         v_selected = gather_tokens(v_full, idx)
 
         if self.use_stub_llm:
-            # StubLLM: return argmax of logits as dummy answers
+            # StubLLM: argmax of first visual position's logit → class index string
             llm_outputs = self.llm(visual_tokens=v_selected)
             logits = llm_outputs["logits"]
             preds = logits[:, 0, :].argmax(dim=-1)
             return [str(p.item()) for p in preds]
         else:
-            # Real LLaVA: project and generate
-            v_projected = self.llava.multi_modal_projector(v_selected)
-            lm = self.llava.language_model
-
-            generated_ids = lm.generate(
-                inputs_embeds=v_projected,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-            )
-
-            # Decode generated tokens
-            tokenizer = self.processor.tokenizer
-            answers = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-            return answers
+            # Real LLaVA: generative decode with conversation template
+            return self._llava_generate(v_selected, questions, max_new_tokens)
 
     def get_selection_info(
         self,
@@ -497,24 +631,39 @@ class TCViTokModel(nn.Module):
             param.requires_grad = False
 
         if phase == 0:
-            # Train TPN only
+            # Train TPN only — freeze all LLM components
             for param in self.tpn.parameters():
                 param.requires_grad = True
             if self.use_stub_llm:
                 for param in self.llm.parameters():
                     param.requires_grad = False
             else:
+                # Freeze entire LLaVA (LM + mm_projector + vision_tower)
                 for param in self.llava.parameters():
+                    param.requires_grad = False
+                # Freeze VQA classification head too (TPN learns independently)
+                for param in self.vqa_head.parameters():
                     param.requires_grad = False
 
         elif phase in [1, 2]:
-            # Train TPN + LLM adapters
+            # Train TPN + LoRA + mm_projector + VQA head
             for param in self.tpn.parameters():
                 param.requires_grad = True
             if self.use_stub_llm:
                 for param in self.llm.parameters():
                     param.requires_grad = True
-            # LoRA params are already trainable via PEFT when not using stub
+            else:
+                # LoRA adapter params are set trainable by PEFT automatically
+                # Explicitly unfreeze mm_projector (vision projector, ~9M params)
+                for param in self.llava.multi_modal_projector.parameters():
+                    param.requires_grad = True
+                # Unfreeze VQA classification head
+                for param in self.vqa_head.parameters():
+                    param.requires_grad = True
+                # Keep vision_tower frozen (never used)
+                if hasattr(self.llava, "vision_tower"):
+                    for param in self.llava.vision_tower.parameters():
+                        param.requires_grad = False
 
         else:
             raise ValueError(f"Invalid phase: {phase}. Must be 0, 1, or 2.")
