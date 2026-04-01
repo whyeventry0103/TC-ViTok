@@ -26,17 +26,11 @@ Instead of encoding all 576 tokens, TC-ViTok:
 4. **Gathers** selected tokens from full CLIP ViT-L/14 output via `torch.gather` (real compression)
 5. Feeds **k gathered tokens** (not N) to **LLaVA** — LLM sees k+L tokens, reducing prefill FLOPs
 
-**High-level flow:**
-```
-┌──────┐     ┌─────────────┐     ┌─────┐     ┌──────────┐     ┌─────┐     ┌────────┐
-│Image │────>│ DINOv2-S    │────>│     │     │ CLIP     │     │     │────>│ LLaVA  │───> Answer
-│      │     │ (98x98)     │     │ TPN │────>│ ViT-L/14 │────>│Mask │     │ +LoRA  │
-└──────┘     └─────────────┘     │     │     │ (336x336)│     │     │     └────────┘
-                                  │     │     └──────────┘     └─────┘
-┌──────┐     ┌─────────────┐     │     │
-│Query │────>│ CLIP Text   │────>│     │
-└──────┘     └─────────────┘     └─────┘
-```
+**System Architecture:**
+
+![TC-ViTok System Architecture](assets/tc_vitok_architecture.png)
+
+*Gray dashed = frozen encoders; Green = trainable components; Orange = operations; Blue = data tensors. Tensor shapes shown on arrows.*
 
 ---
 
@@ -88,7 +82,13 @@ TC-ViTok consists of five main components:
 | LLaVA (LoRA + proj)     | 35M        | **✓ Yes** | k×1024        | text           |
 | **Total Trainable**     | **~34M**   | **—**     | **—**         | **—**          |
 
-**Architecture Diagram:** See `assets/architecture_diagram.png` (placeholder — to be added)
+### Architecture Diagrams
+
+**TPN Internal Architecture:**
+
+![TPN Architecture](assets/tpn_architecture.png)
+
+*Three-stage pipeline: (1) Cross-attention with H=4 heads fuses query q_e with coarse visual v_c, producing context vector ctx and attention weights alpha_avg. (2) Score MLP maps concat [ctx; alpha_avg] (433-dim) to 49 coarse scores. (3) Bilinear upsample 7x7 to 24x24, then Gumbel-Sigmoid STE selects top-k indices.*
 
 ---
 
@@ -111,6 +111,12 @@ The core technical challenge is making discrete token selection differentiable. 
    - High tau → exploration (soft selection, rich gradients)
    - Low tau → exploitation (sharp selection, near-binary masks)
 
+**Gumbel-Sigmoid STE Mechanism:**
+
+![Gumbel-Sigmoid STE](assets/gumbel_ste.png)
+
+*Top: Forward pass shows two parallel paths -- soft path (Gumbel noise + sigmoid for gradient flow) and hard path (top-k for discrete selection), combined via the STE trick. Bottom: Temperature effect on sigmoid sharpness.*
+
 ### Three-Phase Training Curriculum
 
 **Phase 0: TPN Warmup (1 epoch, ~10k steps)**
@@ -129,6 +135,12 @@ The core technical challenge is making discrete token selection differentiable. 
 1. Finetune on TextVQA for OCR-heavy questions
 2. Lower learning rates (TPN: 5e-5, LoRA: 2e-5)
 3. Fixed temperature tau=0.1; lambda=0
+
+**Training Curriculum Overview:**
+
+![Training Pipeline](assets/training_pipeline.png)
+
+*Top: Three training phases with hyperparameters. Bottom: Temperature annealing (cosine decay from 1.0 to 0.1) and sparsity regularization (linear warmup from 0 to 0.1 over T_warmup=5000 steps).*
 
 ### Known Failure Modes & Mitigations
 
@@ -205,8 +217,14 @@ tc-vitok/
 │   ├── test_masking.py               # STE forward/backward correctness
 │   └── test_spatial_labels.py        # Spatial classifier label distribution sanity
 │
+├── scripts/
+│   └── generate_diagrams.py          # Generate architecture diagrams (matplotlib)
+│
 └── assets/
-    └── architecture_diagram.png      # Placeholder for TPN architecture figure
+    ├── tc_vitok_architecture.png     # End-to-end system architecture
+    ├── tpn_architecture.png          # TPN internal architecture (3 stages)
+    ├── training_pipeline.png         # Three-phase curriculum + schedule curves
+    └── gumbel_ste.png                # Gumbel-Sigmoid STE mechanism
 ```
 
 ---
