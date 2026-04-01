@@ -253,3 +253,72 @@ TEST 7: Curriculum — tau: 1.0→0.1, lambda: 0.0→0.1 ✓
 - Pipeline runs minimally: **YES** (StubLLM, all tests pass)
 - Token compression is real: **YES** (gather-based, [B,k,D] output)
 - Ready for first experiment: **YES** (pending real dataset loaders and LLaVA integration)
+
+---
+
+## Session 2026-04-01: Implementation Sprint
+
+### Assessment of Existing "Stub" Files
+
+**Finding:** Most files flagged as stubs in MEMORY.md were actually already implemented with functional code. They contained leftover `# TODO (Phase X)` comments above working implementations, which gave the false impression of stubs. The actual work needed was:
+
+1. **Already implemented (had stale TODO comments removed):**
+   - `src/tc_vitok/evaluation/metrics.py` — vqa_score, gqa_accuracy, pope_f1, textvqa_accuracy, aggregate_scores all functional
+   - `src/tc_vitok/evaluation/collapse_detection.py` — detect_spatial_collapse, detect_query_ignoring, check_gradient_flow, run_full_diagnostics all functional
+   - `src/tc_vitok/evaluation/spatial_eval.py` — evaluate_spatial_stratified, analyze_selection_by_spatial all functional
+   - `src/tc_vitok/evaluation/pareto.py` — compute_pareto_curve, compare_pareto_curves, format_pareto_table all functional
+   - `src/tc_vitok/data/caching.py` — build_cache, CachedFeatureDataset, cached_collate_fn all functional
+   - `scripts/train.py` — Full CLI with argparse, config loading, dataset creation, trainer invocation
+   - `scripts/evaluate.py` — Full CLI with benchmark evaluation, Pareto sweep, spatial eval
+
+2. **Actually needed implementation (were true stubs):**
+   - `tests/test_tpn.py` — Was all `pass` with commented-out code
+   - `tests/test_masking.py` — Was all `pass` with commented-out code
+   - `tests/test_spatial_labels.py` — Was all `pass` with commented-out code
+   - `scripts/cache_features.py` — Had commented-out imports and TODO-only main()
+   - `scripts/visualize_masks.py` — Had TODO-only main() and partial visualize_mask
+
+### Implemented Files
+
+#### tests/test_tpn.py (12 tests)
+- `TestTPNOutputShape`: idx shape [B,k], s_N shape [B,576], idx range [0,575], unique indices, parametrized k values
+- `TestTPNParamCount`: approximately 887K, exactly 887,955
+- `TestTPNGradientFlow`: s_N has grad_fn, backward produces parameter gradients
+- `TestTPNEvalMode`: deterministic output with training=False
+
+#### tests/test_masking.py (16 tests)
+- `TestSTEForward`: binary mask, exactly k selected, idx shape, idx matches mask ones
+- `TestSTEBackward`: mask has grad_fn, backward produces gradients, gradients are soft (not hard 0/1)
+- `TestSTEDeterministic`: eval mode no randomness, eval mask is binary
+- `TestGatherTokens`: output shape [B,k,D], correct values match manual indexing, various k values
+- `TestSpatialEntropy`: uniform mask high entropy, collapsed mask low entropy
+- `TestMaskDiversity`: identical masks low diversity, varied masks higher diversity
+
+#### tests/test_spatial_labels.py (24 tests)
+- `TestKeywordClassification`: 8 spatial questions detected, 7 global questions detected (parametrized)
+- `TestAnnotationClassification`: annotation with/without spatial relation, empty relations, fallback to keywords
+- `TestLabelDistribution`: mixed questions produce both labels, spatial ratio in [0.2, 0.6]
+- `TestBatchClassification`: batch matches individual, batch with annotations
+
+#### scripts/cache_features.py (fully wired)
+- Imports CoarseVisualEncoder, TextEncoder, build_cache
+- Supports --dataset vqav2|gqa, --split, --output, --device (auto-detect)
+- Validates required arguments per dataset
+- Calls build_cache() with proper encoder instances
+
+#### scripts/visualize_masks.py (fully wired)
+- Loads checkpoint, reconstructs TCViTokModel
+- Applies DINO_TRANSFORM and CLIP_TRANSFORM to input images
+- Runs TPN inference, extracts idx, converts to 24x24 mask grid
+- 3-panel visualization: original, heatmap, overlay
+- Supports --stub flag for testing without LLaVA
+
+### Cleanup
+- Removed 15 stale `# TODO (Phase X)` comments from evaluation module files
+- Created `tests/__init__.py` for proper pytest discovery
+- Installed pytest into conda env (was not previously installed)
+
+### Test Results
+- `scripts/test_core.py`: **7/7 PASSED** (unchanged)
+- `tests/` (pytest): **52/52 PASSED** (all new)
+- Total test coverage: 59 passing tests

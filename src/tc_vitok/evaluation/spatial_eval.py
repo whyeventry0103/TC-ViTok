@@ -48,7 +48,6 @@ def evaluate_spatial_stratified(
 
     Paper reference: Section 8.3, Table 2
     """
-    # TODO (Phase C): Implement stratified evaluation
 
     assert len(predictions) == len(ground_truth) == len(questions)
 
@@ -118,7 +117,6 @@ def analyze_selection_by_spatial(
 
     Paper reference: Section 9.1 (Failure Mode Diagnosis)
     """
-    # TODO (Phase D): Implement selection analysis
 
     import numpy as np
 

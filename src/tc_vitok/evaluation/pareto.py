@@ -32,7 +32,6 @@ def compute_pareto_curve(
 
     Paper reference: Figure 3 (Pareto curves)
     """
-    # TODO (Phase D): Compute Pareto frontier
 
     points = list(zip(token_budgets, accuracies))
     points.sort()  # Sort by token budget
@@ -85,7 +84,6 @@ def compare_pareto_curves(
 
     Paper reference: Table 2 (Main Results)
     """
-    # TODO (Phase D): Compare two Pareto curves
 
     # Compute accuracy gaps at each k
     common_ks = set(baseline_data.keys()) & set(tcvitok_data.keys())
@@ -158,7 +156,6 @@ def format_pareto_table(
 
     Paper reference: Table 2
     """
-    # TODO (Phase D): Format results table
 
     # Header
     header = "| k   |" + "|".join(f" {b:^7s} |" for b in benchmarks)

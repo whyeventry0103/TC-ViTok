@@ -45,7 +45,6 @@ def detect_spatial_collapse(
 
     Paper reference: Section 9.1 (Failure Mode #1)
     """
-    # TODO (Phase D): Implement spatial collapse detection
 
     batch_size, num_tokens = masks.shape
     h, w = grid_size
@@ -116,7 +115,6 @@ def detect_query_ignoring(
 
     Paper reference: Section 9.1 (Failure Mode #2)
     """
-    # TODO (Phase D): Implement query-ignoring detection
 
     batch_size = masks.shape[0]
 
@@ -171,7 +169,6 @@ def check_gradient_flow(
 
     Paper reference: Section 9.2 (Debugging Critical Path)
     """
-    # TODO (Phase D): Implement gradient flow check
 
     mask_has_grad = mask.grad_fn is not None
     scores_has_grad = scores.grad_fn is not None
@@ -210,7 +207,6 @@ def run_full_diagnostics(
 
     Paper reference: Section 9 (full diagnostic suite)
     """
-    # TODO (Phase D): Run all diagnostics
 
     spatial = detect_spatial_collapse(masks)
     ignoring = detect_query_ignoring(masks, questions)

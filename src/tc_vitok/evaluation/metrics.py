@@ -31,7 +31,6 @@ def normalize_answer(answer: str) -> str:
 
     Used by all VQA metrics for fair comparison.
     """
-    # TODO (Phase C): Implement answer normalization
 
     # Lowercase
     answer = answer.lower()
@@ -75,7 +74,6 @@ def vqa_score(
 
     Paper reference: VQAv2 official metric
     """
-    # TODO (Phase C): Implement VQA-score
 
     predicted_norm = normalize_answer(predicted)
 
@@ -104,7 +102,6 @@ def gqa_accuracy(
     Returns:
         accuracy: 1.0 if match, 0.0 otherwise
     """
-    # TODO (Phase C): Implement GQA accuracy
 
     predicted_norm = normalize_answer(predicted)
     gt_norm = normalize_answer(ground_truth)
@@ -128,7 +125,6 @@ def textvqa_accuracy(
     Returns:
         accuracy: Soft accuracy score
     """
-    # TODO (Phase C): Implement TextVQA accuracy
     # Similar to VQA-score but with different threshold
 
     predicted_norm = normalize_answer(predicted)
@@ -164,7 +160,6 @@ def pope_f1(
 
     Paper reference: POPE benchmark protocol
     """
-    # TODO (Phase C): Implement POPE metrics
 
     # Normalize answers
     preds_norm = [normalize_answer(p) for p in predictions]
@@ -205,7 +200,6 @@ def aggregate_scores(
     Returns:
         stats: Dictionary with mean, median, std, etc.
     """
-    # TODO (Phase D): Implement score aggregation
 
     import numpy as np
 
