@@ -261,13 +261,7 @@ class TCViTokModel(nn.Module):
         if self.use_stub_llm:
             llm_outputs = self.llm(visual_tokens=v_selected, labels=labels)
         else:
-            # Real LLaVA integration path
-            # Inject v_selected into LLaVA's projector, bypassing its ViT
-            v_projected = self.llava.multi_modal_projector(v_selected)
-            # TODO: Full LLaVA integration requires custom forward pass
-            # to inject projected tokens and handle text/answer generation.
-            # For now, use projector output shape for consistency check.
-            llm_outputs = {"logits": v_projected}  # placeholder
+            llm_outputs = self._llava_forward(v_selected, labels)
 
         # Build output dict
         outputs = {
@@ -283,6 +277,206 @@ class TCViTokModel(nn.Module):
             outputs["idx"] = idx
 
         return outputs
+
+    def forward_cached(
+        self,
+        v_coarse: torch.Tensor,
+        q_embed: torch.Tensor,
+        images_full: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+        tau: float = 1.0,
+        return_idx: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """Forward pass using pre-computed cached features.
+
+        Bypasses the frozen DINOv2-S and CLIP text encoders by accepting
+        pre-computed v_coarse and q_embed directly from HDF5 cache.
+        Still runs the full visual encoder (CLIP ViT-L/14) live.
+
+        Args:
+            v_coarse: Cached coarse features, Shape: [B, 49, 384]
+            q_embed: Cached text embeddings, Shape: [B, 512]
+            images_full: High-res images for CLIP ViT-L, Shape: [B, 3, 336, 336]
+            labels: Optional answer token IDs, Shape: [B, seq_len]
+            tau: Gumbel-Sigmoid temperature
+            return_idx: If True, include idx and scores in output
+
+        Returns:
+            outputs: Same format as forward()
+        """
+        # Step 1: TPN produces top-k gather indices (using cached features)
+        idx, s_N = self.tpn(
+            v_coarse=v_coarse,
+            q_embed=q_embed,
+            k=self.k,
+            tau=tau,
+            training=self.training,
+        )
+
+        # Step 2: Extract full visual features (frozen CLIP ViT-L/14)
+        v_full = self.full_encoder(images_full)  # [B, 576, 1024]
+
+        # Step 3: GATHER selected tokens
+        v_selected = gather_tokens(v_full, idx)  # [B, k, 1024]
+
+        # Step 4: Forward through LLM backbone
+        if self.use_stub_llm:
+            llm_outputs = self.llm(visual_tokens=v_selected, labels=labels)
+        else:
+            llm_outputs = self._llava_forward(v_selected, labels)
+
+        # Build output dict
+        outputs = {
+            "logits": llm_outputs.get("logits"),
+            "scores": s_N,
+            "selected_tokens": v_selected,
+        }
+
+        if "loss" in llm_outputs:
+            outputs["loss"] = llm_outputs["loss"]
+
+        if return_idx:
+            outputs["idx"] = idx
+
+        return outputs
+
+    def _llava_forward(
+        self,
+        v_selected: torch.Tensor,
+        labels: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Forward pass through real LLaVA with injected visual tokens.
+
+        Projects selected tokens through LLaVA's multi-modal projector,
+        then feeds them into the language model as visual prefix tokens.
+
+        Args:
+            v_selected: Selected visual tokens, Shape: [B, k, 1024]
+            labels: Optional answer token IDs, Shape: [B, seq_len]
+
+        Returns:
+            outputs: Dict with 'logits' and optionally 'loss'
+        """
+        # Project visual tokens through LLaVA's multi-modal projector
+        v_projected = self.llava.multi_modal_projector(v_selected)
+        # v_projected: [B, k, llm_hidden_size] (e.g., [B, 144, 4096])
+
+        # Get the language model hidden size
+        lm = self.llava.language_model
+        if hasattr(lm, 'base_model'):
+            # LoRA-wrapped model
+            base_lm = lm.base_model.model
+        else:
+            base_lm = lm
+
+        # Create attention mask for visual tokens
+        B, k_len = v_projected.shape[:2]
+        attention_mask = torch.ones(B, k_len, device=v_projected.device, dtype=torch.long)
+
+        # Forward through language model with visual tokens as inputs_embeds
+        lm_outputs = lm(
+            inputs_embeds=v_projected,
+            attention_mask=attention_mask,
+            labels=labels,
+        )
+
+        result = {"logits": lm_outputs.logits}
+        if hasattr(lm_outputs, "loss") and lm_outputs.loss is not None:
+            result["loss"] = lm_outputs.loss
+
+        return result
+
+    @torch.no_grad()
+    def generate(
+        self,
+        images_coarse: torch.Tensor,
+        images_full: torch.Tensor,
+        questions: list[str],
+        max_new_tokens: int = 20,
+    ) -> list[str]:
+        """Generate answers for VQA inference.
+
+        Args:
+            images_coarse: Low-res images, Shape: [B, 3, 98, 98]
+            images_full: High-res images, Shape: [B, 3, 336, 336]
+            questions: List of question strings
+            max_new_tokens: Maximum tokens to generate
+
+        Returns:
+            answers: List of generated answer strings
+        """
+        self.eval()
+
+        # Encode inputs
+        v_coarse = self.coarse_encoder(images_coarse)
+        q_embed = self.text_encoder(questions)
+
+        # TPN token selection (deterministic in eval)
+        idx, s_N = self.tpn(
+            v_coarse=v_coarse,
+            q_embed=q_embed,
+            k=self.k,
+            tau=0.1,
+            training=False,
+        )
+
+        # Extract full features and gather
+        v_full = self.full_encoder(images_full)
+        v_selected = gather_tokens(v_full, idx)
+
+        if self.use_stub_llm:
+            # StubLLM: return argmax of logits as dummy answers
+            llm_outputs = self.llm(visual_tokens=v_selected)
+            logits = llm_outputs["logits"]
+            preds = logits[:, 0, :].argmax(dim=-1)
+            return [str(p.item()) for p in preds]
+        else:
+            # Real LLaVA: project and generate
+            v_projected = self.llava.multi_modal_projector(v_selected)
+            lm = self.llava.language_model
+
+            generated_ids = lm.generate(
+                inputs_embeds=v_projected,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+            )
+
+            # Decode generated tokens
+            tokenizer = self.processor.tokenizer
+            answers = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+            return answers
+
+    def get_selection_info(
+        self,
+        images_coarse: torch.Tensor,
+        questions: list[str],
+    ) -> Dict[str, torch.Tensor]:
+        """Get token selection indices and scores for visualization.
+
+        Args:
+            images_coarse: Low-res images, Shape: [B, 3, 98, 98]
+            questions: List of question strings
+
+        Returns:
+            info: Dict with idx [B, k], scores [B, N], mask [B, N]
+        """
+        self.eval()
+        with torch.no_grad():
+            v_coarse = self.coarse_encoder(images_coarse)
+            q_embed = self.text_encoder(questions)
+            idx, s_N = self.tpn(
+                v_coarse=v_coarse,
+                q_embed=q_embed,
+                k=self.k,
+                tau=0.1,
+                training=False,
+            )
+
+        # Reconstruct binary mask from indices for visualization
+        mask = torch.zeros(s_N.shape, device=s_N.device)
+        mask.scatter_(-1, idx, 1.0)
+
+        return {"idx": idx, "scores": s_N, "mask": mask}
 
     def set_training_phase(self, phase: int):
         """Configure which components are trainable based on training phase.

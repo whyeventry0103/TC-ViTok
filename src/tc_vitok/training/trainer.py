@@ -92,6 +92,10 @@ class TCViTokTrainer:
             phase=self.phase,
         )
 
+        # Store initial learning rates for scheduling
+        for param_group in self.optimizer.param_groups:
+            param_group["initial_lr"] = param_group["lr"]
+
         # Training state
         self.global_step = 0
         self.epoch = 0
@@ -176,20 +180,30 @@ class TCViTokTrainer:
         )
 
         # Move batch to device
-        images_coarse = batch["images_coarse"].to(self.device)
         images_full = batch["images_full"].to(self.device)
-        questions = batch["questions"]
         labels = batch["labels"].to(self.device)
 
-        # Forward pass (return idx for loss computation)
-        outputs = self.model(
-            images_coarse=images_coarse,
-            images_full=images_full,
-            questions=questions,
-            labels=labels,
-            tau=tau,
-            return_idx=True,  # needed for entropy/diversity losses
-        )
+        # Support both cached and non-cached batches
+        if "v_coarse" in batch and "q_embed" in batch:
+            outputs = self.model.forward_cached(
+                v_coarse=batch["v_coarse"].to(self.device),
+                q_embed=batch["q_embed"].to(self.device),
+                images_full=images_full,
+                labels=labels,
+                tau=tau,
+                return_idx=True,
+            )
+        else:
+            images_coarse = batch["images_coarse"].to(self.device)
+            questions = batch["questions"]
+            outputs = self.model(
+                images_coarse=images_coarse,
+                images_full=images_full,
+                questions=questions,
+                labels=labels,
+                tau=tau,
+                return_idx=True,
+            )
 
         # Compute losses (scores for L1 sparsity, idx for entropy/diversity)
         loss_dict = compute_total_loss(
@@ -218,6 +232,14 @@ class TCViTokTrainer:
             self.optimizer.step()
             self.optimizer.zero_grad()
 
+            # Update learning rates per group
+            warmup_steps = self.config["training"].get("warmup_steps", 1000)
+            for param_group in self.optimizer.param_groups:
+                base_lr = param_group.get("initial_lr", param_group["lr"])
+                param_group["lr"] = get_lr_schedule(
+                    self.global_step, warmup_steps, self.max_steps, base_lr,
+                )
+
         self.global_step += 1
 
         # Add curriculum params to loss dict for logging
@@ -234,20 +256,82 @@ class TCViTokTrainer:
         Returns:
             metrics: Dictionary with validation metrics
         """
-        # TODO (Phase D): Implement validation loop
         self.model.eval()
 
         total_loss = 0.0
+        total_vqa = 0.0
+        total_sparsity = 0.0
+        total_entropy = 0.0
         num_batches = 0
 
+        # Current curriculum parameters
+        tau = get_tau(self.global_step, self.max_steps, self.tau_min, self.tau_max)
+        lambda_sparsity = get_lambda(
+            self.global_step, self.T_warmup, self.lambda_max
+        )
+
         for batch in self.val_loader:
-            # Validation step (similar to train_step but without backprop)
-            # Placeholder for now
-            pass
+            # Move batch to device
+            images_coarse = batch["images_coarse"].to(self.device)
+            images_full = batch["images_full"].to(self.device)
+            questions = batch["questions"]
+            labels = batch["labels"].to(self.device)
+
+            # Check if batch contains cached features
+            if "v_coarse" in batch and "q_embed" in batch:
+                outputs = self.model.forward_cached(
+                    v_coarse=batch["v_coarse"].to(self.device),
+                    q_embed=batch["q_embed"].to(self.device),
+                    images_full=images_full,
+                    labels=labels,
+                    tau=tau,
+                    return_idx=True,
+                )
+            else:
+                outputs = self.model(
+                    images_coarse=images_coarse,
+                    images_full=images_full,
+                    questions=questions,
+                    labels=labels,
+                    tau=tau,
+                    return_idx=True,
+                )
+
+            # Compute losses
+            loss_dict = compute_total_loss(
+                logits=outputs.get("logits"),
+                labels=labels,
+                scores=outputs["scores"],
+                idx=outputs["idx"],
+                k=self.model.k,
+                lambda_sparsity=lambda_sparsity,
+                lambda_entropy=self.lambda_entropy,
+                lambda_diversity=self.lambda_diversity,
+            )
+
+            total_loss += loss_dict["total"].item()
+            total_vqa += loss_dict["vqa"].item()
+            total_sparsity += loss_dict["sparsity"].item()
+            total_entropy += loss_dict["entropy"].item()
+            num_batches += 1
 
         self.model.train()
 
-        return {"loss": total_loss / max(num_batches, 1)}
+        n = max(num_batches, 1)
+        val_loss = total_loss / n
+        metrics = {
+            "loss": val_loss,
+            "vqa": total_vqa / n,
+            "sparsity": total_sparsity / n,
+            "entropy": total_entropy / n,
+        }
+
+        # Track best validation loss
+        if val_loss < self.best_val_loss:
+            self.best_val_loss = val_loss
+            self.save_checkpoint(is_best=True)
+
+        return metrics
 
     def log_metrics(self, metrics: Dict[str, Any], prefix: str = "train"):
         """Log metrics to console and wandb.

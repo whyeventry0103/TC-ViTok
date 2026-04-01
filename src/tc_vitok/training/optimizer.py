@@ -63,7 +63,7 @@ def create_optimizer(
         })
 
     else:
-        # Phase 1+: Train TPN + LoRA + projector
+        # Phase 1+: Train TPN + LoRA + projector (or StubLLM)
 
         # TPN parameters
         tpn_params = [p for p in model.tpn.parameters() if p.requires_grad]
@@ -74,29 +74,39 @@ def create_optimizer(
                 "weight_decay": weight_decay,
             })
 
-        # LoRA parameters (from PEFT)
-        lora_params = []
-        for name, param in model.llava.language_model.named_parameters():
-            if param.requires_grad and "lora" in name.lower():
-                lora_params.append(param)
-        if lora_params:
-            param_groups.append({
-                "params": lora_params,
-                "lr": lr_lora,
-                "weight_decay": weight_decay,
-            })
+        if hasattr(model, 'use_stub_llm') and model.use_stub_llm:
+            # StubLLM: single param group for the stub
+            stub_params = [p for p in model.llm.parameters() if p.requires_grad]
+            if stub_params:
+                param_groups.append({
+                    "params": stub_params,
+                    "lr": lr_lora,
+                    "weight_decay": weight_decay,
+                })
+        elif hasattr(model, 'llava'):
+            # Real LLaVA: LoRA + projector param groups
+            lora_params = []
+            for name, param in model.llava.language_model.named_parameters():
+                if param.requires_grad and "lora" in name.lower():
+                    lora_params.append(param)
+            if lora_params:
+                param_groups.append({
+                    "params": lora_params,
+                    "lr": lr_lora,
+                    "weight_decay": weight_decay,
+                })
 
-        # Vision projector parameters
-        projector_params = [
-            p for p in model.llava.multi_modal_projector.parameters()
-            if p.requires_grad
-        ]
-        if projector_params:
-            param_groups.append({
-                "params": projector_params,
-                "lr": lr_mlp,
-                "weight_decay": weight_decay,
-            })
+            # Vision projector parameters
+            projector_params = [
+                p for p in model.llava.multi_modal_projector.parameters()
+                if p.requires_grad
+            ]
+            if projector_params:
+                param_groups.append({
+                    "params": projector_params,
+                    "lr": lr_mlp,
+                    "weight_decay": weight_decay,
+                })
 
     # Create AdamW optimizer
     optimizer = AdamW(param_groups)

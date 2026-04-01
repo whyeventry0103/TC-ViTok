@@ -77,3 +77,6 @@ htmlcov/
 dmypy.json
 .claude/
 .gemini/
+
+Memory.md
+TODO.md

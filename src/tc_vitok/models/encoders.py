@@ -188,10 +188,11 @@ class FullVisualEncoder(nn.Module):
     Paper reference: Section 4 (Baseline: LLaVA-1.5)
     """
 
-    def __init__(self, model_name: str = "openai/clip-vit-large-patch14"):
+    def __init__(self, model_name: str = "openai/clip-vit-large-patch14-336"):
         super().__init__()
 
-        # TODO (Phase B): Load pretrained CLIP vision encoder
+        # CLIP ViT-L/14 at 336px resolution produces 576 = 24x24 patches
+        # MUST use the -336 variant, not the 224px default, to match LLaVA-1.5
         self.clip = CLIPModel.from_pretrained(model_name)
         self.processor = CLIPProcessor.from_pretrained(model_name)
 
