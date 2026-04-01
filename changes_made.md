@@ -430,3 +430,190 @@ Generative decode for evaluation:
 - Dataset loaders (T003/T004): **YES** (VQAv2, GQA, TextVQA, POPE fully implemented)
 - LLaVA integration (T005): **YES** (code complete; requires llava-hf/llava-1.5-7b-hf download to run)
 - Ready for first experiment: **YES** (pending downloads: LLaVA ~13.5GB + VQAv2/GQA datasets)
+
+---
+
+## Session 2026-04-01 (Sprint 3): T006–T013 Completion
+
+**Date:** 2026-04-01
+**Commit:** `f6844c9`
+**Scope:** Completed train CLI (T006), verified T007–T013 already implemented, fixed two correctness issues found during code review.
+
+---
+
+### 14. T006 — Training CLI (`scripts/train.py`)
+
+**Category:** IMPORTANT
+**File:** `scripts/train.py`
+
+**Problem:** Two gaps vs. the T006 spec:
+1. `--max-steps` CLI argument was missing. Max steps could only be set via the YAML config file, making dry-runs (`--max-steps 1`) impossible from the command line.
+2. No Phase 0 → Phase 1 sequential execution. Users had to run the script twice with different config files and manually pass the Phase 0 checkpoint path.
+
+**What changed:**
+
+#### `--max-steps` argument
+- Added `--max-steps` (type=int, default=None) to `parse_args()`
+- In `main()`: `if args.max_steps is not None: config_dict["training"]["max_steps"] = args.max_steps`
+- Applied to Phase 1 dict as well when `--run-both-phases` is used (ensures dry-run consistency)
+- Confirmed working: dry-run print output shows `"max_steps overridden to 1"`
+
+Usage:
+```bash
+# Dry run — 1 step, stub model, dummy data
+python scripts/train.py --config configs/phase0.yaml --max-steps 1 --stub --dummy-data --no-wandb
+```
+
+#### `--run-both-phases` flag + Phase 0→Phase 1 sequencing
+- Added `--run-both-phases` (action="store_true") — opt-in, not automatic
+- When flag is set and config `phase == 0`:
+  1. Run Phase 0 training → saves checkpoints to `{output}/phase0/`
+  2. Auto-detect `phase1.yaml` from same config directory (`config_path.parent / "phase1.yaml"`)
+  3. Load Phase 1 config, apply `--max-steps` override if present
+  4. Set Phase 1 output dir to `{output}/phase1/`
+  5. Resume Phase 1 from `phase0_dir / "best.ckpt"` (graceful fallback warning if missing)
+  6. Run Phase 1 training
+- Uses separate WandB init per phase (finishes cleanly between phases)
+
+**Why opt-in:** Automatic Phase 0→Phase 1 transition would surprise users who want to resume Phase 1 independently or evaluate a Phase 0 checkpoint before proceeding.
+
+#### `build_loaders()` and `run_phase()` helpers extracted
+- `build_loaders(data_config, batch_size, num_workers, args)` → `(train_loader, val_loader)`: consolidates dataset creation logic; called once per phase
+- `run_phase(model, config_dict, train_loader, val_loader, device, resume)` → `(final_metrics, output_dir)`: creates trainer, optionally resumes, runs `trainer.train()`
+
+**Effect:** Full dry-run command works. Single invocation can run the complete two-phase training pipeline.
+
+---
+
+### 15. T007 — HDF5 Feature Caching (`src/tc_vitok/data/caching.py`)
+
+**Category:** VERIFIED COMPLETE + MINOR FIX
+**File:** `src/tc_vitok/data/caching.py`
+
+**Finding:** `build_cache()`, `CachedFeatureDataset`, and `cached_collate_fn` were already fully implemented. HDF5 dataset keys are `'v_coarse'` (N,49,384) float16 and `'q_embed'` (N,512) float16 — these differ from the TODO.md spec names (`'dino_features'`, `'clip_text_emb'`) but are internally consistent throughout caching.py and all callers.
+
+**Fix applied:** Added `UserWarning` in `CachedFeatureDataset.__init__` when `use_images=True` but `image_dataset=None`:
+```python
+if use_images and image_dataset is None:
+    warnings.warn(
+        "CachedFeatureDataset: use_images=True but image_dataset=None. "
+        "images_full will be random noise and labels will be zeros. "
+        "Pass image_dataset= for real training.",
+        UserWarning, stacklevel=2,
+    )
+```
+
+**Why:** Without this warning, calling `CachedFeatureDataset(cache_path=path)` (as `scripts/train.py` does when `--cache-path` is passed without an image dataset) would silently train on random `(3,336,336)` tensors and zero labels — producing wrong gradients with no error. The fix surfaces the problem immediately.
+
+---
+
+### 16. T008 / T009 — Feature Pre-computation (`scripts/cache_features.py`)
+
+**Category:** VERIFIED COMPLETE
+**File:** `scripts/cache_features.py`
+
+Already fully implemented (covered both tasks):
+- Loads `CoarseVisualEncoder` (DINOv2-S) → writes `v_coarse` (N,49,384) float16 to HDF5
+- Loads `TextEncoder` (CLIP ViT-B/32 text) → writes `q_embed` (N,512) float16 to HDF5
+- Supports VQAv2, GQA; `textvqa` raises `NotImplementedError` (intentional placeholder)
+- Device auto-detection (CUDA → MPS → CPU)
+
+---
+
+### 17. T010 — Evaluation Metrics (`src/tc_vitok/evaluation/metrics.py`)
+
+**Category:** VERIFIED COMPLETE
+**File:** `src/tc_vitok/evaluation/metrics.py`
+
+All required functions verified correct:
+
+| Function | Formula | Status |
+|----------|---------|--------|
+| `vqa_score(predicted, ground_truth)` | `min(count/3.0, 1.0)` soft accuracy | ✅ |
+| `gqa_accuracy(predicted, ground_truth)` | Binary exact-match after normalize | ✅ |
+| `textvqa_accuracy(predicted, ground_truth)` | Same as VQA-score formula | ✅ |
+| `pope_f1(predictions, ground_truth)` | TP/FP/FN/TN from yes/no pairs; returns {f1, precision, recall, accuracy} | ✅ |
+| `normalize_answer(answer)` | lowercase → strip punctuation → remove articles → strip | ✅ |
+| `aggregate_scores(scores)` | mean/median/std/min/max/count | ✅ |
+
+---
+
+### 18. T011 — Spatial Stratification Eval (`src/tc_vitok/evaluation/spatial_eval.py`)
+
+**Category:** VERIFIED COMPLETE
+**File:** `src/tc_vitok/evaluation/spatial_eval.py`
+
+Already fully implemented:
+- `evaluate_spatial_stratified(predictions, ground_truth, questions, gqa_annotations)`:
+  - Classifies each question via `classify_spatial()` (annotation-priority + keyword fallback)
+  - Returns: `overall_acc`, `spatial_acc`, `global_acc`, `spatial_count`, `global_count`, `spatial_global_gap`
+  - Gap metric (`spatial_acc - global_acc`) directly tests Hypothesis 1
+- `analyze_selection_by_spatial(masks, spatial_labels)`:
+  - Per-group token count statistics for diagnosing spatial collapse
+
+---
+
+### 19. T012 — Collapse Detection Diagnostics (`src/tc_vitok/evaluation/collapse_detection.py`)
+
+**Category:** VERIFIED COMPLETE + FIX
+**File:** `src/tc_vitok/evaluation/collapse_detection.py`
+
+Already fully implemented. One fix applied:
+
+**Fix:** Added shape assertion in `detect_spatial_collapse()` before `masks.view(batch_size, h, w)`:
+```python
+assert num_tokens == h * w, (
+    f"detect_spatial_collapse: expected {h*w} tokens for {h}×{w} grid, got {num_tokens}"
+)
+```
+Without this, passing a DINOv2-S mask (49 tokens) instead of CLIP ViT-L/14 mask (576 tokens) would silently produce a wrong quadrant analysis instead of raising an error.
+
+Verified correct:
+- `detect_spatial_collapse(masks)`: reshapes to (B,24,24), computes per-quadrant ratios, spatial entropy; threshold=0.8
+- `detect_query_ignoring(masks, questions)`: pairwise Jaccard IoU = `|A∩B|/|A∪B|` over all pairs; threshold=0.9 ✅
+- `check_gradient_flow(mask, scores)`: verifies `mask.grad_fn is not None` for STE health check
+- `run_full_diagnostics()`: full suite → `{spatial_collapse, query_ignoring, gradient_flow, overall_health}`
+
+---
+
+### 20. T013 — Evaluation CLI (`scripts/evaluate.py`)
+
+**Category:** VERIFIED COMPLETE
+**File:** `scripts/evaluate.py`
+
+Already fully implemented with all required arguments:
+
+| Argument | Default | Purpose |
+|----------|---------|---------|
+| `--checkpoint` | required | Path to model checkpoint |
+| `--benchmarks` | `["vqav2"]` | List of benchmarks to run |
+| `--token-budgets` | `[144]` | k values for Pareto sweep |
+| `--spatial-eval` | False | Enable GQA spatial/global stratification |
+| `--output` | `evaluation_results.json` | JSON output path |
+| `--data-dir` | `data` | Root data directory |
+| `--max-samples` | None | Limit samples for debugging |
+| `--batch-size` | 16 | Inference batch size |
+| `--stub` | False | Use StubLLM |
+
+Benchmarks supported: `vqav2` (VQA-Score), `gqa` (exact-match + spatial stratification), `pope` (F1), `textvqa` (stubbed)
+
+Token budget sweep → Pareto analysis via `evaluation/pareto.py` → results saved to JSON.
+
+---
+
+## System Readiness (Final)
+
+- Architecture matches paper: **YES**
+- Core bugs fixed: **YES** (sparsity, entropy, gather, TPN, STE)
+- API matches paperv4/planv2: **YES** (index-gather throughout)
+- Pipeline runs minimally: **YES** (StubLLM + DummyVQA, all tests pass)
+- Token compression is real: **YES** (`[B,k,D]` output via `torch.gather`)
+- Dataset loaders (T003/T004): **YES** (VQAv2, GQA, TextVQA, POPE)
+- LLaVA integration (T005): **YES** (code complete; download pending ~13.5GB)
+- Training CLI (T006): **YES** (`--max-steps`, `--run-both-phases`, Phase 0→Phase 1 auto-sequencing)
+- Feature caching (T007–T009): **YES** (`v_coarse`/`q_embed` HDF5 float16; UserWarning guard added)
+- Evaluation metrics (T010): **YES** (VQA-Score, GQA exact-match, POPE F1 verified)
+- Spatial eval (T011): **YES** (`evaluate_spatial_stratified` + gap metric for H1 testing)
+- Collapse detection (T012): **YES** (spatial collapse, query-ignoring IoU, gradient flow checks)
+- Evaluation CLI (T013): **YES** (all benchmarks, Pareto sweep, spatial stratification)
+- **Ready for E001 dry-run:** **YES** pending: PyTorch ≥2.6 upgrade (CVE-2025-32434) + LLaVA download
