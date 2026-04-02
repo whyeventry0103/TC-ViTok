@@ -8,6 +8,7 @@ These schedules are critical for stable training of the TPN.
 
 Paper reference: Section 7.2 (Curriculum Learning)
 """
+import math
 
 
 def get_tau(

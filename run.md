@@ -11,14 +11,15 @@ order. Each section states its prerequisites.
 1. [Environment Setup](#1-environment-setup)
 2. [Model Downloads](#2-model-downloads)
 3. [Dataset Downloads](#3-dataset-downloads)
-4. [Verify Installation](#4-verify-installation)
-5. [Feature Caching](#5-feature-caching)
+4. [Verify Installation](#4-verify-installation) — includes **Pre-Training Checklist**
+5. [Feature Caching](#5-feature-caching) (Optional)
 6. [Training](#6-training)
 7. [Evaluation](#7-evaluation)
 8. [Visualization](#8-visualization)
 9. [Jupyter Notebooks](#9-jupyter-notebooks)
 10. [Expected Outputs](#10-expected-outputs)
 11. [Troubleshooting](#11-troubleshooting)
+12. [Quick Reference](#12-quick-reference)
 
 ---
 
@@ -36,27 +37,24 @@ packages available.
 
 ### 1.2 Install PyTorch
 
+**REQUIRED: PyTorch ≥ 2.6.0** (due to CVE-2025-32434 in transformers ≥ 4.40)
+
 **Apple Silicon (M1/M2/M3):**
 
 ```bash
-pip install torch==2.5.1 torchvision==0.20.1
+pip install torch>=2.6.0 torchvision>=0.21.0
 ```
 
 **CUDA (Linux with NVIDIA GPU, recommended for actual training):**
 
 ```bash
-pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+pip install torch>=2.6.0 torchvision>=0.21.0 --index-url https://download.pytorch.org/whl/cu121
 ```
 
-> **Note on PyTorch version:** The project was developed with PyTorch 2.5.1.
-> The `transformers` library (v4.36+) raises a `ValueError` about
-> CVE-2025-32434 when calling `from_pretrained()` on PyTorch < 2.6, because
-> `torch.load` defaults to `weights_only=False`. See Section 11 for the
-> workaround. If possible, upgrade to PyTorch >= 2.6:
->
-> ```bash
-> pip install torch>=2.6.0 torchvision>=0.21.0
-> ```
+> **CVE-2025-32434:** The `transformers` library (v4.40+) enforces `weights_only=True`
+> in `torch.load`, which requires PyTorch >= 2.6. Earlier PyTorch versions will fail
+> with `ValueError: You are using an unsafe version of PyTorch` when downloading model
+> weights. Upgrade is mandatory. See Section 11 for details and workarounds if needed.
 
 ### 1.3 Install Dependencies
 
@@ -65,27 +63,33 @@ cd /Users/apple/Desktop/Junior_spring/TC-ViTok
 pip install -r requirements.txt
 ```
 
+**Important: Ensure peft and h5py are installed** (should be pulled in by requirements.txt, but verify):
+
+```bash
+pip install peft h5py
+```
+
 The full dependency list (`requirements.txt`):
 
-| Package | Purpose |
-|---|---|
-| torch >= 2.0.0 | Core ML framework |
-| torchvision >= 0.15.0 | Image transforms |
-| transformers >= 4.36.0 | LLaVA-1.5, CLIP, DINOv2 model loading |
-| accelerate >= 0.25.0 | HuggingFace model loading utilities |
-| peft >= 0.7.0 | LoRA adapter for LLaVA |
-| timm >= 0.9.12 | DINOv2 model registry |
-| datasets >= 2.16.0 | HuggingFace datasets |
-| h5py >= 3.10.0 | HDF5 feature caching |
-| einops >= 0.7.0 | Tensor rearrangement |
-| omegaconf >= 2.3.0 | YAML config loading |
-| wandb >= 0.16.0 | Experiment logging |
-| tqdm >= 4.66.0 | Progress bars |
-| numpy >= 1.24.0 | Numerical operations |
-| scipy >= 1.11.0 | Statistical utilities |
-| pillow >= 10.0.0 | Image loading |
-| matplotlib | Visualization (for `visualize_masks.py` and notebooks) |
-| pytest >= 7.4.0 | Testing |
+| Package | Version | Purpose | Required |
+|---|---|---|---|
+| torch | **≥ 2.6.0** | Core ML framework | **MANDATORY** (CVE-2025-32434) |
+| torchvision | ≥ 0.21.0 | Image transforms | **YES** |
+| transformers | ≥ 4.36.0 | LLaVA-1.5, CLIP, DINOv2 model loading | YES |
+| **peft** | ≥ 0.7.0 | LoRA adapter for LLaVA | **YES** (add if missing) |
+| accelerate | ≥ 0.25.0 | HuggingFace model loading utilities | YES |
+| **h5py** | ≥ 3.10.0 | HDF5 feature caching | **YES** (add if missing) |
+| timm | ≥ 0.9.12 | DINOv2 model registry | YES |
+| datasets | ≥ 2.16.0 | HuggingFace datasets | YES |
+| einops | ≥ 0.7.0 | Tensor rearrangement | YES |
+| omegaconf | ≥ 2.3.0 | YAML config loading | YES |
+| wandb | ≥ 0.16.0 | Experiment logging | YES |
+| tqdm | ≥ 4.66.0 | Progress bars | Yes |
+| numpy | ≥ 1.24.0 | Numerical operations | Yes |
+| scipy | ≥ 1.11.0 | Statistical utilities | Yes |
+| pillow | ≥ 10.0.0 | Image loading | Yes |
+| matplotlib | Any | Visualization (for `visualize_masks.py` and notebooks) | Optional |
+| pytest | ≥ 7.4.0 | Testing | Optional |
 
 Install matplotlib separately if not pulled in:
 
@@ -403,25 +407,47 @@ ViT-B/32 downloads (~400 MB total) on first run:
 KMP_DUPLICATE_LIB_OK=TRUE /Users/apple/miniforge3/envs/torch-m1/bin/python scripts/test_pipeline.py
 ```
 
-### 4.4 Training Dry Run (StubLLM, No Real Data)
+### 4.4 Pre-Training Checklist
 
-Verifies the full training loop with synthetic data and StubLLM:
+Before running real training (Phase 0), verify the following:
+
+| Step | Command | Expected |
+|---|---|---|
+| 1. PyTorch version | `python -c "import torch; print(torch.__version__)"` | ≥ 2.6.0 |
+| 2. peft installed | `python -c "import peft; print('OK')"` | OK |
+| 3. h5py installed | `python -c "import h5py; print('OK')"` | OK |
+| 4. Core tests | `KMP_DUPLICATE_LIB_OK=TRUE PYTHONPATH=src python scripts/test_core.py` | All 7 pass |
+| 5. Pytest suite | `KMP_DUPLICATE_LIB_OK=TRUE PYTHONPATH=src python -m pytest tests/ -q` | 53 passed |
+| 6. Dry run | `KMP_DUPLICATE_LIB_OK=TRUE PYTHONPATH=src python scripts/train.py --config configs/phase0.yaml --output /tmp/tc_vitok_test/ --stub --dummy-data --no-wandb --max-steps 2` | Best.ckpt created |
+| 7. VQAv2 dataset | `ls data/vqav2/v2_mscoco_train2014_annotations.json` | File exists |
+| 8. VQAv2 symlinks | `ls data/vqav2/train2014 data/vqav2/val2014` | Both exist |
+
+**Blocker:** All 8 steps must pass before starting Phase 0 training. If any step fails, see Section 11 (Troubleshooting).
+
+### 4.5 Training Dry Run (StubLLM, No Real Data)
+
+Verifies the full training loop with synthetic data and StubLLM. No model downloads or dataset files required.
 
 ```bash
 KMP_DUPLICATE_LIB_OK=TRUE PYTHONPATH=src /Users/apple/miniforge3/envs/torch-m1/bin/python \
     scripts/train.py \
     --config configs/phase0.yaml \
-    --max-steps 1 \
+    --output /tmp/tc_vitok_test/ \
     --stub \
     --dummy-data \
-    --no-wandb
+    --no-wandb \
+    --max-steps 2
 ```
 
-**Expected output:** Model created, 1 training step completes, metrics printed.
+**Expected output:**
+- Model checkpoint created: `/tmp/tc_vitok_test/phase0/best.ckpt`
+- 2 training steps complete
+- Metrics logged: `train/loss_vqa`, `train/entropy`, `train/avg_k`
+- No errors about missing encoders or data files
 
 ---
 
-## 5. Feature Caching
+## 5. Feature Caching (Optional, Speeds Up Training)
 
 Pre-computing DINOv2-S coarse features and CLIP text embeddings into HDF5
 avoids re-encoding them every epoch. This is optional but significantly speeds
@@ -579,21 +605,7 @@ KMP_DUPLICATE_LIB_OK=TRUE PYTHONPATH=src /Users/apple/miniforge3/envs/torch-m1/b
     --resume runs/phase1/best.ckpt
 ```
 
-### 6.6 Dry Run (1 Step, No Real Data)
-
-Verify the training loop works without any data or model downloads:
-
-```bash
-KMP_DUPLICATE_LIB_OK=TRUE PYTHONPATH=src /Users/apple/miniforge3/envs/torch-m1/bin/python \
-    scripts/train.py \
-    --config configs/phase0.yaml \
-    --max-steps 1 \
-    --stub \
-    --dummy-data \
-    --no-wandb
-```
-
-### 6.7 CLI Reference: scripts/train.py
+### 6.6 CLI Reference: scripts/train.py
 
 | Flag | Default | Description |
 |---|---|---|
@@ -601,15 +613,15 @@ KMP_DUPLICATE_LIB_OK=TRUE PYTHONPATH=src /Users/apple/miniforge3/envs/torch-m1/b
 | `--output` | `runs` | Output directory for checkpoints |
 | `--resume` | None | Checkpoint path to resume from |
 | `--wandb-project` | `tc-vitok` | WandB project name |
-| `--max-steps` | None | Override config max_steps (dry run: `--max-steps 1`) |
+| `--max-steps` | None | Override config max_steps (dry run: `--max-steps 2`) |
 | `--run-both-phases` | False | Auto-run Phase 1 after Phase 0 |
 | `--device` | auto | `cuda`, `mps`, or `cpu` |
-| `--stub` | False | Use StubLLM instead of LLaVA |
-| `--dummy-data` | False | Use synthetic data (256 train, 64 val) |
-| `--cache-path` | None | Path to HDF5 feature cache |
+| `--stub` | False | Use StubLLM instead of LLaVA (no encoder downloads) |
+| `--dummy-data` | False | Use synthetic data (256 train, 64 val samples) |
+| `--cache-path` | None | Path to HDF5 feature cache (optional speedup) |
 | `--no-wandb` | False | Disable WandB logging |
 
-### 6.8 Config YAML Structure
+### 6.7 Config YAML Structure
 
 Each phase config is loaded **independently** via `OmegaConf.load()` — there is no
 automatic inheritance from `base.yaml` at runtime. The `defaults: - base` key in
@@ -980,37 +992,29 @@ visualizations/
 
 ## 11. Troubleshooting
 
-### 11.1 CVE-2025-32434: PyTorch < 2.6 + transformers Conflict
+### 11.1 CVE-2025-32434: PyTorch ≥ 2.6.0 MANDATORY
 
 **Symptom:** `ValueError: You are using an unsafe version of PyTorch` when
-calling `from_pretrained()`.
+calling `from_pretrained()` to load model weights.
 
 **Root cause:** `transformers` >= 4.40 enforces `weights_only=True` in
-`torch.load`, which requires PyTorch >= 2.6.
+`torch.load`, which requires PyTorch >= 2.6. This is a hard requirement.
 
-**Fix (preferred):** Upgrade PyTorch:
+**Solution (REQUIRED):** Upgrade PyTorch immediately:
 
 ```bash
 pip install torch>=2.6.0 torchvision>=0.21.0
 ```
 
-**Workaround (if upgrade is not possible):** Monkey-patch before importing
-transformers:
-
-```python
-import torch
-_original_load = torch.load
-def _patched_load(*args, **kwargs):
-    kwargs.pop("weights_only", None)
-    return _original_load(*args, **kwargs)
-torch.load = _patched_load
-```
-
-Or pin an older transformers version (not recommended):
+Verify the upgrade:
 
 ```bash
-pip install transformers==4.38.2
+python -c "import torch; print(f'PyTorch {torch.__version__}'); assert int(torch.__version__.split('.')[1]) >= 6"
 ```
+
+**Why no workarounds:** The vulnerability is real. Older transformers or monkey-patching
+`torch.load` are not supported and may cause silent data corruption. Upgrade is mandatory
+before any real training begins.
 
 ### 11.2 KMP_DUPLICATE_LIB_OK Error
 
@@ -1089,32 +1093,43 @@ If cloning fresh, you will need to obtain these files separately.
 
 ---
 
-## Quick Reference: Full Pipeline
+## 12. Quick Reference: Full Pipeline
 
 ```bash
 # 0. Activate environment
 conda activate torch-m1
+pip install --upgrade "torch>=2.6.0" "torchvision>=0.21.0"  # CVE-2025-32434 fix
+pip install peft h5py  # LoRA + caching
 export KMP_DUPLICATE_LIB_OK=TRUE
 cd /Users/apple/Desktop/Junior_spring/TC-ViTok
 
-# 1. Verify setup
-PYTHONPATH=src python scripts/test_core.py
-PYTHONPATH=src python -m pytest tests/ -v
+# 1. PRE-TRAINING CHECKLIST (Section 4.4)
+python -c "import torch; assert int(torch.__version__.split('.')[1]) >= 6; print('PyTorch OK')"
+python -c "import peft; print('peft OK')"
+python -c "import h5py; print('h5py OK')"
+PYTHONPATH=src python scripts/test_core.py  # 7/7 tests
+PYTHONPATH=src python -m pytest tests/ -q   # 53 passed
+PYTHONPATH=src python scripts/train.py --config configs/phase0.yaml --output /tmp/tc_vitok_test/ --stub --dummy-data --no-wandb --max-steps 2  # Dry run OK
 
-# 2. Cache features (after downloading datasets)
+# 2. Download datasets
+# VQAv2: Section 3.1 (25 GB) + GQA: Section 3.2 (20 GB)
+# Create symlinks: ln -s ../coco/train2014 data/vqav2/train2014
+
+# 3. (Optional) Cache features to HDF5 (speeds up training)
 PYTHONPATH=src python scripts/cache_features.py \
     --dataset vqav2 --split train --output data/cache/ \
     --annotations-path data/vqav2/v2_mscoco_train2014_annotations.json \
     --questions-path data/vqav2/v2_OpenEnded_mscoco_train2014_questions.json \
     --image-dir data/coco/train2014
 
-# 3. Train Phase 0 + Phase 1
+# 4. Train Phase 0 + Phase 1
 PYTHONPATH=src python scripts/train.py \
     --config configs/phase0.yaml \
     --output runs/ \
+    --no-wandb \
     --run-both-phases
 
-# 4. Evaluate
+# 5. Evaluate on all benchmarks
 PYTHONPATH=src python scripts/evaluate.py \
     --checkpoint runs/phase1/best.ckpt \
     --benchmarks vqav2 gqa pope \
@@ -1123,7 +1138,7 @@ PYTHONPATH=src python scripts/evaluate.py \
     --data-dir data \
     --output results/full_eval.json
 
-# 5. Visualize
+# 6. Visualize token selection
 PYTHONPATH=src python scripts/visualize_masks.py \
     --checkpoint runs/phase1/best.ckpt \
     --images data/coco/val2014/COCO_val2014_000000000042.jpg \

@@ -118,10 +118,12 @@ def build_loaders(data_config, batch_size, num_workers, args):
     """
     if args.dummy_data:
         print("Using DummyVQADataset for pipeline testing")
-        train_dataset = DummyVQADataset(num_samples=256)
-        val_dataset = DummyVQADataset(num_samples=64)
-        train_collate = collate_fn
-        val_collate = collate_fn
+        stub_mode = args.stub
+        train_dataset = DummyVQADataset(num_samples=256, stub_mode=stub_mode)
+        val_dataset = DummyVQADataset(num_samples=64, stub_mode=stub_mode)
+        # stub mode: encoders are None, so use cached_collate_fn (v_coarse/q_embed path)
+        train_collate = cached_collate_fn if stub_mode else collate_fn
+        val_collate = cached_collate_fn if stub_mode else collate_fn
     elif args.cache_path or data_config.get("use_cached_features", False):
         cache_path = args.cache_path or data_config.get("cache_path_train")
         print(f"Using cached features from {cache_path}")
@@ -150,13 +152,13 @@ def build_loaders(data_config, batch_size, num_workers, args):
             )
         elif dataset_name == "gqa":
             train_dataset = GQADataset(
-                questions_path=data_config["train_questions"],
-                image_dir=data_config["train_image_dir"],
+                questions_path=data_config["gqa_train_questions"],
+                image_dir=data_config["gqa_train_image_dir"],
                 max_samples=data_config.get("max_samples"),
             )
             val_dataset = GQADataset(
-                questions_path=data_config["val_questions"],
-                image_dir=data_config["val_image_dir"],
+                questions_path=data_config["gqa_val_questions"],
+                image_dir=data_config["gqa_val_image_dir"],
                 answer_list=list(train_dataset.answer_to_idx.keys()),
                 max_samples=data_config.get("max_samples"),
             )
@@ -280,6 +282,7 @@ def main():
         tpn_config=tpn_config,
         use_stub_llm=args.stub,
         lora_config=lora_config,
+        load_encoders=not args.stub,
     )
     print(f"Model created (stub={args.stub}, k={k})")
     print(f"Trainable params: {model.get_num_params():,}")

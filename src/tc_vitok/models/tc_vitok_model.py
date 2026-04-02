@@ -344,6 +344,11 @@ class TCViTokModel(nn.Module):
         )
 
         # Step 2: Extract full visual features (frozen CLIP ViT-L/14)
+        if self.full_encoder is None:
+            raise RuntimeError(
+                "forward_cached() requires full_encoder but load_encoders=False. "
+                "Either initialize with load_encoders=True or pre-compute v_full externally."
+            )
         v_full = self.full_encoder(images_full)  # [B, 576, 1024]
 
         # Step 3: GATHER selected tokens
@@ -627,12 +632,15 @@ class TCViTokModel(nn.Module):
             phase: Training phase (0, 1, or 2)
         """
         # Freeze all encoders (always frozen)
-        for param in self.coarse_encoder.parameters():
-            param.requires_grad = False
-        for param in self.text_encoder.parameters():
-            param.requires_grad = False
-        for param in self.full_encoder.parameters():
-            param.requires_grad = False
+        if self.coarse_encoder is not None:
+            for param in self.coarse_encoder.parameters():
+                param.requires_grad = False
+        if self.text_encoder is not None:
+            for param in self.text_encoder.parameters():
+                param.requires_grad = False
+        if self.full_encoder is not None:
+            for param in self.full_encoder.parameters():
+                param.requires_grad = False
 
         if phase == 0:
             # Train TPN only — freeze all LLM components
