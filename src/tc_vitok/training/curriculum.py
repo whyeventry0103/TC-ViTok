@@ -9,8 +9,6 @@ These schedules are critical for stable training of the TPN.
 Paper reference: Section 7.2 (Curriculum Learning)
 """
 
-import math
-
 
 def get_tau(
     step: int,
@@ -20,16 +18,16 @@ def get_tau(
 ) -> float:
     """Compute Gumbel-Sigmoid temperature at given training step.
 
-    The temperature τ is annealed from high to low using cosine decay.
+    The temperature τ is annealed from high to low using linear decay.
     This implements a curriculum from exploration (high τ) to exploitation (low τ).
 
-    Schedule (Eq. 13):
-        τ(t) = τ_min + 0.5 * (τ_max - τ_min) * (1 + cos(πt / T))
+    Schedule (paper Eq. tau_anneal):
+        τ(t) = τ_max - (τ_max - τ_min) * t/T
 
     Intuition:
         - High τ → soft selection, smooth gradients, exploration
         - Low τ → sharp selection, discrete masks, exploitation
-        - Cosine decay provides smooth transition
+        - Linear decay matches paper specification exactly
 
     Args:
         step: Current training step (0-indexed)
@@ -46,13 +44,11 @@ def get_tau(
         >>> get_tau(step=10000, T=10000, tau_min=0.1, tau_max=1.0)
         0.1  # End with low temperature
 
-    Paper reference: Eq. 13, Section 7.2
+    Paper reference: Eq. tau_anneal, Section 7.2
     """
-    # TODO (Phase C): Implement cosine temperature schedule
-
-    # Cosine annealing: starts at tau_max, ends at tau_min
+    # Linear annealing: starts at tau_max, ends at tau_min
     progress = min(step / T, 1.0)  # Clamp to [0, 1]
-    tau = tau_min + 0.5 * (tau_max - tau_min) * (1 + math.cos(math.pi * progress))
+    tau = tau_max - (tau_max - tau_min) * progress
 
     return tau
 

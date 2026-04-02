@@ -12,7 +12,7 @@ sys.path.insert(0, ".")
 
 import torch
 from src.tc_vitok.models.tpn import TokenizationPolicyNetwork
-from src.tc_vitok.models.masking import gumbel_sigmoid_ste, compute_spatial_entropy, compute_mask_diversity
+from src.tc_vitok.models.masking import gumbel_sigmoid_ste, compute_spatial_entropy, compute_diversity_loss
 from src.tc_vitok.models.tc_vitok_model import gather_tokens
 from src.tc_vitok.training.losses import l1_sparsity_loss, entropy_from_idx, compute_total_loss
 from src.tc_vitok.training.curriculum import get_tau, get_lambda
@@ -125,7 +125,7 @@ def test_full_loss():
     loss_dict = compute_total_loss(
         logits=logits, labels=labels,
         scores=scores, idx=idx, k=k, N=N,
-        lambda_sparsity=0.1, lambda_entropy=0.01, lambda_diversity=0.01,
+        lambda_sparsity=0.1, lambda_entropy=0.01,
     )
 
     assert loss_dict["total"].grad_fn is not None
@@ -133,7 +133,7 @@ def test_full_loss():
     assert scores.grad is not None
     assert scores.grad.abs().sum() > 0
 
-    for key in ["total", "vqa", "sparsity", "entropy", "diversity"]:
+    for key in ["total", "vqa", "sparsity", "entropy"]:
         print(f"  {key}: {loss_dict[key].item():.4f}")
     print("  PASSED\n")
 

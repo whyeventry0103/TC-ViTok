@@ -219,15 +219,42 @@ def run_phase(model, config_dict, train_loader, val_loader, device, resume=None)
     return final_metrics, trainer.output_dir
 
 
+def load_config(config_path: str) -> dict:
+    """Load a config YAML, merging with base.yaml when defaults: [base] is present.
+
+    Phase configs only override keys they need; all other keys come from base.yaml.
+    This replicates Hydra's defaults-list behaviour using plain OmegaConf.
+    """
+    raw = OmegaConf.load(config_path)
+    raw_dict = OmegaConf.to_container(raw, resolve=False)
+
+    if "defaults" in raw_dict:
+        base_path = Path(config_path).parent / "base.yaml"
+        if base_path.exists():
+            base = OmegaConf.load(base_path)
+            # Phase config wins; base fills in everything else
+            merged = OmegaConf.merge(base, raw)
+            result = OmegaConf.to_container(merged, resolve=True)
+            result.pop("defaults", None)
+            return result
+        else:
+            import warnings
+            warnings.warn(
+                f"Config {config_path} has 'defaults: [base]' but base.yaml was not "
+                f"found at {base_path}. Keys missing from base may cause KeyError."
+            )
+
+    return OmegaConf.to_container(raw, resolve=True)
+
+
 def main():
     args = parse_args()
 
     # MPS/Apple Silicon compatibility
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
-    # Load config
-    config = OmegaConf.load(args.config)
-    config_dict = OmegaConf.to_container(config, resolve=True)
+    # Load config (merges base.yaml automatically for phase configs)
+    config_dict = load_config(args.config)
     config_path = Path(args.config)
     phase = config_dict.get("phase", 1)
 
@@ -292,8 +319,7 @@ def main():
         else:
             print(f"\nProceeding to Phase 1 using {phase1_config_path}")
 
-            phase1_config = OmegaConf.load(phase1_config_path)
-            phase1_dict = OmegaConf.to_container(phase1_config, resolve=True)
+            phase1_dict = load_config(str(phase1_config_path))
 
             # Apply --max-steps override to Phase 1 too (for dry runs)
             if args.max_steps is not None:

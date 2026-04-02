@@ -155,6 +155,7 @@ class TCViTokModel(nn.Module):
         use_stub_llm: bool = True,
         llava_model_name: str = "llava-hf/llava-1.5-7b-hf",
         lora_config: Optional[Dict[str, Any]] = None,
+        load_encoders: bool = True,
     ):
         super().__init__()
 
@@ -162,17 +163,20 @@ class TCViTokModel(nn.Module):
         self.use_stub_llm = use_stub_llm
 
         # 1. Coarse visual encoder (DINOv2-S, frozen)
-        self.coarse_encoder = CoarseVisualEncoder()
-
-        # 2. Text encoder (CLIP, frozen)
-        self.text_encoder = TextEncoder()
+        # When load_encoders=False (e.g., testing with stub), use None and
+        # rely on forward_cached or external feature pipelines.
+        if load_encoders:
+            self.coarse_encoder = CoarseVisualEncoder()
+            self.text_encoder = TextEncoder()
+            self.full_encoder = FullVisualEncoder()
+        else:
+            self.coarse_encoder = None
+            self.text_encoder = None
+            self.full_encoder = None
 
         # 3. Tokenization Policy Network (TPN, trainable)
         tpn_config = tpn_config or {}
         self.tpn = TokenizationPolicyNetwork(**tpn_config)
-
-        # 4. Full visual encoder (CLIP ViT-L/14, frozen)
-        self.full_encoder = FullVisualEncoder()
 
         # 5. VLM backbone
         if use_stub_llm:

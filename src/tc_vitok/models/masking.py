@@ -102,19 +102,41 @@ def compute_spatial_entropy(mask: torch.Tensor) -> torch.Tensor:
     return entropy
 
 
-def compute_mask_diversity(mask: torch.Tensor) -> torch.Tensor:
-    """Compute diversity of token selection across batch.
+def compute_diversity_loss(
+    mask_1: torch.Tensor,
+    mask_2: torch.Tensor,
+    q_embed_1: torch.Tensor,
+    q_embed_2: torch.Tensor,
+    gamma: float = 0.5,
+) -> torch.Tensor:
+    """Compute query-diversity loss to prevent query-ignoring behavior.
 
-    Diversity = 1 - max_i P(token i selected)
-    High diversity = tokens selected vary across samples.
-    Low diversity = same tokens always selected (query-ignoring pathology).
+    Paper Eq. (div_loss):
+        L_div = sum_b max(0, sim(m1, m2) - gamma) * (1 - sim(q1, q2))
+
+    When two different questions for the same image produce very similar
+    masks (sim > gamma), and the questions themselves are dissimilar,
+    this loss penalizes the TPN for ignoring the query.
 
     Args:
-        mask: Binary mask, Shape: [B, N]
+        mask_1: Binary mask for question 1, Shape: [B, N]
+        mask_2: Binary mask for question 2, Shape: [B, N]
+        q_embed_1: Text embedding for question 1, Shape: [B, d_q]
+        q_embed_2: Text embedding for question 2, Shape: [B, d_q]
+        gamma: Similarity threshold (default 0.5)
 
     Returns:
-        diversity: Scalar in [0, 1]
+        loss: Scalar diversity loss (minimize to encourage query sensitivity)
     """
-    freq = mask.mean(dim=0)  # [N]
-    max_freq = freq.max()
-    return 1.0 - max_freq
+    eps = 1e-8
+
+    # Cosine similarity between mask pairs (per batch element)
+    mask_sim = torch.nn.functional.cosine_similarity(mask_1, mask_2, dim=-1)  # [B]
+
+    # Cosine similarity between query embedding pairs
+    q_sim = torch.nn.functional.cosine_similarity(q_embed_1, q_embed_2, dim=-1)  # [B]
+
+    # Hinge on mask similarity, weighted by query dissimilarity
+    per_sample = torch.clamp(mask_sim - gamma, min=0.0) * (1.0 - q_sim)  # [B]
+
+    return per_sample.sum()

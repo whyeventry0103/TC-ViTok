@@ -69,7 +69,6 @@ class TCViTokTrainer:
         self.T_warmup = config["training"]["T_warmup"]
 
         # Regularization weights
-        self.lambda_diversity = config["training"]["lambda_diversity"]
         self.lambda_entropy = config["training"]["lambda_entropy"]
 
         # Logging
@@ -206,7 +205,7 @@ class TCViTokTrainer:
                 return_idx=True,
             )
 
-        # Compute losses (scores for L1 sparsity, idx for entropy/diversity)
+        # Compute losses (scores for L1 sparsity, idx for entropy)
         loss_dict = compute_total_loss(
             logits=outputs.get("logits"),
             labels=labels,
@@ -215,7 +214,6 @@ class TCViTokTrainer:
             k=self.model.k,
             lambda_sparsity=lambda_sparsity,
             lambda_entropy=self.lambda_entropy,
-            lambda_diversity=self.lambda_diversity,
         )
 
         # Backpropagation with gradient accumulation
@@ -272,13 +270,10 @@ class TCViTokTrainer:
         )
 
         for batch in self.val_loader:
-            # Move batch to device
-            images_coarse = batch["images_coarse"].to(self.device)
             images_full = batch["images_full"].to(self.device)
-            questions = batch["questions"]
             labels = batch["labels"].to(self.device)
 
-            # Check if batch contains cached features
+            # Use cached coarse/text features when available (no images_coarse key)
             if "v_coarse" in batch and "q_embed" in batch:
                 outputs = self.model.forward_cached(
                     v_coarse=batch["v_coarse"].to(self.device),
@@ -291,9 +286,9 @@ class TCViTokTrainer:
                 )
             else:
                 outputs = self.model(
-                    images_coarse=images_coarse,
+                    images_coarse=batch["images_coarse"].to(self.device),
                     images_full=images_full,
-                    questions=questions,
+                    questions=batch["questions"],
                     labels=labels,
                     tau=tau,
                     return_idx=True,
@@ -308,7 +303,6 @@ class TCViTokTrainer:
                 k=self.model.k,
                 lambda_sparsity=lambda_sparsity,
                 lambda_entropy=self.lambda_entropy,
-                lambda_diversity=self.lambda_diversity,
             )
 
             total_loss += loss_dict["total"].item()
@@ -390,7 +384,7 @@ class TCViTokTrainer:
         """
         # TODO (Phase D): Implement checkpoint loading
 
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
 
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

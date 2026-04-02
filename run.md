@@ -647,7 +647,6 @@ training:
   lambda_max: 0.1
   T_warmup: 5000
   lambda_entropy: 0.01
-  lambda_diversity: 0.01
 ```
 
 ---

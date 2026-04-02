@@ -4,10 +4,13 @@ This module implements all loss terms used during training:
 1. VQA loss: Standard cross-entropy for answer generation
 2. L1 sparsity: mean(|scores|) — encourages sparse raw score vectors
 3. Entropy regularization: Shannon entropy of spatial selection distribution
-4. Diversity regularization: Prevents query-ignoring behavior
 
-Total loss (paper Eq. 15):
-    L = L_VQA + λ(t) * ||s_N||_1/N - |μ| * H(p) + ν * L_div
+Total loss (paper Eq. total_loss):
+    L(t) = L_VQA + lambda(t) * ||s_N||_1/N + mu * L_ent
+
+Diversity loss (paper Eq. div_loss) is a separate optional regularizer
+for mitigating query-ignoring behavior; it requires paired question data
+and is NOT part of the main training loss by default.
 
 Paper reference: Section 7.1 (Training Objective)
 """
@@ -77,19 +80,32 @@ def entropy_loss(mask: torch.Tensor) -> torch.Tensor:
     return -compute_spatial_entropy(mask)
 
 
-def diversity_loss(mask: torch.Tensor) -> torch.Tensor:
-    """Diversity regularization to prevent query-ignoring behavior.
+def diversity_loss(
+    mask_1: torch.Tensor,
+    mask_2: torch.Tensor,
+    q_embed_1: torch.Tensor,
+    q_embed_2: torch.Tensor,
+    gamma: float = 0.5,
+) -> torch.Tensor:
+    """Query-diversity loss to prevent query-ignoring behavior.
 
-    Returns negative diversity so that minimizing loss increases diversity.
+    Paper Eq. (div_loss):
+        L_div = sum_b max(0, sim(m1, m2) - gamma) * (1 - sim(q1, q2))
+
+    Requires paired questions for the same image. Use with PairedVQADataset.
 
     Args:
-        mask: Binary selection mask, Shape: [B, N]
+        mask_1: Binary mask for question 1, Shape: [B, N]
+        mask_2: Binary mask for question 2, Shape: [B, N]
+        q_embed_1: Text embedding for question 1, Shape: [B, d_q]
+        q_embed_2: Text embedding for question 2, Shape: [B, d_q]
+        gamma: Similarity threshold (default 0.5)
 
     Returns:
-        loss: Scalar (-diversity)
+        loss: Scalar diversity loss
     """
-    from ..models.masking import compute_mask_diversity
-    return -compute_mask_diversity(mask)
+    from ..models.masking import compute_diversity_loss
+    return compute_diversity_loss(mask_1, mask_2, q_embed_1, q_embed_2, gamma)
 
 
 def entropy_from_idx(idx: torch.Tensor, N: int = 576) -> torch.Tensor:
@@ -134,12 +150,15 @@ def compute_total_loss(
     N: int = 576,
     lambda_sparsity: float = 0.01,
     lambda_entropy: float = 0.01,
-    lambda_diversity: float = 0.001,
 ) -> dict[str, torch.Tensor]:
-    """Compute total training loss with all regularization terms.
+    """Compute total training loss (paper Eq. total_loss).
 
-    Total loss (paper Eq. 15, planv2 Stage E):
-        L = L_VQA + λ * mean(|s_N|) - μ * H(p)
+    Total loss:
+        L(t) = L_VQA + lambda(t) * ||s_N||_1/N + mu * L_ent
+
+    The paper defines exactly 3 loss terms. Diversity loss (Eq. div_loss) is
+    a separate optional regularizer for query-ignoring mitigation and requires
+    paired question data from PairedVQADataset; it is NOT included here.
 
     Entropy is computed from gather indices (idx), not from a binary mask.
     This matches the gather-based (Option B) approach throughout.
@@ -151,9 +170,8 @@ def compute_total_loss(
         idx: Top-k gather indices from TPN, Shape: [B, k]
         k: Token budget
         N: Total number of spatial positions (576)
-        lambda_sparsity: Weight for L1 sparsity (paper: λ)
-        lambda_entropy: Weight for entropy (paper: |μ|)
-        lambda_diversity: Weight for diversity (paper: ν)
+        lambda_sparsity: Weight for L1 sparsity (paper: lambda)
+        lambda_entropy: Weight for entropy (paper: |mu|)
 
     Returns:
         loss_dict: Dictionary with all loss components
@@ -172,17 +190,11 @@ def compute_total_loss(
     ent = entropy_from_idx(idx, N=N)
     loss_ent = -ent
 
-    # Diversity: reconstruct mask from idx for diversity computation
-    mask = torch.zeros(idx.shape[0], N, device=idx.device)
-    mask.scatter_(-1, idx, 1.0)
-    loss_div = diversity_loss(mask)
-
-    # Total loss
+    # Total loss: 3 terms per paper Eq. total_loss
     loss_total = (
         loss_vqa
         + lambda_sparsity * loss_sparsity
         + lambda_entropy * loss_ent
-        + lambda_diversity * loss_div
     )
 
     return {
@@ -190,5 +202,4 @@ def compute_total_loss(
         "vqa": loss_vqa.detach(),
         "sparsity": loss_sparsity.detach(),
         "entropy": loss_ent.detach(),
-        "diversity": loss_div.detach(),
     }

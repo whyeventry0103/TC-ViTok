@@ -7,8 +7,8 @@
 # Ensure preprocessing pipelines apply the correct normalization per encoder!
 
 # Core ML frameworks
-torch>=2.0.0
-torchvision>=0.15.0
+torch>=2.6.0
+torchvision>=0.21.0
 transformers>=4.36.0
 accelerate>=0.25.0
 peft>=0.7.0

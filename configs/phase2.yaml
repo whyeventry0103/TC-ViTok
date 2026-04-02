@@ -19,7 +19,6 @@ training:
   # Paper Phase 2: λ=0, τ=0.1 fixed
   lambda_max: 0.0
   lambda_entropy: 0.01
-  lambda_diversity: 0.01
   T_warmup: 1
 
   # Lower learning rates for domain transfer

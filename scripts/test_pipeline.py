@@ -156,7 +156,7 @@ def test_losses():
     loss_dict = compute_total_loss(
         logits=logits, labels=labels,
         scores=scores, idx=idx, k=k, N=N,
-        lambda_sparsity=0.1, lambda_entropy=0.01, lambda_diversity=0.01,
+        lambda_sparsity=0.1, lambda_entropy=0.01,
     )
 
     assert "total" in loss_dict

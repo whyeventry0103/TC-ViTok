@@ -14,7 +14,7 @@ import pytest
 from tc_vitok.models.masking import (
     gumbel_sigmoid_ste,
     compute_spatial_entropy,
-    compute_mask_diversity,
+    compute_diversity_loss,
 )
 from tc_vitok.models.tc_vitok_model import gather_tokens
 
@@ -170,22 +170,41 @@ class TestSpatialEntropy:
         assert entropy < 0.1, f"Collapsed mask entropy should be near 0, got {entropy:.2f}"
 
 
-class TestMaskDiversity:
-    """Test mask diversity computation."""
+class TestDiversityLoss:
+    """Test query-diversity loss (paper Eq. div_loss)."""
 
-    def test_identical_masks_low_diversity(self):
-        """Same mask for all samples should have low diversity."""
-        mask = torch.zeros(8, 576)
-        mask[:, :144] = 1.0  # All select first 144 tokens
-        diversity = compute_mask_diversity(mask)
-        assert diversity < 0.1, f"Identical masks should have low diversity, got {diversity:.2f}"
+    def test_identical_masks_different_queries_high_loss(self):
+        """Same mask + different queries should produce high diversity loss."""
+        B, N = 4, 576
+        mask_1 = torch.zeros(B, N)
+        mask_1[:, :144] = 1.0
+        mask_2 = mask_1.clone()  # identical masks
+        q_1 = torch.randn(B, 512)
+        q_2 = -q_1  # maximally different queries (cosine sim ~ -1)
+        loss = compute_diversity_loss(mask_1, mask_2, q_1, q_2, gamma=0.5)
+        assert loss.item() > 0, f"Identical masks + different queries should have loss > 0, got {loss:.4f}"
 
-    def test_varied_masks_higher_diversity(self):
-        """Different masks should produce higher diversity."""
-        mask = torch.zeros(8, 576)
-        for i in range(8):
-            start = i * 72
-            mask[i, start:start + 72] = 1.0
-        diversity = compute_mask_diversity(mask)
-        # Max frequency should be low since different tokens selected
-        assert diversity > 0.5, f"Varied masks should have high diversity, got {diversity:.2f}"
+    def test_different_masks_low_loss(self):
+        """Different masks should produce low diversity loss."""
+        B, N = 4, 576
+        mask_1 = torch.zeros(B, N)
+        mask_1[:, :144] = 1.0
+        mask_2 = torch.zeros(B, N)
+        mask_2[:, 300:444] = 1.0  # completely different tokens
+        q_1 = torch.randn(B, 512)
+        q_2 = -q_1
+        loss = compute_diversity_loss(mask_1, mask_2, q_1, q_2, gamma=0.5)
+        # Cosine sim between orthogonal masks should be ~0, below gamma
+        assert loss.item() < 0.1, f"Different masks should have near-zero loss, got {loss:.4f}"
+
+    def test_similar_queries_low_loss(self):
+        """Similar queries should produce low loss even with identical masks."""
+        B, N = 4, 576
+        mask_1 = torch.zeros(B, N)
+        mask_1[:, :144] = 1.0
+        mask_2 = mask_1.clone()
+        q_1 = torch.randn(B, 512)
+        q_2 = q_1 + 0.01 * torch.randn(B, 512)  # very similar queries
+        loss = compute_diversity_loss(mask_1, mask_2, q_1, q_2, gamma=0.5)
+        # (1 - sim(q1,q2)) is near 0 when queries are similar
+        assert loss.item() < 0.1, f"Similar queries should have near-zero loss, got {loss:.4f}"

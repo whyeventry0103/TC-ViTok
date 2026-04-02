@@ -13,7 +13,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from transformers import CLIPModel, CLIPProcessor
+from transformers import CLIPModel, CLIPProcessor, CLIPTextModel
 import timm
 
 
@@ -101,6 +101,9 @@ class TextEncoder(nn.Module):
     Extracts text embeddings from questions using frozen CLIP text encoder.
     The [EOS] token embedding is used as the question representation.
 
+    Loads only the text tower (CLIPTextModel) instead of the full CLIPModel
+    to avoid wasting ~600M parameters on the unused vision tower.
+
     Architecture:
         - Input: Text string (question)
         - Output: 512-dim embedding from [EOS] token
@@ -117,15 +120,15 @@ class TextEncoder(nn.Module):
     def __init__(self, model_name: str = "openai/clip-vit-base-patch32"):
         super().__init__()
 
-        # TODO (Phase B): Load pretrained CLIP model
-        self.clip = CLIPModel.from_pretrained(model_name)
+        # Load only the text model (not the full CLIP with vision tower)
+        self.text_model = CLIPTextModel.from_pretrained(model_name)
         self.processor = CLIPProcessor.from_pretrained(model_name)
 
         # Freeze text encoder
-        for param in self.clip.text_model.parameters():
+        for param in self.text_model.parameters():
             param.requires_grad = False
 
-        self.clip.text_model.eval()
+        self.text_model.eval()
 
         # CLIP-B/32 text embedding dimension
         self.d_text = 512
@@ -145,9 +148,6 @@ class TextEncoder(nn.Module):
             - Automatically handles tokenization via CLIPProcessor
             - All computation in torch.no_grad() for efficiency
         """
-        # TODO (Phase B): Implement forward pass
-        # Tokenize and extract [EOS] embeddings
-
         # Tokenize texts
         inputs = self.processor(
             text=texts,
@@ -156,11 +156,15 @@ class TextEncoder(nn.Module):
             truncation=True,
         )
 
-        # Move to same device as model
-        inputs = {k: v.to(next(self.clip.parameters()).device) for k, v in inputs.items()}
+        # Move to same device as model; filter to text-only keys
+        device = next(self.text_model.parameters()).device
+        text_inputs = {
+            k: v.to(device) for k, v in inputs.items()
+            if k in ("input_ids", "attention_mask")
+        }
 
         # Forward through CLIP text encoder
-        text_outputs = self.clip.text_model(**inputs)
+        text_outputs = self.text_model(**text_inputs)
 
         # Extract [EOS] token embedding
         # pooler_output is the [EOS] token representation

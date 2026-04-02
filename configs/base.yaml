@@ -39,8 +39,6 @@ training:
   # Entropy regularization (paper: |μ| = 0.01)
   lambda_entropy: 0.01
 
-  # Diversity regularization (paper: ν = 0.01)
-  lambda_diversity: 0.01
 
   # Optimization — paper Section 7.3
   batch_size: 16
@@ -64,6 +62,26 @@ data:
   image_size_full: 336    # CLIP ViT-L/14 input
   num_workers: 4
   pin_memory: true
+
+  # Dataset selection: "vqav2" or "gqa"
+  dataset: "vqav2"
+  max_samples: null  # null = use full dataset; set an int to subsample
+
+  # VQAv2 annotation / image paths — fill in before real training
+  # Download: https://visualqa.org/download.html
+  train_annotations: "data/vqav2/v2_mscoco_train2014_annotations.json"
+  train_questions: "data/vqav2/v2_OpenEnded_mscoco_train2014_questions.json"
+  train_image_dir: "data/vqav2/train2014"
+  val_annotations: "data/vqav2/v2_mscoco_val2014_annotations.json"
+  val_questions: "data/vqav2/v2_OpenEnded_mscoco_val2014_questions.json"
+  val_image_dir: "data/vqav2/val2014"
+
+  # GQA paths (used in Phase 1 joint training)
+  # Download: https://cs.stanford.edu/people/dorarad/gqa/download.html
+  gqa_train_questions: "data/gqa/train_balanced_questions.json"
+  gqa_val_questions: "data/gqa/val_balanced_questions.json"
+  gqa_train_image_dir: "data/gqa/images"
+  gqa_val_image_dir: "data/gqa/images"
 
   # Feature caching
   cache_dir: "data/cache"
