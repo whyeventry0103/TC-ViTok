@@ -136,10 +136,15 @@ download_vqav2() {
         ZIP="${VQAV2_DIR}/${SPLIT}.zip"
         if [ ! -d "${IMG_DIR}" ]; then
             echo "Downloading COCO ${SPLIT} images ..."
-            $WGET -P "${VQAV2_DIR}" "${IMG_BASE}/${SPLIT}.zip"
-            echo "Extracting ${SPLIT}.zip ..."
-            unzip -o "${ZIP}" -d "${VQAV2_DIR}"
-            rm -f "${ZIP}"
+            wget -c --tries=5 --timeout=120 --show-progress -q \
+                -O "${ZIP}" "${IMG_BASE}/${SPLIT}.zip"
+            if [ -f "${ZIP}" ]; then
+                echo "Extracting ${SPLIT}.zip ..."
+                unzip -o "${ZIP}" -d "${VQAV2_DIR}"
+                rm -f "${ZIP}"
+            else
+                echo "ERROR: ${ZIP} not found after download — re-run script to retry"
+            fi
         else
             echo "  ✓ ${SPLIT} already present"
         fi
