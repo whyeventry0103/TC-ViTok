@@ -36,8 +36,11 @@ export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 if [[ -n "${DATA_ROOT:-}" ]]; then
     export HF_HOME="${HF_HOME:-${DATA_ROOT}/hf_cache}"
     export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-${DATA_ROOT}/hf_cache}"
-    echo "DATA_ROOT = ${DATA_ROOT}"
-    echo "HF_HOME   = ${HF_HOME}"
+    export TORCH_HOME="${TORCH_HOME:-${DATA_ROOT}/torch_cache}"
+    export HF_HUB_DISABLE_SYMLINKS_WARNING=1
+    echo "DATA_ROOT  = ${DATA_ROOT}"
+    echo "HF_HOME    = ${HF_HOME}"
+    echo "TORCH_HOME = ${TORCH_HOME}"
 fi
 
 # ── Launch ───────────────────────────────────────────────────────────────────

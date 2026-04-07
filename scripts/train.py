@@ -291,13 +291,17 @@ def main():
     # MPS/Apple Silicon compatibility (no-op on Linux/CUDA)
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
-    # If DATA_ROOT is set, redirect HuggingFace model cache there too
-    # so downloaded models (LLaVA, DINOv2, CLIP) land on Google Drive.
+    # If DATA_ROOT is set, redirect all model caches to Google Drive.
+    # HF_HOME  → transformers models (CLIP, LLaVA)
+    # TORCH_HOME → timm models (DINOv2-S via PyTorch Hub)
     data_root = os.environ.get("DATA_ROOT")
     if data_root:
         hf_home = os.path.join(data_root, "hf_cache")
+        torch_home = os.path.join(data_root, "torch_cache")
         os.environ.setdefault("HF_HOME", hf_home)
         os.environ.setdefault("TRANSFORMERS_CACHE", hf_home)
+        os.environ.setdefault("TORCH_HOME", torch_home)
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
     # DDP initialization (sets LOCAL_RANK via torchrun env var)
     local_rank, is_ddp = init_ddp()
