@@ -20,6 +20,9 @@ import argparse
 import os
 from pathlib import Path
 import torch
+import torch.distributed as dist
+import torch.nn as nn
+from torch.utils.data import DistributedSampler
 import wandb
 from omegaconf import OmegaConf
 
@@ -101,17 +104,35 @@ def parse_args():
     return parser.parse_args()
 
 
-def detect_device():
+def init_ddp() -> tuple[int, bool]:
+    """Initialize DDP if LOCAL_RANK is set by torchrun.
+
+    Returns:
+        (local_rank, is_ddp) — local_rank=-1 means single-GPU / CPU mode
+    """
+    local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    if local_rank < 0:
+        return -1, False
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    return local_rank, True
+
+
+def detect_device(local_rank: int = -1) -> str:
     """Auto-detect the best available device."""
+    if local_rank >= 0:
+        return f"cuda:{local_rank}"
     if torch.cuda.is_available():
         return "cuda"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
 
 
-def build_loaders(data_config, batch_size, num_workers, args):
+def build_loaders(data_config, batch_size, num_workers, args, is_ddp: bool = False):
     """Build train and val DataLoaders from config and args.
+
+    When is_ddp=True, train DataLoader uses DistributedSampler (no shuffle kwarg).
 
     Returns:
         train_loader, val_loader (val_loader may be None)
@@ -168,14 +189,27 @@ def build_loaders(data_config, batch_size, num_workers, args):
         train_collate = collate_fn
         val_collate = collate_fn
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        collate_fn=train_collate,
-        pin_memory=data_config.get("pin_memory", False),
-    )
+    pin_memory = data_config.get("pin_memory", False) and torch.cuda.is_available()
+
+    if is_ddp:
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            sampler=train_sampler,
+            num_workers=num_workers,
+            collate_fn=train_collate,
+            pin_memory=pin_memory,
+        )
+    else:
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            collate_fn=train_collate,
+            pin_memory=pin_memory,
+        )
 
     val_loader = None
     if val_dataset is not None:
@@ -185,22 +219,23 @@ def build_loaders(data_config, batch_size, num_workers, args):
             shuffle=False,
             num_workers=num_workers,
             collate_fn=val_collate,
-            pin_memory=data_config.get("pin_memory", False),
+            pin_memory=pin_memory,
         )
 
     return train_loader, val_loader
 
 
-def run_phase(model, config_dict, train_loader, val_loader, device, resume=None):
+def run_phase(model, config_dict, train_loader, val_loader, device, resume=None, local_rank=-1):
     """Create trainer, optionally resume, and run one training phase.
 
     Args:
-        model: TCViTokModel instance (will have set_training_phase called by trainer)
+        model: TCViTokModel instance (already wrapped in DDP if multi-GPU)
         config_dict: Config dict for this phase
         train_loader: Training DataLoader
         val_loader: Validation DataLoader (may be None)
-        device: Training device
+        device: Training device string
         resume: Optional checkpoint path to resume from
+        local_rank: DDP local rank (-1 = single-GPU)
 
     Returns:
         final_metrics: Dict from trainer.train()
@@ -212,6 +247,7 @@ def run_phase(model, config_dict, train_loader, val_loader, device, resume=None)
         train_loader=train_loader,
         val_loader=val_loader,
         device=device,
+        local_rank=local_rank,
     )
 
     if resume:
@@ -252,8 +288,20 @@ def load_config(config_path: str) -> dict:
 def main():
     args = parse_args()
 
-    # MPS/Apple Silicon compatibility
+    # MPS/Apple Silicon compatibility (no-op on Linux/CUDA)
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
+    # If DATA_ROOT is set, redirect HuggingFace model cache there too
+    # so downloaded models (LLaVA, DINOv2, CLIP) land on Google Drive.
+    data_root = os.environ.get("DATA_ROOT")
+    if data_root:
+        hf_home = os.path.join(data_root, "hf_cache")
+        os.environ.setdefault("HF_HOME", hf_home)
+        os.environ.setdefault("TRANSFORMERS_CACHE", hf_home)
+
+    # DDP initialization (sets LOCAL_RANK via torchrun env var)
+    local_rank, is_ddp = init_ddp()
+    is_main = local_rank <= 0  # rank 0 or single-GPU
 
     # Load config (merges base.yaml automatically for phase configs)
     config_dict = load_config(args.config)
@@ -264,13 +312,16 @@ def main():
     if args.max_steps is not None:
         config_dict["training"]["max_steps"] = args.max_steps
 
-    device = args.device or detect_device()
+    device = args.device or detect_device(local_rank)
 
-    print(f"Loaded config from {args.config}")
-    print(f"Phase: {phase}")
-    print(f"Device: {device}")
-    if args.max_steps is not None:
-        print(f"max_steps overridden to {args.max_steps}")
+    if is_main:
+        print(f"Loaded config from {args.config}")
+        print(f"Phase: {phase}")
+        print(f"Device: {device}")
+        if is_ddp:
+            print(f"DDP enabled — local_rank={local_rank}, world_size={dist.get_world_size()}")
+        if args.max_steps is not None:
+            print(f"max_steps overridden to {args.max_steps}")
 
     # Initialize model (shared across phases when running both)
     tpn_config = config_dict.get("model", {}).get("tpn", {})
@@ -284,8 +335,15 @@ def main():
         lora_config=lora_config,
         load_encoders=not args.stub,
     )
-    print(f"Model created (stub={args.stub}, k={k})")
-    print(f"Trainable params: {model.get_num_params():,}")
+
+    if is_main:
+        print(f"Model created (stub={args.stub}, k={k})")
+        print(f"Trainable params: {model.get_num_params():,}")
+
+    # Wrap model in DDP after moving to the correct CUDA device
+    if is_ddp:
+        model = model.to(device)
+        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
 
     # ------------------------------------------------------------------ #
     # Phase 0 training                                                     #
@@ -293,8 +351,8 @@ def main():
     phase0_output = Path(args.output) / "phase0"
     config_dict["logging"]["output_dir"] = str(phase0_output)
 
-    # Initialize WandB for Phase 0
-    if not args.no_wandb:
+    # Initialize WandB for Phase 0 (rank-0 only)
+    if is_main and not args.no_wandb:
         run_name = config_dict.get("logging", {}).get("wandb_run_name", f"phase{phase}")
         wandb.init(project=args.wandb_project, name=run_name, config=config_dict)
 
@@ -302,14 +360,16 @@ def main():
     batch_size = config_dict.get("training", {}).get("batch_size", 16)
     num_workers = data_config.get("num_workers", 0)
 
-    train_loader, val_loader = build_loaders(data_config, batch_size, num_workers, args)
+    train_loader, val_loader = build_loaders(data_config, batch_size, num_workers, args, is_ddp=is_ddp)
 
     phase0_metrics, phase0_dir = run_phase(
-        model, config_dict, train_loader, val_loader, device, resume=args.resume
+        model, config_dict, train_loader, val_loader, device,
+        resume=args.resume, local_rank=local_rank,
     )
-    print(f"Phase {phase} complete. Metrics: {phase0_metrics}")
+    if is_main:
+        print(f"Phase {phase} complete. Metrics: {phase0_metrics}")
 
-    if not args.no_wandb and wandb.run is not None:
+    if is_main and not args.no_wandb and wandb.run is not None:
         wandb.finish()
 
     # ------------------------------------------------------------------ #
@@ -318,9 +378,11 @@ def main():
     if args.run_both_phases and phase == 0:
         phase1_config_path = config_path.parent / "phase1.yaml"
         if not phase1_config_path.exists():
-            print(f"WARNING: --run-both-phases requested but {phase1_config_path} not found. Skipping Phase 1.")
+            if is_main:
+                print(f"WARNING: --run-both-phases requested but {phase1_config_path} not found. Skipping Phase 1.")
         else:
-            print(f"\nProceeding to Phase 1 using {phase1_config_path}")
+            if is_main:
+                print(f"\nProceeding to Phase 1 using {phase1_config_path}")
 
             phase1_dict = load_config(str(phase1_config_path))
 
@@ -334,12 +396,13 @@ def main():
             # Phase 1 resumes from Phase 0 best checkpoint
             phase0_best = phase0_dir / "best.ckpt"
             phase1_resume = str(phase0_best) if phase0_best.exists() else None
-            if phase1_resume:
-                print(f"Phase 1 resuming from {phase1_resume}")
-            else:
-                print("WARNING: Phase 0 best.ckpt not found; Phase 1 starts from scratch")
+            if is_main:
+                if phase1_resume:
+                    print(f"Phase 1 resuming from {phase1_resume}")
+                else:
+                    print("WARNING: Phase 0 best.ckpt not found; Phase 1 starts from scratch")
 
-            if not args.no_wandb:
+            if is_main and not args.no_wandb:
                 run_name1 = phase1_dict.get("logging", {}).get("wandb_run_name", "phase1")
                 wandb.init(project=args.wandb_project, name=run_name1, config=phase1_dict)
 
@@ -348,19 +411,24 @@ def main():
             batch_size1 = phase1_dict.get("training", {}).get("batch_size", batch_size)
             num_workers1 = data_config1.get("num_workers", num_workers)
             train_loader1, val_loader1 = build_loaders(
-                data_config1, batch_size1, num_workers1, args
+                data_config1, batch_size1, num_workers1, args, is_ddp=is_ddp
             )
 
             phase1_metrics, _ = run_phase(
                 model, phase1_dict, train_loader1, val_loader1, device,
-                resume=phase1_resume,
+                resume=phase1_resume, local_rank=local_rank,
             )
-            print(f"Phase 1 complete. Metrics: {phase1_metrics}")
+            if is_main:
+                print(f"Phase 1 complete. Metrics: {phase1_metrics}")
 
-            if not args.no_wandb and wandb.run is not None:
+            if is_main and not args.no_wandb and wandb.run is not None:
                 wandb.finish()
 
-    print("\nTraining complete!")
+    if is_main:
+        print("\nTraining complete!")
+
+    if is_ddp:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

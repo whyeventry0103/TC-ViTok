@@ -40,9 +40,13 @@ training:
   lambda_entropy: 0.01
 
 
+  # Mixed precision: "bf16" (RTX Ada / A100 / H100), "fp16", or "no"
+  mixed_precision: "bf16"
+
   # Optimization — paper Section 7.3
-  batch_size: 16
-  grad_accum_steps: 4  # effective batch size = 64
+  # batch_size per GPU; effective = batch_size × grad_accum_steps × world_size
+  batch_size: 32
+  grad_accum_steps: 2  # effective batch size = 64 per GPU; 128 with 2×GPUs
   max_steps: 50000
   warmup_steps: 1000
 
@@ -60,31 +64,38 @@ training:
 data:
   image_size_coarse: 98   # DINOv2-S input
   image_size_full: 336    # CLIP ViT-L/14 input
-  num_workers: 4
+  # Set num_workers to ~4× number of GPUs for best throughput on CUDA
+  num_workers: 8
   pin_memory: true
 
   # Dataset selection: "vqav2" or "gqa"
   dataset: "vqav2"
   max_samples: null  # null = use full dataset; set an int to subsample
 
-  # VQAv2 annotation / image paths — fill in before real training
+  # ── Google Drive / remote path resolution ─────────────────────────────
+  # Set the DATA_ROOT env var to your mounted Drive directory, e.g.:
+  #   export DATA_ROOT=/mnt/gdrive/tc-vitok-data
+  # Defaults to local "data/" directory if the env var is not set.
+  data_root: ${oc.env:DATA_ROOT,data}
+
+  # VQAv2 annotation / image paths
   # Download: https://visualqa.org/download.html
-  train_annotations: "data/vqav2/v2_mscoco_train2014_annotations.json"
-  train_questions: "data/vqav2/v2_OpenEnded_mscoco_train2014_questions.json"
-  train_image_dir: "data/vqav2/train2014"
-  val_annotations: "data/vqav2/v2_mscoco_val2014_annotations.json"
-  val_questions: "data/vqav2/v2_OpenEnded_mscoco_val2014_questions.json"
-  val_image_dir: "data/vqav2/val2014"
+  train_annotations: "${data.data_root}/vqav2/v2_mscoco_train2014_annotations.json"
+  train_questions: "${data.data_root}/vqav2/v2_OpenEnded_mscoco_train2014_questions.json"
+  train_image_dir: "${data.data_root}/vqav2/train2014"
+  val_annotations: "${data.data_root}/vqav2/v2_mscoco_val2014_annotations.json"
+  val_questions: "${data.data_root}/vqav2/v2_OpenEnded_mscoco_val2014_questions.json"
+  val_image_dir: "${data.data_root}/vqav2/val2014"
 
   # GQA paths (used in Phase 1 joint training)
   # Download: https://cs.stanford.edu/people/dorarad/gqa/download.html
-  gqa_train_questions: "data/gqa/train_balanced_questions.json"
-  gqa_val_questions: "data/gqa/val_balanced_questions.json"
-  gqa_train_image_dir: "data/gqa/images"
-  gqa_val_image_dir: "data/gqa/images"
+  gqa_train_questions: "${data.data_root}/gqa/train_balanced_questions.json"
+  gqa_val_questions: "${data.data_root}/gqa/val_balanced_questions.json"
+  gqa_train_image_dir: "${data.data_root}/gqa/images"
+  gqa_val_image_dir: "${data.data_root}/gqa/images"
 
   # Feature caching
-  cache_dir: "data/cache"
+  cache_dir: "${data.data_root}/cache"
   use_cached_features: false
 
 # Logging

@@ -8,6 +8,7 @@ This module orchestrates the 3-phase training procedure:
 Paper reference: Section 7 (Training Procedure)
 """
 
+from contextlib import nullcontext
 from typing import Optional, Dict, Any
 from pathlib import Path
 
@@ -28,16 +29,17 @@ class TCViTokTrainer:
     Handles all aspects of training:
     - Phase-specific parameter freezing
     - Curriculum scheduling (τ, λ, LR)
-    - Loss computation and backpropagation
-    - Logging and checkpointing
+    - Loss computation and backpropagation (BF16 mixed precision)
+    - Logging and checkpointing (rank-0 only in DDP)
     - Evaluation during training
 
     Args:
-        model: TC-ViTok model instance
+        model: TC-ViTok model instance (may be wrapped in DDP by caller)
         config: Training configuration dict
         train_loader: Training data loader
         val_loader: Validation data loader (optional)
         device: Device to train on
+        local_rank: DDP local rank (-1 = single-GPU / non-DDP)
 
     Paper reference: Section 7
     """
@@ -49,12 +51,17 @@ class TCViTokTrainer:
         train_loader: DataLoader,
         val_loader: Optional[DataLoader] = None,
         device: str = "cuda",
+        local_rank: int = -1,
     ):
         self.model = model.to(device)
         self.config = config
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
+        self.local_rank = local_rank
+        self.is_ddp = local_rank >= 0
+        # rank-0 is the only process that logs / saves
+        self.is_main = (local_rank <= 0)
 
         # Extract config
         self.phase = config.get("phase", 1)
@@ -78,12 +85,22 @@ class TCViTokTrainer:
         self.output_dir = Path(config["logging"]["output_dir"])
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # TODO (Phase C): Set up phase-specific training
-        self.model.set_training_phase(self.phase)
+        # Mixed precision: use BF16 when available (RTX Ada / A100 / H100)
+        mp_setting = config.get("training", {}).get("mixed_precision", "no")
+        if mp_setting == "bf16" and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+            self.amp_dtype = torch.bfloat16
+        elif mp_setting == "fp16" and torch.cuda.is_available():
+            self.amp_dtype = torch.float16
+        else:
+            self.amp_dtype = None  # full precision
 
-        # TODO (Phase C): Create optimizer
+        # Set up phase-specific training (call on underlying module for DDP)
+        raw_model = self.model.module if self.is_ddp else self.model
+        raw_model.set_training_phase(self.phase)
+
+        # Create optimizer (operates on raw model parameters)
         self.optimizer = create_optimizer(
-            self.model,
+            raw_model,
             lr_tpn=config["training"]["lr_tpn"],
             lr_lora=config["training"]["lr_lora"],
             lr_mlp=config["training"]["lr_mlp"],
@@ -108,16 +125,22 @@ class TCViTokTrainer:
         """
         # TODO (Phase C): Implement main training loop
 
-        print(f"\n{'='*60}")
-        print(f"Starting Phase {self.phase} Training")
-        print(f"{'='*60}")
-        print(f"Max steps: {self.max_steps}")
-        print(f"Device: {self.device}")
+        if self.is_main:
+            print(f"\n{'='*60}")
+            print(f"Starting Phase {self.phase} Training")
+            print(f"{'='*60}")
+            print(f"Max steps: {self.max_steps}")
+            print(f"Device: {self.device}")
+            if self.amp_dtype is not None:
+                print(f"Mixed precision: {self.amp_dtype}")
+            if self.is_ddp:
+                import torch.distributed as dist
+                print(f"DDP world size: {dist.get_world_size()}")
 
-        # Log optimizer info
-        opt_info = get_optimizer_info(self.optimizer)
-        print(f"Optimizer: {opt_info['num_groups']} parameter groups")
-        print(f"Total trainable params: {opt_info['total_params']:,}")
+            # Log optimizer info
+            opt_info = get_optimizer_info(self.optimizer)
+            print(f"Optimizer: {opt_info['num_groups']} parameter groups")
+            print(f"Total trainable params: {opt_info['total_params']:,}")
 
         self.model.train()
 
@@ -133,17 +156,17 @@ class TCViTokTrainer:
                 # Training step
                 loss_dict = self.train_step(batch)
 
-                # Logging
-                if self.global_step % self.log_interval == 0:
+                # Logging (rank-0 only)
+                if self.is_main and self.global_step % self.log_interval == 0:
                     self.log_metrics(loss_dict)
 
-                # Validation
-                if self.val_loader and self.global_step % self.eval_interval == 0:
+                # Validation (rank-0 only)
+                if self.is_main and self.val_loader and self.global_step % self.eval_interval == 0:
                     val_metrics = self.validate()
                     self.log_metrics(val_metrics, prefix="val")
 
-                # Checkpointing
-                if self.global_step % self.save_interval == 0:
+                # Checkpointing (rank-0 only)
+                if self.is_main and self.global_step % self.save_interval == 0:
                     self.save_checkpoint()
 
                 pbar.update(1)
@@ -151,9 +174,10 @@ class TCViTokTrainer:
             self.epoch += 1
 
         pbar.close()
-        print(f"\n{'='*60}")
-        print(f"Phase {self.phase} Training Complete")
-        print(f"{'='*60}\n")
+        if self.is_main:
+            print(f"\n{'='*60}")
+            print(f"Phase {self.phase} Training Complete")
+            print(f"{'='*60}\n")
 
         return {"final_step": self.global_step, "final_epoch": self.epoch}
 
@@ -182,36 +206,45 @@ class TCViTokTrainer:
         images_full = batch["images_full"].to(self.device)
         labels = batch["labels"].to(self.device)
 
+        # BF16 / FP16 autocast context
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=self.amp_dtype)
+            if self.amp_dtype is not None and self.device != "cpu"
+            else nullcontext()
+        )
+
         # Support both cached and non-cached batches
-        if "v_coarse" in batch and "q_embed" in batch:
-            outputs = self.model.forward_cached(
-                v_coarse=batch["v_coarse"].to(self.device),
-                q_embed=batch["q_embed"].to(self.device),
-                images_full=images_full,
-                questions=batch.get("questions"),  # needed for LLaVA text conditioning
-                labels=labels,
-                tau=tau,
-                return_idx=True,
-            )
-        else:
-            images_coarse = batch["images_coarse"].to(self.device)
-            questions = batch["questions"]
-            outputs = self.model(
-                images_coarse=images_coarse,
-                images_full=images_full,
-                questions=questions,
-                labels=labels,
-                tau=tau,
-                return_idx=True,
-            )
+        with amp_ctx:
+            if "v_coarse" in batch and "q_embed" in batch:
+                outputs = self.model.forward_cached(
+                    v_coarse=batch["v_coarse"].to(self.device),
+                    q_embed=batch["q_embed"].to(self.device),
+                    images_full=images_full,
+                    questions=batch.get("questions"),  # needed for LLaVA text conditioning
+                    labels=labels,
+                    tau=tau,
+                    return_idx=True,
+                )
+            else:
+                images_coarse = batch["images_coarse"].to(self.device)
+                questions = batch["questions"]
+                outputs = self.model(
+                    images_coarse=images_coarse,
+                    images_full=images_full,
+                    questions=questions,
+                    labels=labels,
+                    tau=tau,
+                    return_idx=True,
+                )
 
         # Compute losses (scores for L1 sparsity, idx for entropy)
+        raw_model = self.model.module if self.is_ddp else self.model
         loss_dict = compute_total_loss(
             logits=outputs.get("logits"),
             labels=labels,
             scores=outputs["scores"],
             idx=outputs["idx"],
-            k=self.model.k,
+            k=raw_model.k,
             lambda_sparsity=lambda_sparsity,
             lambda_entropy=self.lambda_entropy,
         )
@@ -295,12 +328,13 @@ class TCViTokTrainer:
                 )
 
             # Compute losses
+            _raw = self.model.module if self.is_ddp else self.model
             loss_dict = compute_total_loss(
                 logits=outputs.get("logits"),
                 labels=labels,
                 scores=outputs["scores"],
                 idx=outputs["idx"],
-                k=self.model.k,
+                k=_raw.k,
                 lambda_sparsity=lambda_sparsity,
                 lambda_entropy=self.lambda_entropy,
             )
@@ -357,10 +391,12 @@ class TCViTokTrainer:
         """
         # TODO (Phase D): Implement checkpointing
 
+        # Unwrap DDP so checkpoint is always a plain state dict
+        raw_model = self.model.module if self.is_ddp else self.model
         checkpoint = {
             "global_step": self.global_step,
             "epoch": self.epoch,
-            "model_state_dict": self.model.state_dict(),
+            "model_state_dict": raw_model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "config": self.config,
         }
@@ -386,7 +422,8 @@ class TCViTokTrainer:
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
 
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+        raw_model = self.model.module if self.is_ddp else self.model
+        raw_model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.global_step = checkpoint["global_step"]
         self.epoch = checkpoint["epoch"]
