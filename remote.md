@@ -102,6 +102,7 @@ if data_root:
 | `AutoFeatureExtractor` removed in transformers 5.x | `AutoFeatureExtractor` | `AutoImageProcessor` |
 | `HF_HOME` still pointing to Drive after switch | old `.bashrc` line | `sed -i '/HF_HOME/d' ~/.bashrc` then re-added correctly |
 | `TORCH_HOME` not set | missing from `.bashrc` | added `export TORCH_HOME=${DATA_ROOT}/torch_cache` |
+| COCO images unzip failure | `wget -P` (directory prefix) saved to wrong path | `wget -O "${ZIP}"` (explicit output file) + existence check before unzip |
 
 ---
 
@@ -132,53 +133,59 @@ echo $TORCH_HOME   # /home/sk10741/tc-vitok-data/torch_cache
 
 ---
 
-## Part 2 — Download Everything (Currently Running)
+## Part 2 — Download Everything (Done, running in background)
 
-Download is running in tmux session `download3`. Started on 2026-04-08.
-
-Check progress:
-```bash
-tmux capture-pane -t download3 -p | tail -20
-```
-
-Done when you see:
-```
-──────────────────────────────────────────
- All downloads complete
-──────────────────────────────────────────
-```
+Downloads were started on 2026-04-08 using two tmux sessions.
 
 ### What gets downloaded
 
-| Item | Size | Destination |
-|---|---|---|
-| DINOv2-S (via timm) | ~85 MB | `~/tc-vitok-data/torch_cache/` |
-| CLIP ViT-B/32 | ~340 MB | `~/tc-vitok-data/hf_cache/` |
-| CLIP ViT-L/14-336 | ~1.7 GB | `~/tc-vitok-data/hf_cache/` |
-| LLaVA-1.5-7B | ~14 GB | `~/tc-vitok-data/hf_cache/` |
-| VQAv2 annotations | ~130 MB | `~/tc-vitok-data/vqav2/` |
-| COCO train2014 images | ~13 GB | `~/tc-vitok-data/vqav2/train2014/` |
-| COCO val2014 images | ~6 GB | `~/tc-vitok-data/vqav2/val2014/` |
-| GQA questions | ~660 MB | `~/tc-vitok-data/gqa/` |
-| GQA images | ~20 GB | `~/tc-vitok-data/gqa/images/` |
-| **Total** | **~55 GB** | |
+| Item | Size | Destination | Status |
+|---|---|---|---|
+| DINOv2-S (via timm) | ~85 MB | `~/tc-vitok-data/torch_cache/` | ✓ Done |
+| CLIP ViT-B/32 | ~340 MB | `~/tc-vitok-data/hf_cache/` | ✓ Done |
+| CLIP ViT-L/14-336 | ~1.7 GB | `~/tc-vitok-data/hf_cache/` | ✓ Done |
+| LLaVA-1.5-7B | ~14 GB | `~/tc-vitok-data/hf_cache/` | ✓ Done |
+| VQAv2 annotations | ~130 MB | `~/tc-vitok-data/vqav2/` | ✓ Done |
+| COCO train2014 images | ~13 GB | `~/tc-vitok-data/vqav2/train2014/` | Downloading via `download_vqav2` session |
+| COCO val2014 images | ~6 GB | `~/tc-vitok-data/vqav2/val2014/` | Downloading via `download_vqav2` session |
+| GQA questions | ~660 MB | `~/tc-vitok-data/gqa/` | ✓ Done |
+| GQA images | ~20 GB | `~/tc-vitok-data/gqa/images/` | Downloading via `download_final` session |
+| **Total** | **~55 GB** | | |
 
-### If download crashes midway
-Just re-run — skips already-downloaded files:
+### How the two-session download works
+
+- **`download_final`** — downloading GQA images (~20 GB)
+- **`download_vqav2`** — waiting for `download_final` to finish, then automatically cleans up any corrupt zip files and downloads COCO train2014 + val2014 images
+
+The `download_vqav2` session runs this command (already started):
 ```bash
-tmux attach -t download3
-bash scripts/download_assets.sh
-# or start a new session:
-tmux new -s download4
-bash scripts/download_assets.sh
+while tmux has-session -t download_final 2>/dev/null; do sleep 60; done && rm -f ~/tc-vitok-data/vqav2/train2014.zip ~/tc-vitok-data/vqav2/val2014.zip && export DATA_ROOT=~/tc-vitok-data && bash ~/TC-ViTok/scripts/download_assets.sh --vqav2-only
+```
+
+### Check progress when you reconnect
+```bash
+tmux ls                                           # both sessions gone = everything done
+tmux capture-pane -t download_final -p | tail -10  # GQA progress
+tmux capture-pane -t download_vqav2 -p | tail -10  # COCO progress (after GQA finishes)
 ```
 
 ### Verify downloads after completion
 ```bash
-ls ~/tc-vitok-data/hf_cache/
-ls ~/tc-vitok-data/torch_cache/
-ls ~/tc-vitok-data/vqav2/
-ls ~/tc-vitok-data/gqa/
+ls ~/tc-vitok-data/hf_cache/models--llava-hf--llava-1.5-7b-hf/
+ls ~/tc-vitok-data/hf_cache/models--openai--clip-vit-large-patch14-336/
+ls ~/tc-vitok-data/hf_cache/models--openai--clip-vit-base-patch32/
+ls ~/tc-vitok-data/torch_cache/hub/
+ls ~/tc-vitok-data/vqav2/train2014/
+ls ~/tc-vitok-data/vqav2/val2014/
+ls ~/tc-vitok-data/gqa/images/
+```
+
+### If download crashes midway
+Just re-run — skips already-downloaded files and resumes partial downloads:
+```bash
+tmux new -s download_retry
+export DATA_ROOT=~/tc-vitok-data
+bash scripts/download_assets.sh
 ```
 
 ---
@@ -286,11 +293,13 @@ ls ~/tc-vitok-data/gqa/
 tmux ls
 
 # Attach to a session
-tmux attach -t download3
+tmux attach -t download_final
+tmux attach -t download_vqav2
 tmux attach -t training
 
 # Check session output without attaching
-tmux capture-pane -t download3 -p | tail -20
+tmux capture-pane -t download_final -p | tail -20
+tmux capture-pane -t download_vqav2 -p | tail -20
 tmux capture-pane -t training -p | tail -20
 
 # Kill a tmux session
@@ -328,9 +337,17 @@ PYTHONPATH=src bash scripts/launch_multigpu.sh \
 
 ### Download crashed midway
 ```bash
-tmux new -s download4
+tmux new -s download_retry
 export DATA_ROOT=~/tc-vitok-data
 bash scripts/download_assets.sh   # skips completed files automatically
+```
+
+### COCO images missing after download completes
+The COCO images failed once due to a corrupt partial zip. The fix is already in the script (wget -O with existence check). If they're still missing:
+```bash
+rm -f ~/tc-vitok-data/vqav2/train2014.zip ~/tc-vitok-data/vqav2/val2014.zip
+export DATA_ROOT=~/tc-vitok-data
+bash scripts/download_assets.sh --vqav2-only
 ```
 
 ### numpy/pandas conflict
