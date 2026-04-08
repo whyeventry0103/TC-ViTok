@@ -209,11 +209,14 @@ class TCViTokModel(nn.Module):
         from transformers import LlavaForConditionalGeneration, LlavaProcessor
         from peft import get_peft_model, LoraConfig, TaskType
 
+        # low_cpu_mem_usage=True loads weights lazily on CPU (meta tensors → real).
+        # Do NOT use device_map="cpu" — it installs accelerate dispatch hooks that
+        # intercept .to() calls, preventing model.to(cuda:N) from actually moving
+        # tensors to GPU. This caused GPU 1 to have only 727MiB while GPU 0 had 16GB.
         self.llava = LlavaForConditionalGeneration.from_pretrained(
             model_name,
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True,
-            device_map="cpu",  # BUG-16 fix: load on CPU first; model.to(device) moves to GPU later
         )
         self.processor = LlavaProcessor.from_pretrained(model_name)
 

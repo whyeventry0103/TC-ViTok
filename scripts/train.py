@@ -359,16 +359,38 @@ def main():
     # Move model to GPU and wrap in DDP
     if is_ddp:
         try:
-            print(f"[Rank {local_rank}] Moving model to {device}...")
+            mem_before = torch.cuda.memory_allocated(local_rank) / 1e6
+            print(f"[Rank {local_rank}] Moving model to {device}... (GPU mem before: {mem_before:.0f}MB)")
             sys.stdout.flush()
             model = model.to(device)
-            print(f"[Rank {local_rank}] Model moved to {device} successfully")
+            mem_after = torch.cuda.memory_allocated(local_rank) / 1e6
+            print(f"[Rank {local_rank}] Model moved to {device} (GPU mem after: {mem_after:.0f}MB)")
             sys.stdout.flush()
         except RuntimeError as e:
             print(f"[Rank {local_rank}] FATAL: model.to({device}) failed: {e}")
             print(f"[Rank {local_rank}] Hint: run 'nvidia-smi' — zombie GPU processes may hold VRAM")
             dist.destroy_process_group()
             raise
+
+        # Verify all params are on the correct device before DDP wrapping
+        n_params_on_device = 0
+        n_params_off_device = 0
+        for name, p in model.named_parameters():
+            if p.device == torch.device(device):
+                n_params_on_device += 1
+            else:
+                n_params_off_device += 1
+                if n_params_off_device <= 5:  # print first 5 misplaced params
+                    print(f"[Rank {local_rank}] WARNING: param {name} on {p.device}, expected {device}")
+        print(f"[Rank {local_rank}] Params on {device}: {n_params_on_device}, off-device: {n_params_off_device}")
+        sys.stdout.flush()
+
+        if n_params_off_device > 0:
+            print(f"[Rank {local_rank}] FATAL: {n_params_off_device} params not on {device}. "
+                  f"This causes DDP param mismatch. Check that device_map is NOT set in from_pretrained().")
+            dist.destroy_process_group()
+            raise RuntimeError(f"Model params not fully on {device}")
+
         model = nn.parallel.DistributedDataParallel(
             model,
             device_ids=[local_rank],
