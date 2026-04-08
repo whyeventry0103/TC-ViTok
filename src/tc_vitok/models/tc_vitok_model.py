@@ -476,11 +476,16 @@ class TCViTokModel(nn.Module):
             combined_mask = torch.ones(B, k, device=device, dtype=torch.long)
 
         # Step 3: Forward through LoRA-adapted language model
-        lm_outputs = lm(
-            inputs_embeds=combined_embeds,
-            attention_mask=combined_mask,
-            output_hidden_states=True,
-        )
+        # Use no_grad when LLM is fully frozen (Phase 0) to save activation memory
+        from contextlib import nullcontext
+        _lm_frozen = not any(p.requires_grad for p in lm.parameters())
+        _lm_ctx = torch.no_grad() if _lm_frozen else nullcontext()
+        with _lm_ctx:
+            lm_outputs = lm(
+                inputs_embeds=combined_embeds,
+                attention_mask=combined_mask,
+                output_hidden_states=True,
+            )
 
         # Step 4: Pool last hidden state over visual token positions
         # Using visual positions only (first k positions) focuses the pooling

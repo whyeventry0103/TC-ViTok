@@ -14,10 +14,14 @@ training:
   trainable_components:
     - tpn
 
-  # Paper Phase 0: λ=0, μ=0 (VQA loss only)
-  lambda_max: 0.0
-  lambda_entropy: 0.0
-  T_warmup: 1  # irrelevant since lambda_max=0
+  # In Option B (gather-based), VQA loss has NO gradient path to TPN
+  # (gather uses integer idx — non-differentiable). TPN only receives
+  # gradient from L1 sparsity (directly on scores s_N). lambda_max=0
+  # would give TPN zero gradient and Phase 0 would do nothing.
+  # Use small nonzero lambda so TPN actually trains via L1 sparsity.
+  lambda_max: 0.01
+  lambda_entropy: 0.01
+  T_warmup: 1000
 
   # Paper Phase 0: τ=1.0 fixed
   tau_max: 1.0

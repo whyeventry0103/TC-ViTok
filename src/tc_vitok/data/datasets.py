@@ -179,6 +179,15 @@ class VQAv2Dataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        # Retry on corrupt/missing images — DataLoader worker crashes cause SIGABRT
+        for attempt in range(5):
+            try:
+                return self._load_item((idx + attempt) % len(self.samples))
+            except Exception:
+                continue
+        raise RuntimeError(f"VQAv2Dataset: failed to load any sample near idx={idx}")
+
+    def _load_item(self, idx: int) -> Dict[str, Any]:
         sample = self.samples[idx]
         image_id = sample["image_id"]
 
@@ -276,6 +285,14 @@ class GQADataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        for attempt in range(5):
+            try:
+                return self._load_item((idx + attempt) % len(self.samples))
+            except Exception:
+                continue
+        raise RuntimeError(f"GQADataset: failed to load any sample near idx={idx}")
+
+    def _load_item(self, idx: int) -> Dict[str, Any]:
         sample = self.samples[idx]
         image_id = sample["image_id"]
 

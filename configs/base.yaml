@@ -45,8 +45,8 @@ training:
 
   # Optimization — paper Section 7.3
   # batch_size per GPU; effective = batch_size × grad_accum_steps × world_size
-  batch_size: 32
-  grad_accum_steps: 2  # effective batch size = 64 per GPU; 128 with 2×GPUs
+  batch_size: 16
+  grad_accum_steps: 4  # effective batch size = 64 per GPU; 128 with 2×GPUs
   max_steps: 50000
   warmup_steps: 1000
 
@@ -65,7 +65,7 @@ data:
   image_size_coarse: 98   # DINOv2-S input
   image_size_full: 336    # CLIP ViT-L/14 input
   # Set num_workers to ~4× number of GPUs for best throughput on CUDA
-  num_workers: 8
+  num_workers: 4
   pin_memory: true
 
   # Dataset selection: "vqav2" or "gqa"

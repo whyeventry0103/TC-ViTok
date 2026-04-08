@@ -31,6 +31,8 @@ echo "Launching on ${NUM_GPUS} GPU(s)"
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 export OMP_NUM_THREADS=1            # avoid CPU over-subscription in workers
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+export NCCL_ASYNC_ERROR_HANDLING=1  # surface NCCL errors as Python exceptions (not SIGABRT)
+export NCCL_TIMEOUT=1800            # 30-min timeout before NCCL gives up on a stalled rank
 
 # ── DATA_ROOT → HF_HOME wiring (done in train.py too, belt-and-suspenders) ──
 if [[ -n "${DATA_ROOT:-}" ]]; then
@@ -43,9 +45,15 @@ if [[ -n "${DATA_ROOT:-}" ]]; then
     echo "TORCH_HOME = ${TORCH_HOME}"
 fi
 
+# ── Log file (captures full traceback for post-mortem debugging) ─────────────
+LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs}"
+mkdir -p "${LOG_DIR}"
+LOG_FILE="${LOG_DIR}/train_$(date +%Y%m%d_%H%M%S).log"
+echo "Logging to: ${LOG_FILE}"
+
 # ── Launch ───────────────────────────────────────────────────────────────────
 torchrun \
     --standalone \
     --nproc_per_node="${NUM_GPUS}" \
     "${REPO_ROOT}/scripts/train.py" \
-    "$@"
+    "$@" 2>&1 | tee "${LOG_FILE}"
