@@ -169,59 +169,33 @@ download_gqa() {
 
     BASE="https://downloads.cs.stanford.edu/nlp/data/gqa"
 
-    # Questions (balanced split only)
-    # Try wget first; fall back to Python requests with browser User-Agent if blocked
-    for FILE in \
-        "train_balanced_questions.json" \
-        "val_balanced_questions.json" \
-        "testdev_balanced_questions.json"
-    do
-        if [ ! -f "${GQA_DIR}/${FILE}" ]; then
-            echo "Downloading ${FILE} ..."
-            wget --no-check-certificate -q --show-progress \
-                -O "${GQA_DIR}/${FILE}" "${BASE}/${FILE}" 2>/dev/null
-            # Verify file is non-empty and looks like JSON (not an error page)
-            if python3 -c "
-import sys, os
-f = '${GQA_DIR}/${FILE}'
-if not os.path.exists(f) or os.path.getsize(f) < 1024:
-    sys.exit(1)
-with open(f, 'rb') as fh:
-    first = fh.read(1).strip()
-if first not in (b'{', b'['):
-    sys.exit(1)
-" 2>/dev/null; then
-                echo "  ✓ ${FILE} done"
-            else
-                rm -f "${GQA_DIR}/${FILE}"
-                echo "  wget blocked — retrying with Python requests ..."
-                python3 - <<PYEOF
-import sys, os, urllib3
-urllib3.disable_warnings()
-try:
-    import requests
-except ImportError:
-    print("  ERROR: requests not installed — run: pip install requests")
-    sys.exit(1)
-url = "${BASE}/${FILE}"
-out = "${GQA_DIR}/${FILE}"
-headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
-r = requests.get(url, headers=headers, stream=True, verify=False, timeout=600)
-r.raise_for_status()
-with open(out, "wb") as f:
-    for chunk in r.iter_content(65536):
-        f.write(chunk)
-print("  ✓ ${FILE} done via requests")
-PYEOF
-                if [ $? -ne 0 ]; then
-                    echo "  ERROR: ${FILE} could not be downloaded (Stanford may be rate-limiting this IP)."
-                    echo "  Try again in a few hours: bash scripts/download_assets.sh --gqa-only"
-                fi
-            fi
-        else
-            echo "  ✓ ${FILE} already present"
-        fi
+    # Questions — download the zip bundle (individual JSON URLs were removed from Stanford)
+    QUESTIONS_ZIP="${GQA_DIR}/questions1.2.zip"
+    NEED_QUESTIONS=0
+    for FILE in train_balanced_questions.json val_balanced_questions.json testdev_balanced_questions.json; do
+        [ ! -f "${GQA_DIR}/${FILE}" ] && NEED_QUESTIONS=1
     done
+
+    if [ "${NEED_QUESTIONS}" -eq 1 ]; then
+        echo "Downloading GQA questions bundle (~1.4 GB) ..."
+        aria2c -x 16 -s 16 --check-certificate=false \
+            -d "${GQA_DIR}" -o "questions1.2.zip" \
+            "${BASE}/questions1.2.zip" 2>/dev/null || \
+        wget --no-check-certificate -c --tries=5 --timeout=120 --show-progress \
+            -O "${QUESTIONS_ZIP}" "${BASE}/questions1.2.zip"
+        if [ -f "${QUESTIONS_ZIP}" ] && unzip -t "${QUESTIONS_ZIP}" &>/dev/null; then
+            echo "Extracting GQA questions ..."
+            unzip -o "${QUESTIONS_ZIP}" -d "${GQA_DIR}"
+            rm -f "${QUESTIONS_ZIP}"
+            echo "  ✓ GQA questions done"
+        else
+            rm -f "${QUESTIONS_ZIP}"
+            echo "  ERROR: GQA questions could not be downloaded."
+            echo "  Try: bash scripts/download_assets.sh --gqa-only"
+        fi
+    else
+        echo "  ✓ GQA questions already present"
+    fi
 
     # Images (~20 GB)
     IMG_DIR="${GQA_DIR}/images"
