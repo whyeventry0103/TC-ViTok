@@ -205,6 +205,10 @@ def cached_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "labels": torch.stack([b["labels"] for b in batch]),
     }
 
+    # Stack v_full if provided (stub mode pre-computes it to skip full_encoder)
+    if "v_full" in batch[0]:
+        result["v_full"] = torch.stack([b["v_full"] for b in batch])
+
     # Pass through optional metadata
     for key in ["questions", "answers", "question_id", "image_id",
                 "gqa_annotation"]:
