@@ -94,7 +94,39 @@ All fixes are committed to `main` and pushed to GitHub.
 - `set_training_phase()` uses `self._mm_proj.parameters()` for phase 1 unfreezing
 - LoRA task type auto-selected: `CAUSAL_LM` if `LlamaForCausalLM`, `FEATURE_EXTRACTION` if `LlamaModel`
 
-### 4. All Bugs Fixed in download_assets.sh
+### 4. All Bugs Fixed in Training Loop (Session 2 continued: Apr 8 2026)
+
+These bugs caused the first real training run to crash with `Signal 6 (SIGABRT)`.
+
+**Crash details:**
+```
+rank: 1 (local_rank: 1)
+exitcode: -6 (pid: 1737968)
+traceback: Signal 6 (SIGABRT) received by PID 1737968
+```
+Root cause: SIGABRT in PyTorch DDP training means a DataLoader worker silently crashed (corrupt/missing JPEG → worker dies → main process gets SIGABRT). Additionally found a design bug where TPN received zero gradient in Phase 0.
+
+| Bug | Error / Problem | Files | Fix |
+|---|---|---|---|
+| BUG-11 | `SIGABRT` — DataLoader worker crash on corrupt/missing JPEG image | `datasets.py:VQAv2Dataset.__getitem__`, `GQADataset.__getitem__` | Added retry loop: attempts up to 5 adjacent samples before raising; prevents silent worker death |
+| BUG-12 | TPN receives zero gradient in Phase 0 | `configs/phase0.yaml` | `lambda_max: 0.0 → 0.01`, `lambda_entropy: 0.0 → 0.01`. In Option B (gather-based), VQA loss has NO gradient path to TPN because gather uses integer `idx` (non-differentiable). TPN can ONLY learn from L1 sparsity. `lambda=0` meant TPN got zero gradient and Phase 0 did nothing. |
+| BUG-13 | Unnecessary activation memory from frozen 7B LLM in Phase 0 | `tc_vitok_model.py:_run_llm` | Wrap LLM forward in `torch.no_grad()` when all LLM params are frozen. Detected via `any(p.requires_grad for p in lm.parameters())`. |
+| BUG-14 | SIGABRT instead of Python traceback on NCCL errors | `scripts/launch_multigpu.sh` | Added `NCCL_ASYNC_ERROR_HANDLING=1` (surfaces errors as Python exceptions) and `NCCL_TIMEOUT=1800` (30-min timeout) |
+| BUG-15 | No log file — crash leaves no full traceback to diagnose | `scripts/launch_multigpu.sh` | Added `tee logs/train_TIMESTAMP.log` so full output is always saved |
+
+**Config changes (safety):**
+- `batch_size: 32 → 16` per GPU (same effective batch 128 via grad_accum 2→4)
+- `num_workers: 8 → 4` (fewer worker processes = fewer crash points)
+
+**Key insight on TPN gradient flow (Option B):**
+In the gather-based approach, `gumbel_sigmoid_ste` returns `(mask_ste, idx)`. The TPN forward in `tc_vitok_model.py` uses only `idx` (integer tensor) for gathering tokens. `mask_ste` is computed but NOT applied multiplicatively to tokens. Therefore:
+- VQA loss → no gradient to TPN (integer gather is non-differentiable)
+- Entropy loss → no gradient to TPN (entropy uses `idx` which is integer)
+- **L1 sparsity** → ONLY gradient path to TPN (directly on raw scores `s_N`)
+
+Phase 0 must use `lambda_max > 0` for TPN to train at all.
+
+### 5. All Bugs Fixed in download_assets.sh
 
 | Bug | Was | Fixed to |
 |---|---|---|
@@ -208,19 +240,36 @@ bash scripts/download_assets.sh --gqa-only
 
 ## Part 3 — Training Status
 
-### Current Status (as of 2026-04-08 ~13:25)
-- **Training started**: Phase 0 running in `tmux` session `training`
-- **Dry run**: PASSED (2 steps, 2 GPUs, BF16, stub mode)
-- **Real-data test**: PASSED (2 steps, 2 GPUs, BF16, real VQAv2 + all encoders)
-- **Full training**: Started ~13:25 Apr 8. Phase 0 (10k steps) + Phase 1 (50k steps)
+### Current Status (as of 2026-04-08 ~14:00)
+- **Dry run**: PASSED (2 steps, 2 GPUs, BF16, stub mode) ✓
+- **Real-data test**: PASSED (2 steps, 2 GPUs, BF16, real VQAv2 + all encoders) ✓
+- **First full training attempt**: CRASHED at ~13:33 with SIGABRT (BUG-11 through BUG-15 fixed)
+- **Status**: All fixes applied and pushed. Ready to restart.
 
-### Expected completion
+### Before restarting — pull fixes first
+```bash
+git -c credential.helper= pull origin main
+```
+
+### Start training (after pulling fixes)
+```bash
+tmux new -s training
+export DATA_ROOT=~/tc-vitok-data
+bash scripts/launch_multigpu.sh \
+    --config configs/phase0.yaml \
+    --output runs/ \
+    --run-both-phases \
+    --no-wandb
+```
+Detach: `Ctrl+B` then `D`
+
+### Expected completion (after restart)
 | Phase | Steps | Est. duration | Est. done |
 |---|---|---|---|
-| Phase 0 (TPN only, 887k params) | 10,000 | ~8-9 hours | Apr 8 night / Apr 9 morning |
-| Phase 1 (TPN + LoRA + MLP) | 50,000 | ~55-70 hours | Apr 10-11 |
+| Phase 0 (TPN only, 887k params) | 10,000 | ~9-10 hours | ~Apr 9 morning |
+| Phase 1 (TPN + LoRA + MLP) | 50,000 | ~55-70 hours | ~Apr 10-11 |
 
-Throughput: ~3.1 seconds/step on 2× RTX 6000 Ada at BF16, batch_size=32/GPU.
+Throughput: ~3.1 s/step at BF16, batch_size=16/GPU (was 32; reduced for safety).
 
 ### Verified correct parameter counts
 - **Before `set_training_phase()`**: 324,012,493 trainable (LoRA + mm_proj + VQA head + TPN)
