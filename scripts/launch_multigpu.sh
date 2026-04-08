@@ -59,7 +59,7 @@ export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 export OMP_NUM_THREADS=1            # avoid CPU over-subscription in workers
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1  # surface NCCL errors as Python exceptions (not SIGABRT)
-export NCCL_TIMEOUT=1800                  # 30-min timeout before NCCL gives up on a stalled rank
+export NCCL_TIMEOUT=1800                  # 30-min timeout (matches init_process_group timeout)
 
 # ── DATA_ROOT → HF_HOME wiring (done in train.py too, belt-and-suspenders) ──
 if [[ -n "${DATA_ROOT:-}" ]]; then

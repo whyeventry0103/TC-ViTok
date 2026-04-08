@@ -172,7 +172,25 @@ bash scripts/launch_multigpu.sh \
     --no-wandb
 ```
 
-### 6. All Bugs Fixed in download_assets.sh
+### 6. NCCL Timeout During DDP Init (Session 3 continued: Apr 8 2026)
+
+**Error:**
+```
+[rank1]: Watchdog caught collective operation timeout: WorkNCCL(SeqNum=1, OpType=ALLREDUCE,
+NumelIn=1, NumelOut=1, Timeout(ms)=600000) ran for 600073 milliseconds before timing out.
+```
+
+**Root cause:** Both ranks load all 4 encoders (DINOv2-S, CLIP-B/32, CLIP-L/14, LLaVA-7B) simultaneously. Even though models are cached locally, the HuggingFace client makes HEAD requests to check for model updates. These HTTP requests timeout intermittently (`'The read operation timed out'`, `504 Gateway Time-out`), causing one rank's model creation to take 5+ minutes longer than the other. After model creation, the `dist.barrier()` call triggers an NCCL ALLREDUCE — but NCCL's default 600s timeout had already been consumed by the desynchronized model loading.
+
+Additionally, the `dist.barrier()` calls added in BUG-16c were themselves part of the problem — they introduced additional synchronization points that could timeout.
+
+| Bug | Error / Problem | Files | Fix |
+|---|---|---|---|
+| BUG-17a | HuggingFace HTTP requests timeout, desync ranks | `scripts/train.py` | Set `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` — all models are pre-downloaded, no need for network |
+| BUG-17b | `dist.barrier()` before model.to() caused NCCL timeout | `scripts/train.py` | Removed barriers entirely — DDP constructor handles its own synchronization |
+| BUG-17c | NCCL default timeout (600s) too short for large model init | `scripts/train.py` | Set `init_process_group(timeout=timedelta(minutes=30))` |
+
+### 7. All Bugs Fixed in download_assets.sh
 
 | Bug | Was | Fixed to |
 |---|---|---|
@@ -286,11 +304,12 @@ bash scripts/download_assets.sh --gqa-only
 
 ## Part 3 — Training Status
 
-### Current Status (as of 2026-04-08 ~16:00)
+### Current Status (as of 2026-04-08 ~17:00)
 - **Dry run**: PASSED (2 steps, 2 GPUs, BF16, stub mode) ✓
 - **Real-data test**: PASSED (2 steps, 2 GPUs, BF16, real VQAv2 + all encoders) ✓
 - **First full training attempt**: CRASHED at ~13:33 with SIGABRT (BUG-11 through BUG-15 fixed)
-- **Second full training attempt**: CRASHED with DDP param mismatch (BUG-16a through BUG-16g fixed)
+- **Second full training attempt**: CRASHED with DDP param mismatch (BUG-16 fixed)
+- **Third full training attempt**: CRASHED with NCCL ALLREDUCE timeout (BUG-17 — HuggingFace network timeouts desync ranks)
 - **Status**: All fixes applied. Ready to restart after pushing to server.
 
 ### Before restarting — pull fixes first

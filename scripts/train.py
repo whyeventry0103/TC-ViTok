@@ -114,7 +114,9 @@ def init_ddp() -> tuple[int, bool]:
     if local_rank < 0:
         return -1, False
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    # Use a generous timeout for init — model loading can delay ranks significantly
+    from datetime import timedelta
+    dist.init_process_group(backend="nccl", timeout=timedelta(minutes=30))
     return local_rank, True
 
 
@@ -332,6 +334,12 @@ def main():
     lora_config = config_dict.get("model", {}).get("lora", {})
     k = config_dict.get("model", {}).get("k", 144)
 
+    # Disable HuggingFace Hub online checks — all models are pre-downloaded.
+    # This prevents HTTP HEAD requests that timeout and stall one rank while the
+    # other continues, leading to NCCL timeout during DDP init.
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
     model = TCViTokModel(
         k=k,
         tpn_config=tpn_config,
@@ -345,28 +353,29 @@ def main():
     n_trainable = model.get_num_params()
     print(f"[Rank {local_rank}] Model created (stub={args.stub}, k={k})")
     print(f"[Rank {local_rank}] Total params: {n_params:,}, Trainable: {n_trainable:,}")
+    import sys
+    sys.stdout.flush()
 
-    # Wrap model in DDP after moving to the correct CUDA device
+    # Move model to GPU and wrap in DDP
     if is_ddp:
-        # Barrier: ensure all ranks finished model creation before moving to GPU
-        # Pass device_ids to suppress "unknown device" warning (model still on CPU here,
-        # but set_device was already called in init_ddp so local_rank is the right GPU)
-        dist.barrier(device_ids=[local_rank])
         try:
+            print(f"[Rank {local_rank}] Moving model to {device}...")
+            sys.stdout.flush()
             model = model.to(device)
+            print(f"[Rank {local_rank}] Model moved to {device} successfully")
+            sys.stdout.flush()
         except RuntimeError as e:
             print(f"[Rank {local_rank}] FATAL: model.to({device}) failed: {e}")
             print(f"[Rank {local_rank}] Hint: run 'nvidia-smi' — zombie GPU processes may hold VRAM")
             dist.destroy_process_group()
             raise
-        # Barrier: ensure all ranks finished .to(device) before DDP wrapping
-        dist.barrier(device_ids=[local_rank])
-        print(f"[Rank {local_rank}] Model moved to {device} successfully")
         model = nn.parallel.DistributedDataParallel(
             model,
             device_ids=[local_rank],
-            find_unused_parameters=True,  # BUG-16: frozen vision_tower params are never used in forward
+            find_unused_parameters=True,  # frozen vision_tower params never used in forward
         )
+        print(f"[Rank {local_rank}] DDP wrapping complete")
+        sys.stdout.flush()
 
     # ------------------------------------------------------------------ #
     # Phase 0 training                                                     #
