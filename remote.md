@@ -236,7 +236,28 @@ DDP's `_verify_param_shape_across_processes` then fails because rank 1's params 
 |---|---|
 | BUG-20 | Phase 0: skip DDP — rank 1 exits cleanly, rank 0 runs single-GPU. Phase 1 (35M trainable params) still uses DDP where the overhead is justified. |
 
-### 10. All Bugs Fixed in download_assets.sh
+### 10. Local import shadows module-level dist (Session 4: Apr 8 2026)
+
+**Error:** `UnboundLocalError: local variable 'dist' referenced before assignment` on rank 1 at `dist.barrier()`.
+
+**Root cause:** `train()` method had `import torch.distributed as dist` inside an `if self.is_main:` block. Python's compiler treats `dist` as local to the entire function. Rank 1 never enters the block, so `dist` is unbound when it hits the `dist.barrier()` calls added in BUG-19b.
+
+| Bug | Fix |
+|---|---|
+| BUG-19d | Removed the local `import torch.distributed as dist` inside `if self.is_main:`. The module-level import at line 16 suffices. |
+
+### 11. Phase 0 validation hangs at step 500 (Session 4: Apr 8-9 2026)
+
+**Symptom:** Training logs stop at exactly step 500. The process doesn't crash — GPU stays at 95% — but no new output for ~1 hour. Confirmed across multiple runs: log files show last entry at step 500, progress bar stuck at 499/10000.
+
+**Root cause:** `eval_interval: 500` in `configs/phase0.yaml` triggers `validate()` at step 500. The validation loop iterates the entire val set through the 7.6B model forward pass. With VQA loss disabled in Phase 0, this is pure waste that takes ~1 hour per call.
+
+| Bug | Fix |
+|---|---|
+| BUG-21a | `eval_interval: 500 → 999999` in `configs/phase0.yaml` — skip validation entirely in Phase 0 (VQA=0, nothing to validate) |
+| BUG-21b | Added `PYTHONUNBUFFERED=1` to `scripts/launch_multigpu.sh` — fixes stdout buffering when piped through `tee`, so logs appear in real-time |
+
+### 12. All Bugs Fixed in download_assets.sh
 
 | Bug | Was | Fixed to |
 |---|---|---|
@@ -350,7 +371,7 @@ bash scripts/download_assets.sh --gqa-only
 
 ## Part 3 — Training Status
 
-### Current Status (as of 2026-04-08 ~17:00)
+### Current Status (as of 2026-04-09)
 - **Dry run**: PASSED (2 steps, 2 GPUs, BF16, stub mode) ✓
 - **Real-data test**: PASSED (2 steps, 2 GPUs, BF16, real VQAv2 + all encoders) ✓
 - **First full training attempt**: CRASHED at ~13:33 with SIGABRT (BUG-11 through BUG-15 fixed)
@@ -359,7 +380,9 @@ bash scripts/download_assets.sh --gqa-only
 - **Fourth full training attempt**: CRASHED with NCCL ALLGATHER timeout (BUG-18 — `device_map="cpu"` prevented `.to(cuda)`)
 - **Fifth training attempt**: FAILED — DDP rank 1 dies silently (BUG-19 — forward bypass + validation desync)
 - **Sixth training attempt**: DDP working but 34% SLOWER than single GPU (BUG-20 — DDP overhead for 887K params)
-- **Status**: Phase 0 now runs single-GPU (BUG-20). Push to server and restart.
+- **Seventh training attempt**: Crashed — `UnboundLocalError: dist` on rank 1 (BUG-19d — local import shadowed module-level)
+- **Eighth training attempt**: Hangs at step 500 — validation loop runs full 7.6B model on val set (BUG-21)
+- **Status**: All fixes applied (BUG-19 through BUG-21). Phase 0 running single-GPU with validation disabled.
 
 ### Before restarting — pull fixes first
 ```bash
@@ -392,10 +415,17 @@ Phase 0 runs single-GPU (~1.85 it/s) because DDP overhead on 7.6B model with onl
 - These two numbers appearing sequentially in logs is **normal and correct**
 
 ### GPU utilization during training
-Both GPUs should be at ~100% with ~16-18GB VRAM each:
+
+**Phase 0 (single GPU):**
 ```
-GPU 0: 18167MiB / 49140MiB, 100% utilization
-GPU 1: 16367MiB / 49140MiB, 100% utilization
+GPU 0: ~19500MiB / 49140MiB, 95% utilization, ~1.85 it/s
+GPU 1: idle (15MiB, DDP skipped for Phase 0)
+```
+
+**Phase 1 (2 GPU DDP):**
+```
+GPU 0: ~31000MiB / 49140MiB, ~100% utilization
+GPU 1: ~31000MiB / 49140MiB, ~100% utilization
 ```
 
 ---
@@ -444,7 +474,7 @@ tmux capture-pane -t training -p | tail -20
 nvidia-smi   # both GPUs should be ~100% if training is running
 ```
 
-> **NOT RUNNING** — DDP broken (BUG-19: forward bypassed DDP wrapper). All fixes applied. Pull and restart.
+> **RUNNING** — Phase 0 single-GPU, validation disabled. All bugs fixed (BUG-19 through BUG-21).
 
 ### What training does
 - **Phase 0** (10,000 steps): Trains TPN only, LLaVA frozen, VQAv2 data
