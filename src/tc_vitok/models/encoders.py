@@ -46,7 +46,8 @@ class CoarseVisualEncoder(nn.Module):
         self.encoder = timm.create_model(
             model_name,
             pretrained=True,
-            num_classes=0,  # Remove classification head
+            num_classes=0,       # Remove classification head
+            img_size=98,         # 98/14 = 7 patches per side → 49 spatial tokens
         )
 
         # Freeze all parameters
