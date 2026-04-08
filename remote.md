@@ -226,7 +226,17 @@ DDP's `_verify_param_shape_across_processes` then fails because rank 1's params 
 - `forward_cached()` still exists for backward compatibility (e.g., evaluation scripts) but is NOT called during DDP training.
 - `raw_model = self.model.module` is still used for attribute access (e.g., `raw_model.k`, `raw_model.set_training_phase()`) — only the forward call must go through the DDP wrapper.
 
-### 9. All Bugs Fixed in download_assets.sh
+### 9. DDP Slower Than Single GPU for Phase 0 (Session 4 continued: Apr 8 2026)
+
+**Symptom:** After fixing BUG-19 (DDP forward bypass), both GPUs are active, but training speed dropped from 1.85 it/s (1 GPU) to 1.38 it/s (2 GPU DDP) — 34% slower.
+
+**Root cause:** Phase 0 trains only TPN (887K params) but DDP wraps the entire 7.6B model. The gradient all-reduce overhead + `find_unused_parameters=True` graph traversal + disabled P2P (`NCCL_P2P_DISABLE=1`) costs more than the data parallelism gains.
+
+| Bug | Fix |
+|---|---|
+| BUG-20 | Phase 0: skip DDP — rank 1 exits cleanly, rank 0 runs single-GPU. Phase 1 (35M trainable params) still uses DDP where the overhead is justified. |
+
+### 10. All Bugs Fixed in download_assets.sh
 
 | Bug | Was | Fixed to |
 |---|---|---|
@@ -348,7 +358,8 @@ bash scripts/download_assets.sh --gqa-only
 - **Third full training attempt**: CRASHED with NCCL ALLREDUCE timeout (BUG-17 — HuggingFace network timeouts desync ranks)
 - **Fourth full training attempt**: CRASHED with NCCL ALLGATHER timeout (BUG-18 — `device_map="cpu"` prevented `.to(cuda)`)
 - **Fifth training attempt**: FAILED — DDP rank 1 dies silently (BUG-19 — forward bypass + validation desync)
-- **Status**: All fixes applied (BUG-19a/b/c). Ready to restart after pushing to server.
+- **Sixth training attempt**: DDP working but 34% SLOWER than single GPU (BUG-20 — DDP overhead for 887K params)
+- **Status**: Phase 0 now runs single-GPU (BUG-20). Push to server and restart.
 
 ### Before restarting — pull fixes first
 ```bash
@@ -368,12 +379,12 @@ bash scripts/launch_multigpu.sh \
 Detach: `Ctrl+B` then `D`
 
 ### Expected completion (after restart)
-| Phase | Steps | Est. duration | Est. done |
-|---|---|---|---|
-| Phase 0 (TPN only, 887k params) | 10,000 | ~9-10 hours | ~Apr 9 morning |
-| Phase 1 (TPN + LoRA + MLP) | 50,000 | ~55-70 hours | ~Apr 10-11 |
+| Phase | Steps | GPUs | Est. duration | Est. done |
+|---|---|---|---|---|
+| Phase 0 (TPN only, 887k params) | 10,000 | 1 GPU (DDP skipped) | ~90 min | ~Apr 8 night |
+| Phase 1 (TPN + LoRA + MLP) | 50,000 | 2 GPU DDP | ~55-70 hours | ~Apr 10-11 |
 
-Throughput: ~3.1 s/step at BF16, batch_size=16/GPU (was 32; reduced for safety).
+Phase 0 runs single-GPU (~1.85 it/s) because DDP overhead on 7.6B model with only 887K trainable params makes 2-GPU 34% slower.
 
 ### Verified correct parameter counts
 - **Before `set_training_phase()`**: 324,012,493 trainable (LoRA + mm_proj + VQA head + TPN)

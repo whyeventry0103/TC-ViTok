@@ -356,6 +356,27 @@ def main():
     import sys
     sys.stdout.flush()
 
+    # Phase 0 optimization: skip DDP — only 887K TPN params train, so the
+    # gradient all-reduce overhead on the 7.6B model wrapper makes 2-GPU DDP
+    # ~34% SLOWER than single GPU. Run Phase 0 on rank 0 only; rank 1 exits.
+    # DDP is enabled for Phase 1 (35M trainable params, overhead is justified).
+    skip_ddp = is_ddp and phase == 0
+    if skip_ddp:
+        if local_rank != 0:
+            # Non-main ranks exit cleanly for Phase 0
+            print(f"[Rank {local_rank}] Phase 0 runs single-GPU (DDP overhead > benefit for 887K params). Exiting.")
+            sys.stdout.flush()
+            dist.destroy_process_group()
+            return
+        else:
+            print(f"[Rank 0] Phase 0: skipping DDP (887K trainable params — single GPU is faster)")
+            sys.stdout.flush()
+            # Treat as non-DDP for the rest of this run
+            is_ddp = False
+            is_main = True
+            local_rank = -1
+            device = "cuda:0"
+
     # Move model to GPU and wrap in DDP
     if is_ddp:
         try:
@@ -397,6 +418,11 @@ def main():
             find_unused_parameters=True,  # frozen vision_tower params never used in forward
         )
         print(f"[Rank {local_rank}] DDP wrapping complete")
+        sys.stdout.flush()
+    else:
+        # Single-GPU mode (non-DDP or Phase 0 DDP-skip)
+        model = model.to(device)
+        print(f"Model moved to {device}")
         sys.stdout.flush()
 
     # ------------------------------------------------------------------ #
