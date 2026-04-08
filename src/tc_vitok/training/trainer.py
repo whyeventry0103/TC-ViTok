@@ -307,30 +307,39 @@ class TCViTokTrainer:
             self.global_step, self.T_warmup, self.lambda_max
         )
 
+        # Use same autocast context as training to avoid dtype mismatches
+        # (mm_projector weights are float16, inputs are float32 without autocast)
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=self.amp_dtype)
+            if self.amp_dtype is not None and self.device != "cpu"
+            else nullcontext()
+        )
+
         for batch in self.val_loader:
             images_full = batch["images_full"].to(self.device)
             labels = batch["labels"].to(self.device)
 
             # Use cached coarse/text features when available (no images_coarse key)
-            if "v_coarse" in batch and "q_embed" in batch:
-                outputs = self.model.forward_cached(
-                    v_coarse=batch["v_coarse"].to(self.device),
-                    q_embed=batch["q_embed"].to(self.device),
-                    images_full=images_full,
-                    questions=batch.get("questions"),
-                    labels=labels,
-                    tau=tau,
-                    return_idx=True,
-                )
-            else:
-                outputs = self.model(
-                    images_coarse=batch["images_coarse"].to(self.device),
-                    images_full=images_full,
-                    questions=batch["questions"],
-                    labels=labels,
-                    tau=tau,
-                    return_idx=True,
-                )
+            with amp_ctx:
+                if "v_coarse" in batch and "q_embed" in batch:
+                    outputs = self.model.forward_cached(
+                        v_coarse=batch["v_coarse"].to(self.device),
+                        q_embed=batch["q_embed"].to(self.device),
+                        images_full=images_full,
+                        questions=batch.get("questions"),
+                        labels=labels,
+                        tau=tau,
+                        return_idx=True,
+                    )
+                else:
+                    outputs = self.model(
+                        images_coarse=batch["images_coarse"].to(self.device),
+                        images_full=images_full,
+                        questions=batch["questions"],
+                        labels=labels,
+                        tau=tau,
+                        return_idx=True,
+                    )
 
             # Compute losses
             _raw = self.model.module if self.is_ddp else self.model

@@ -443,53 +443,64 @@ class TCViTokModel(nn.Module):
             outputs: Dict with 'logits' [B, 1, answer_vocab] and optionally 'loss'
         """
         import torch.nn.functional as F_local
+        from contextlib import nullcontext
 
         B, k, _ = v_selected.shape
         device = v_selected.device
         lm = self._llm
 
-        # Step 1: Project visual tokens through mm_projector
-        # mm_projector is a 2-layer MLP: 1024 → 4096 (LLaVA-1.5-7B)
-        v_projected = self._mm_proj(v_selected)  # [B, k, H]
+        # Autocast: LLaVA weights are float16 — autocast handles dtype casting
+        # automatically. This is a no-op if caller already has autocast active
+        # (e.g., trainer.train_step), but protects against direct calls without it.
+        _on_cuda = device.type == "cuda" if isinstance(device, torch.device) else "cuda" in str(device)
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if _on_cuda
+            else nullcontext()
+        )
 
-        # Step 2: Tokenize questions and embed (if provided)
-        if questions is not None:
-            tokenizer = self.processor.tokenizer
-            text_inputs = tokenizer(
-                list(questions),
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=128,
-                add_special_tokens=True,
-            )
-            input_ids = text_inputs.input_ids.to(device)           # [B, T]
-            text_attn = text_inputs.attention_mask.to(device)      # [B, T]
+        with amp_ctx:
+            # Step 1: Project visual tokens through mm_projector
+            # mm_projector is a 2-layer MLP: 1024 → 4096 (LLaVA-1.5-7B)
+            v_projected = self._mm_proj(v_selected)  # [B, k, H]
 
-            # Embed text tokens using the LM embedding layer
-            embed_fn = lm.get_input_embeddings()
-            text_embeds = embed_fn(input_ids)                      # [B, T, H]
+            # Step 2: Tokenize questions and embed (if provided)
+            if questions is not None:
+                tokenizer = self.processor.tokenizer
+                text_inputs = tokenizer(
+                    list(questions),
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=128,
+                    add_special_tokens=True,
+                )
+                input_ids = text_inputs.input_ids.to(device)           # [B, T]
+                text_attn = text_inputs.attention_mask.to(device)      # [B, T]
 
-            # Concatenate: visual prefix first, then question text
-            combined_embeds = torch.cat([v_projected, text_embeds], dim=1)  # [B, k+T, H]
-            vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
-            combined_mask = torch.cat([vis_attn, text_attn], dim=1)        # [B, k+T]
-        else:
-            # No question text — visual tokens only (not recommended for production)
-            combined_embeds = v_projected                                    # [B, k, H]
-            combined_mask = torch.ones(B, k, device=device, dtype=torch.long)
+                # Embed text tokens using the LM embedding layer
+                embed_fn = lm.get_input_embeddings()
+                text_embeds = embed_fn(input_ids)                      # [B, T, H]
 
-        # Step 3: Forward through LoRA-adapted language model
-        # Use no_grad when LLM is fully frozen (Phase 0) to save activation memory
-        from contextlib import nullcontext
-        _lm_frozen = not any(p.requires_grad for p in lm.parameters())
-        _lm_ctx = torch.no_grad() if _lm_frozen else nullcontext()
-        with _lm_ctx:
-            lm_outputs = lm(
-                inputs_embeds=combined_embeds,
-                attention_mask=combined_mask,
-                output_hidden_states=True,
-            )
+                # Concatenate: visual prefix first, then question text
+                combined_embeds = torch.cat([v_projected, text_embeds], dim=1)  # [B, k+T, H]
+                vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
+                combined_mask = torch.cat([vis_attn, text_attn], dim=1)        # [B, k+T]
+            else:
+                # No question text — visual tokens only (not recommended for production)
+                combined_embeds = v_projected                                    # [B, k, H]
+                combined_mask = torch.ones(B, k, device=device, dtype=torch.long)
+
+            # Step 3: Forward through LoRA-adapted language model
+            # Use no_grad when LLM is fully frozen (Phase 0) to save activation memory
+            _lm_frozen = not any(p.requires_grad for p in lm.parameters())
+            _lm_ctx = torch.no_grad() if _lm_frozen else nullcontext()
+            with _lm_ctx:
+                lm_outputs = lm(
+                    inputs_embeds=combined_embeds,
+                    attention_mask=combined_mask,
+                    output_hidden_states=True,
+                )
 
         # Step 4: Pool last hidden state over visual token positions
         # Using visual positions only (first k positions) focuses the pooling
@@ -534,45 +545,56 @@ class TCViTokModel(nn.Module):
         Returns:
             answers: List of decoded answer strings, length B
         """
+        from contextlib import nullcontext
+
         B, k, _ = v_selected.shape
         device = v_selected.device
         tokenizer = self.processor.tokenizer
         lm = self._llm
 
-        # Project visual tokens
-        v_projected = self._mm_proj(v_selected)  # [B, k, H]
-
-        # Build LLaVA-1.5 conversation template (without <image> token —
-        # we inject visual tokens directly as embeddings)
-        prompts = [f"USER: {q}\nASSISTANT:" for q in questions]
-        text_inputs = tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=128,
-            add_special_tokens=True,
+        # Autocast: LLaVA weights are float16; autocast handles dtype casting.
+        _on_cuda = device.type == "cuda" if isinstance(device, torch.device) else "cuda" in str(device)
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if _on_cuda
+            else nullcontext()
         )
-        input_ids = text_inputs.input_ids.to(device)
-        text_attn = text_inputs.attention_mask.to(device)
 
-        # Embed prompt tokens
-        embed_fn = lm.get_input_embeddings()
-        text_embeds = embed_fn(input_ids)  # [B, T, H]
+        with amp_ctx:
+            # Project visual tokens
+            v_projected = self._mm_proj(v_selected)  # [B, k, H]
 
-        # Concatenate: visual prefix + conversation prompt
-        combined_embeds = torch.cat([v_projected, text_embeds], dim=1)  # [B, k+T, H]
-        vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
-        combined_mask = torch.cat([vis_attn, text_attn], dim=1)        # [B, k+T]
+            # Build LLaVA-1.5 conversation template (without <image> token —
+            # we inject visual tokens directly as embeddings)
+            prompts = [f"USER: {q}\nASSISTANT:" for q in questions]
+            text_inputs = tokenizer(
+                prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=128,
+                add_special_tokens=True,
+            )
+            input_ids = text_inputs.input_ids.to(device)
+            text_attn = text_inputs.attention_mask.to(device)
 
-        # Generate answer tokens
-        generated_ids = lm.generate(
-            inputs_embeds=combined_embeds,
-            attention_mask=combined_mask,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.eos_token_id,
-        )
+            # Embed prompt tokens
+            embed_fn = lm.get_input_embeddings()
+            text_embeds = embed_fn(input_ids)  # [B, T, H]
+
+            # Concatenate: visual prefix + conversation prompt
+            combined_embeds = torch.cat([v_projected, text_embeds], dim=1)  # [B, k+T, H]
+            vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
+            combined_mask = torch.cat([vis_attn, text_attn], dim=1)        # [B, k+T]
+
+            # Generate answer tokens
+            generated_ids = lm.generate(
+                inputs_embeds=combined_embeds,
+                attention_mask=combined_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+            )
 
         # Decode and strip conversation template artifacts
         raw_answers = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
