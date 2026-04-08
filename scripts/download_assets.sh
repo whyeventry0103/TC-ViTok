@@ -141,7 +141,7 @@ download_vqav2() {
                 rm -f "${ZIP}"
             fi
             echo "Downloading COCO ${SPLIT} images ..."
-            wget -c --tries=5 --timeout=120 --show-progress \
+            wget --no-check-certificate -c --tries=5 --timeout=120 --show-progress \
                 -O "${ZIP}" "${IMG_BASE}/${SPLIT}.zip"
             if unzip -t "${ZIP}" &>/dev/null; then
                 echo "Extracting ${SPLIT}.zip ..."
@@ -169,7 +169,8 @@ download_gqa() {
 
     BASE="https://downloads.cs.stanford.edu/nlp/data/gqa"
 
-    # Questions (balanced split only — ~660 MB)
+    # Questions (balanced split only)
+    # Try wget first; fall back to Python requests with browser User-Agent if blocked
     for FILE in \
         "train_balanced_questions.json" \
         "val_balanced_questions.json" \
@@ -177,7 +178,46 @@ download_gqa() {
     do
         if [ ! -f "${GQA_DIR}/${FILE}" ]; then
             echo "Downloading ${FILE} ..."
-            $WGET -P "${GQA_DIR}" "${BASE}/${FILE}"
+            wget --no-check-certificate -q --show-progress \
+                -O "${GQA_DIR}/${FILE}" "${BASE}/${FILE}" 2>/dev/null
+            # Verify file is non-empty and looks like JSON (not an error page)
+            if python3 -c "
+import sys, os
+f = '${GQA_DIR}/${FILE}'
+if not os.path.exists(f) or os.path.getsize(f) < 1024:
+    sys.exit(1)
+with open(f, 'rb') as fh:
+    first = fh.read(1).strip()
+if first not in (b'{', b'['):
+    sys.exit(1)
+" 2>/dev/null; then
+                echo "  ✓ ${FILE} done"
+            else
+                rm -f "${GQA_DIR}/${FILE}"
+                echo "  wget blocked — retrying with Python requests ..."
+                python3 - <<PYEOF
+import sys, os, urllib3
+urllib3.disable_warnings()
+try:
+    import requests
+except ImportError:
+    print("  ERROR: requests not installed — run: pip install requests")
+    sys.exit(1)
+url = "${BASE}/${FILE}"
+out = "${GQA_DIR}/${FILE}"
+headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"}
+r = requests.get(url, headers=headers, stream=True, verify=False, timeout=600)
+r.raise_for_status()
+with open(out, "wb") as f:
+    for chunk in r.iter_content(65536):
+        f.write(chunk)
+print("  ✓ ${FILE} done via requests")
+PYEOF
+                if [ $? -ne 0 ]; then
+                    echo "  ERROR: ${FILE} could not be downloaded (Stanford may be rate-limiting this IP)."
+                    echo "  Try again in a few hours: bash scripts/download_assets.sh --gqa-only"
+                fi
+            fi
         else
             echo "  ✓ ${FILE} already present"
         fi
