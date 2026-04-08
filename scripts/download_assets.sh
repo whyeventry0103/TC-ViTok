@@ -135,15 +135,21 @@ download_vqav2() {
         IMG_DIR="${VQAV2_DIR}/${SPLIT}"
         ZIP="${VQAV2_DIR}/${SPLIT}.zip"
         if [ ! -d "${IMG_DIR}" ]; then
+            # Remove corrupt/partial zip from any previous failed attempt
+            if [ -f "${ZIP}" ] && ! unzip -t "${ZIP}" &>/dev/null; then
+                echo "Removing corrupt ${SPLIT}.zip (leftover from previous attempt) ..."
+                rm -f "${ZIP}"
+            fi
             echo "Downloading COCO ${SPLIT} images ..."
-            wget -c --tries=5 --timeout=120 --show-progress -q \
+            wget -c --tries=5 --timeout=120 --show-progress \
                 -O "${ZIP}" "${IMG_BASE}/${SPLIT}.zip"
-            if [ -f "${ZIP}" ]; then
+            if unzip -t "${ZIP}" &>/dev/null; then
                 echo "Extracting ${SPLIT}.zip ..."
                 unzip -o "${ZIP}" -d "${VQAV2_DIR}"
                 rm -f "${ZIP}"
             else
-                echo "ERROR: ${ZIP} not found after download — re-run script to retry"
+                echo "ERROR: ${ZIP} is corrupt or incomplete — re-run script to retry"
+                rm -f "${ZIP}"
             fi
         else
             echo "  ✓ ${SPLIT} already present"
@@ -181,11 +187,22 @@ download_gqa() {
     IMG_DIR="${GQA_DIR}/images"
     ZIP="${GQA_DIR}/images.zip"
     if [ ! -d "${IMG_DIR}" ]; then
+        # Remove corrupt/partial zip from any previous failed attempt
+        if [ -f "${ZIP}" ] && ! unzip -t "${ZIP}" &>/dev/null; then
+            echo "Removing corrupt GQA images.zip (leftover from previous attempt) ..."
+            rm -f "${ZIP}"
+        fi
         echo "Downloading GQA images (~20 GB) ..."
-        $WGET -P "${GQA_DIR}" "${BASE}/images.zip"
-        echo "Extracting GQA images.zip ..."
-        unzip -o "${ZIP}" -d "${GQA_DIR}"
-        rm -f "${ZIP}"
+        wget -c --tries=5 --timeout=120 --show-progress \
+            -O "${ZIP}" "${BASE}/images.zip"
+        if unzip -t "${ZIP}" &>/dev/null; then
+            echo "Extracting GQA images.zip ..."
+            unzip -o "${ZIP}" -d "${GQA_DIR}"
+            rm -f "${ZIP}"
+        else
+            echo "ERROR: GQA images.zip is corrupt or incomplete — re-run script to retry"
+            rm -f "${ZIP}"
+        fi
     else
         echo "  ✓ GQA images already present"
     fi
