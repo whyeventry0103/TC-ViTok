@@ -178,6 +178,8 @@ class TCViTokTrainer:
             print(f"\n{'='*60}")
             print(f"Phase {self.phase} Training Complete")
             print(f"{'='*60}\n")
+            # Always save a final checkpoint at the end of training
+            self.save_checkpoint()
 
         return {"final_step": self.global_step, "final_epoch": self.epoch}
 

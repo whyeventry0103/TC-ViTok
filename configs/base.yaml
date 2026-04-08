@@ -103,7 +103,7 @@ logging:
   wandb_project: "tc-vitok"
   log_interval: 100
   eval_interval: 1000
-  save_interval: 5000
+  save_interval: 2000
   output_dir: "runs"
 
 # Evaluation
