@@ -195,6 +195,16 @@ class TCViTokModel(nn.Module):
           4. Add a VQA classification head: LLM hidden dim → answer vocabulary
              This maps pooled LM hidden states to the VQAv2 answer vocabulary
              (top-3129 answers by default, matching VQAv2Dataset)
+
+        Handles two transformers architecture versions:
+          OLD (transformers 4.36–4.44):
+            llava.language_model        = LlamaForCausalLM  (has generate())
+            llava.multi_modal_projector = LlavaMultiModalProjector
+            llava.vision_tower          = CLIPVisionModel
+          NEW (transformers 4.45+):
+            llava.model.language_model        = LlamaModel  (no generate())
+            llava.model.multi_modal_projector = LlavaMultiModalProjector
+            llava.model.vision_tower          = CLIPVisionModel
         """
         from transformers import LlavaForConditionalGeneration, LlavaProcessor
         from peft import get_peft_model, LoraConfig, TaskType
@@ -206,15 +216,34 @@ class TCViTokModel(nn.Module):
         )
         self.processor = LlavaProcessor.from_pretrained(model_name)
 
+        # Detect architecture and locate language model + mm_projector
+        if hasattr(self.llava, "language_model"):
+            # OLD architecture: language_model is LlamaForCausalLM (has generate())
+            lm_target = self.llava.language_model
+            self._mm_proj = self.llava.multi_modal_projector
+            vision_tower = getattr(self.llava, "vision_tower", None)
+            lora_task = TaskType.CAUSAL_LM
+        elif hasattr(self.llava, "model") and hasattr(self.llava.model, "language_model"):
+            # NEW architecture: language_model is LlamaModel (no generate(); use FEATURE_EXTRACTION)
+            lm_target = self.llava.model.language_model
+            self._mm_proj = self.llava.model.multi_modal_projector
+            vision_tower = getattr(self.llava.model, "vision_tower", None)
+            lora_task = TaskType.FEATURE_EXTRACTION
+        else:
+            top = {k: type(v).__name__ for k, v in vars(self.llava).items() if not k.startswith("_")}
+            raise AttributeError(
+                f"Cannot locate language_model in {type(self.llava).__name__}. "
+                f"Top-level attrs: {top}"
+            )
+
         # Freeze LLaVA's internal ViT — TC-ViTok uses its own CLIP ViT-L/14
-        # via self.full_encoder; this ViT is never called in our forward pass
-        if hasattr(self.llava, "vision_tower"):
-            for param in self.llava.vision_tower.parameters():
+        if vision_tower is not None:
+            for param in vision_tower.parameters():
                 param.requires_grad = False
 
         # Apply LoRA (r=32, alpha=64) to language model q/k/v/o_proj
         peft_config = LoraConfig(
-            task_type=TaskType.CAUSAL_LM,
+            task_type=lora_task,
             inference_mode=False,
             r=lora_config.get("rank", 32),
             lora_alpha=lora_config.get("alpha", 64),
@@ -224,22 +253,14 @@ class TCViTokModel(nn.Module):
                 ["q_proj", "k_proj", "v_proj", "o_proj"],
             ),
         )
-        # Attribute name varies by transformers version:
-        # transformers >=4.36: 'language_model'; some builds use 'model'
-        self._llava_lm_attr = next(
-            (k for k in ("language_model", "model") if hasattr(self.llava, k)),
-            None,
-        )
-        if self._llava_lm_attr is None:
-            raise AttributeError(
-                f"Cannot find LM in {type(self.llava).__name__}. "
-                f"Available attrs: {[a for a in vars(self.llava) if not a.startswith('_')]}"
-            )
-        setattr(
-            self.llava,
-            self._llava_lm_attr,
-            get_peft_model(getattr(self.llava, self._llava_lm_attr), peft_config),
-        )
+        self._llm = get_peft_model(lm_target, peft_config)
+
+        # Patch the LoRA-wrapped LM back into its original location so that
+        # self.llava.parameters() / state_dict() still covers LoRA weights.
+        if hasattr(self.llava, "language_model"):
+            self.llava.language_model = self._llm
+        else:
+            self.llava.model.language_model = self._llm
 
         # VQA classification head: LLM hidden size → answer vocabulary
         # answer_vocab_size must match the dataset's answer_to_idx vocab
@@ -421,11 +442,11 @@ class TCViTokModel(nn.Module):
 
         B, k, _ = v_selected.shape
         device = v_selected.device
-        lm = getattr(self.llava, self._llava_lm_attr)
+        lm = self._llm
 
         # Step 1: Project visual tokens through mm_projector
         # mm_projector is a 2-layer MLP: 1024 → 4096 (LLaVA-1.5-7B)
-        v_projected = self.llava.multi_modal_projector(v_selected)  # [B, k, H]
+        v_projected = self._mm_proj(v_selected)  # [B, k, H]
 
         # Step 2: Tokenize questions and embed (if provided)
         if questions is not None:
@@ -507,10 +528,10 @@ class TCViTokModel(nn.Module):
         B, k, _ = v_selected.shape
         device = v_selected.device
         tokenizer = self.processor.tokenizer
-        lm = getattr(self.llava, self._llava_lm_attr)
+        lm = self._llm
 
         # Project visual tokens
-        v_projected = self.llava.multi_modal_projector(v_selected)  # [B, k, H]
+        v_projected = self._mm_proj(v_selected)  # [B, k, H]
 
         # Build LLaVA-1.5 conversation template (without <image> token —
         # we inject visual tokens directly as embeddings)
@@ -681,15 +702,19 @@ class TCViTokModel(nn.Module):
             else:
                 # LoRA adapter params are set trainable by PEFT automatically
                 # Explicitly unfreeze mm_projector (vision projector, ~9M params)
-                for param in self.llava.multi_modal_projector.parameters():
+                for param in self._mm_proj.parameters():
                     param.requires_grad = True
                 # Unfreeze VQA classification head
                 for param in self.vqa_head.parameters():
                     param.requires_grad = True
-                # Keep vision_tower frozen (never used)
-                if hasattr(self.llava, "vision_tower"):
-                    for param in self.llava.vision_tower.parameters():
-                        param.requires_grad = False
+                # Keep vision_tower frozen (never used) — check both arch locations
+                for vt_path in (
+                    getattr(self.llava, "vision_tower", None),
+                    getattr(getattr(self.llava, "model", None), "vision_tower", None),
+                ):
+                    if vt_path is not None:
+                        for param in vt_path.parameters():
+                            param.requires_grad = False
 
         else:
             raise ValueError(f"Invalid phase: {phase}. Must be 0, 1, or 2.")
