@@ -36,4 +36,6 @@ data:
 
 logging:
   wandb_run_name: "phase0_tpn_warmup"
-  eval_interval: 500
+  # Validation disabled for Phase 0: VQA loss is zero (gather non-differentiable),
+  # so there's nothing to validate. Previous runs hung at step 500 due to val loop.
+  eval_interval: 999999

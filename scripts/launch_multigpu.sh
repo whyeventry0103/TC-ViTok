@@ -56,6 +56,7 @@ echo "Launching on ${NUM_GPUS} GPU(s)"
 
 # ── Python / env ─────────────────────────────────────────────────────────────
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
+export PYTHONUNBUFFERED=1            # flush stdout immediately (prevents tee buffering lag)
 export OMP_NUM_THREADS=1            # avoid CPU over-subscription in workers
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export NCCL_P2P_DISABLE=1                # GPUs on separate PCIe bridges — P2P broken, use host staging
