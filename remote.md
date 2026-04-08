@@ -72,7 +72,29 @@ These are set permanently in `~/.bashrc`. All scripts and training code read fro
 | `scripts/setup_gdrive.sh` | rclone-based Google Drive setup (not used, kept for reference) |
 | `scripts/download_assets.sh` | Downloads all models and datasets to `$DATA_ROOT` |
 
-### 3. All Bugs Fixed in download_assets.sh
+### 3. All Bugs Fixed in Training Pipeline (Session 2: Apr 8 2026)
+
+These bugs were discovered and fixed during real-data test runs on the server.
+All fixes are committed to `main` and pushed to GitHub.
+
+| Bug | Error | File:Line | Fix |
+|---|---|---|---|
+| BUG-7 | `AttributeError: 'LlavaForConditionalGeneration' has no attribute 'language_model'` | `tc_vitok_model.py:_init_llava` | Added fallback to `model` attr — old transformers uses `language_model`, new uses `model` |
+| BUG-8 | `AttributeError: 'LlavaModel' has no attribute 'prepare_inputs_for_generation'` | `tc_vitok_model.py:_init_llava` | Detected transformers arch version; OLD → `TaskType.CAUSAL_LM` on `LlamaForCausalLM`; NEW → `TaskType.FEATURE_EXTRACTION` on `LlamaModel` |
+| BUG-9 | `AssertionError: Input height (98) doesn't match model (518)` | `encoders.py:CoarseVisualEncoder` | Added `img_size=98` to `timm.create_model()` — DINOv2-S default is 518×518, we need 98×98 |
+| BUG-10 | `multi_modal_projector` inaccessible after arch change | `tc_vitok_model.py:_run_llm` | Store `self._llm` and `self._mm_proj` as direct refs at init; use them everywhere instead of `self.llava.language_model` / `self.llava.multi_modal_projector` |
+
+**Root cause of BUG-7/8/10:** The server has a newer version of `transformers` (4.45+) where `LlavaForConditionalGeneration` restructured its internals:
+- OLD arch (4.36–4.44): `llava.language_model` = `LlamaForCausalLM`, `llava.multi_modal_projector` at top level
+- NEW arch (4.45+): `llava.model.language_model` = `LlamaModel` (no head), `llava.model.multi_modal_projector` nested inside
+
+**Key design after fix:**
+- `self._llm` = LoRA-wrapped language model (set at `_init_llava`, correct for both arch versions)
+- `self._mm_proj` = mm_projector (set at `_init_llava`, correct for both arch versions)
+- `set_training_phase()` uses `self._mm_proj.parameters()` for phase 1 unfreezing
+- LoRA task type auto-selected: `CAUSAL_LM` if `LlamaForCausalLM`, `FEATURE_EXTRACTION` if `LlamaModel`
+
+### 4. All Bugs Fixed in download_assets.sh
 
 | Bug | Was | Fixed to |
 |---|---|---|
@@ -118,6 +140,8 @@ source ~/.bashrc
 ---
 
 ## Part 2 — Downloads (Final Status as of 2026-04-08)
+
+> All downloads complete. GQA questions were the last item (questions1.2.zip, ~1.4GB via aria2c).
 
 | Item | Size | Destination | Status |
 |---|---|---|---|
@@ -182,9 +206,39 @@ bash scripts/download_assets.sh --gqa-only
 
 ---
 
-## Part 3 — Training (Run After Downloads Complete)
+## Part 3 — Training Status
 
-### Step 1 — Verify env vars
+### Current Status (as of 2026-04-08 ~13:25)
+- **Training started**: Phase 0 running in `tmux` session `training`
+- **Dry run**: PASSED (2 steps, 2 GPUs, BF16, stub mode)
+- **Real-data test**: PASSED (2 steps, 2 GPUs, BF16, real VQAv2 + all encoders)
+- **Full training**: Started ~13:25 Apr 8. Phase 0 (10k steps) + Phase 1 (50k steps)
+
+### Expected completion
+| Phase | Steps | Est. duration | Est. done |
+|---|---|---|---|
+| Phase 0 (TPN only, 887k params) | 10,000 | ~8-9 hours | Apr 8 night / Apr 9 morning |
+| Phase 1 (TPN + LoRA + MLP) | 50,000 | ~55-70 hours | Apr 10-11 |
+
+Throughput: ~3.1 seconds/step on 2× RTX 6000 Ada at BF16, batch_size=32/GPU.
+
+### Verified correct parameter counts
+- **Before `set_training_phase()`**: 324,012,493 trainable (LoRA + mm_proj + VQA head + TPN)
+- **After `set_training_phase(0)`**: 887,955 trainable (TPN only — Phase 0 correct)
+- These two numbers appearing sequentially in logs is **normal and correct**
+
+### GPU utilization during training
+Both GPUs should be at ~100% with ~16-18GB VRAM each:
+```
+GPU 0: 18167MiB / 49140MiB, 100% utilization
+GPU 1: 16367MiB / 49140MiB, 100% utilization
+```
+
+---
+
+## Part 4 — Training Commands (Run After Downloads Complete)
+
+### Step 1 — Verify env vars (do this on every reconnect)
 ```bash
 echo $DATA_ROOT   # /home/sk10741/tc-vitok-data
 echo $HF_HOME
@@ -223,7 +277,10 @@ Detach: `Ctrl+B` then `D`
 Check progress:
 ```bash
 tmux capture-pane -t training -p | tail -20
+nvidia-smi   # both GPUs should be ~100% if training is running
 ```
+
+> **ALREADY RUNNING as of Apr 8 2026 13:25** — training started, no need to re-run unless it crashes.
 
 ### What training does
 - **Phase 0** (10,000 steps): Trains TPN only, LLaVA frozen, VQAv2 data
@@ -254,12 +311,44 @@ bash scripts/launch_multigpu.sh \
 
 ---
 
-## Part 4 — After Every Reconnect
+## Part 5 — After Every Reconnect
 
 ```bash
+# 1. Check env vars
 echo $DATA_ROOT   # should print /home/sk10741/tc-vitok-data
+# If empty:
+source ~/.bashrc
+
+# 2. Check if training is still running
+tmux ls           # should show: training: 1 windows
+tmux capture-pane -t training -p | tail -20   # see latest output
+
+# 3. Check GPU utilization
+nvidia-smi        # both GPUs should be ~100% if training is active
+
+# 4. Check disk space
+df -h ~           # make sure checkpoints aren't filling the disk
 ```
-If empty: `source ~/.bashrc`
+
+### If training finished normally
+Checkpoints saved to `runs/phase0/` and `runs/phase1/`.
+Best checkpoints: `runs/phase0/best.ckpt` and `runs/phase1/best.ckpt`.
+
+### If training crashed (GPUs idle, tmux session shows error)
+Check the error, fix it, then resume from latest checkpoint:
+```bash
+# Find latest checkpoint
+ls -t runs/phase0/checkpoint_step_*.pt | head -1
+
+# Resume
+tmux new -s training
+export DATA_ROOT=~/tc-vitok-data
+bash scripts/launch_multigpu.sh \
+    --config configs/phase0.yaml \
+    --output runs/ \
+    --resume runs/phase0/checkpoint_step_XXXX.pt \
+    --no-wandb
+```
 
 ---
 
