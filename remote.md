@@ -142,7 +142,7 @@ Additionally, `LlavaForConditionalGeneration.from_pretrained()` without `device_
 | Bug | Error / Problem | Files | Fix |
 |---|---|---|---|
 | BUG-16a | Zombie GPU processes from prior crash block VRAM | `scripts/launch_multigpu.sh` | Added automatic GPU process cleanup before launch: queries `nvidia-smi` for PIDs, kills python/torchrun processes |
-| BUG-16b | LLaVA auto-places on GPU during `from_pretrained` | `tc_vitok_model.py:_init_llava` | Added `device_map="cpu"` to `from_pretrained()` — forces CPU-only loading, `.to(device)` handles GPU placement |
+| BUG-16b | LLaVA auto-places on GPU during `from_pretrained` | `tc_vitok_model.py:_init_llava` | ~~Initially added `device_map="cpu"`~~ REVERTED: `device_map` installs accelerate dispatch hooks that intercept `.to()`, preventing GPU transfer. Use only `low_cpu_mem_usage=True` (no device_map). |
 | BUG-16c | No synchronization between model creation and DDP wrapping | `scripts/train.py` | Added `dist.barrier()` before `model.to(device)` and before DDP wrapping |
 | BUG-16d | OOM on `.to(device)` gives no useful error | `scripts/train.py` | Wrapped `model.to(device)` in try/except with rank-specific error message |
 | BUG-16e | Param count only logged on rank 0 | `scripts/train.py` | Now logs on ALL ranks for DDP debugging |
@@ -190,7 +190,26 @@ Additionally, the `dist.barrier()` calls added in BUG-16c were themselves part o
 | BUG-17b | `dist.barrier()` before model.to() caused NCCL timeout | `scripts/train.py` | Removed barriers entirely — DDP constructor handles its own synchronization |
 | BUG-17c | NCCL default timeout (600s) too short for large model init | `scripts/train.py` | Set `init_process_group(timeout=timedelta(minutes=30))` |
 
-### 7. All Bugs Fixed in download_assets.sh
+### 7. device_map="cpu" Prevents GPU Transfer (Session 3 continued: Apr 8 2026)
+
+**Error:**
+```
+RuntimeError: DDP expects same model across all ranks, but Rank 1 has 474 params,
+while rank 0 has inconsistent 0 params.
+```
+Same DDP error as before, but with a Python traceback this time (thanks to NCCL async error handling).
+
+**Root cause:** `device_map="cpu"` in `LlavaForConditionalGeneration.from_pretrained()` installs HuggingFace `accelerate` dispatch hooks that **intercept `.to()` calls**. When `model.to("cuda:1")` is called, the dispatch hooks prevent the actual tensor transfer — the model thinks it moved but tensors stay on CPU. This is why `nvidia-smi` consistently showed:
+- GPU 0: 16,367 MiB (full model moved correctly — possibly accelerate handles rank 0 differently)
+- GPU 1: 727 MiB (only small non-LLaVA components moved, LLaVA still on CPU)
+
+DDP's `_verify_param_shape_across_processes` then fails because rank 1's params are on CPU (not visible to NCCL), so it appears to have 0 params from rank 0's perspective.
+
+| Bug | Fix |
+|---|---|
+| BUG-18 | Removed `device_map="cpu"` from `from_pretrained()`. Use only `low_cpu_mem_usage=True` (loads weights lazily on CPU without dispatch hooks). Added GPU memory logging and param device verification before DDP wrapping. |
+
+### 8. All Bugs Fixed in download_assets.sh
 
 | Bug | Was | Fixed to |
 |---|---|---|
@@ -310,6 +329,7 @@ bash scripts/download_assets.sh --gqa-only
 - **First full training attempt**: CRASHED at ~13:33 with SIGABRT (BUG-11 through BUG-15 fixed)
 - **Second full training attempt**: CRASHED with DDP param mismatch (BUG-16 fixed)
 - **Third full training attempt**: CRASHED with NCCL ALLREDUCE timeout (BUG-17 — HuggingFace network timeouts desync ranks)
+- **Fourth full training attempt**: CRASHED with NCCL ALLGATHER timeout (BUG-18 — `device_map="cpu"` prevented `.to(cuda)`)
 - **Status**: All fixes applied. Ready to restart after pushing to server.
 
 ### Before restarting — pull fixes first
