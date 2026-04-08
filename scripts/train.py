@@ -349,7 +349,9 @@ def main():
     # Wrap model in DDP after moving to the correct CUDA device
     if is_ddp:
         # Barrier: ensure all ranks finished model creation before moving to GPU
-        dist.barrier()
+        # Pass device_ids to suppress "unknown device" warning (model still on CPU here,
+        # but set_device was already called in init_ddp so local_rank is the right GPU)
+        dist.barrier(device_ids=[local_rank])
         try:
             model = model.to(device)
         except RuntimeError as e:
@@ -358,7 +360,7 @@ def main():
             dist.destroy_process_group()
             raise
         # Barrier: ensure all ranks finished .to(device) before DDP wrapping
-        dist.barrier()
+        dist.barrier(device_ids=[local_rank])
         print(f"[Rank {local_rank}] Model moved to {device} successfully")
         model = nn.parallel.DistributedDataParallel(
             model,
