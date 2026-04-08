@@ -213,10 +213,13 @@ class TCViTokTrainer:
             else nullcontext()
         )
 
+        # Unwrap DDP to access custom methods (DDP only exposes forward())
+        raw_model = self.model.module if self.is_ddp else self.model
+
         # Support both cached and non-cached batches
         with amp_ctx:
             if "v_coarse" in batch and "q_embed" in batch:
-                outputs = self.model.forward_cached(
+                outputs = raw_model.forward_cached(
                     v_coarse=batch["v_coarse"].to(self.device),
                     q_embed=batch["q_embed"].to(self.device),
                     images_full=images_full,
@@ -228,7 +231,7 @@ class TCViTokTrainer:
             else:
                 images_coarse = batch["images_coarse"].to(self.device)
                 questions = batch["questions"]
-                outputs = self.model(
+                outputs = raw_model(
                     images_coarse=images_coarse,
                     images_full=images_full,
                     questions=questions,
