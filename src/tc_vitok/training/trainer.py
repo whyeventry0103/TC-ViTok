@@ -190,7 +190,8 @@ class TCViTokTrainer:
             print(f"Phase {self.phase} Training Complete")
             print(f"{'='*60}\n")
             # Always save a final checkpoint at the end of training
-            self.save_checkpoint()
+            # Save as best.ckpt too — Phase 1 loads this for resumption
+            self.save_checkpoint(is_best=True)
         if self.is_ddp:
             dist.barrier()  # sync all ranks before returning
 
@@ -332,7 +333,12 @@ class TCViTokTrainer:
             else nullcontext()
         )
 
+        # Limit validation to 100 batches to prevent multi-hour hangs.
+        # Full VQAv2 val set is ~13K batches — at ~1.8 it/s that's ~2 hours.
+        max_val_batches = self.config.get("logging", {}).get("max_val_batches", 100)
         for batch in self.val_loader:
+            if num_batches >= max_val_batches:
+                break
             images_full = batch["images_full"].to(self.device)
             labels = batch["labels"].to(self.device)
 
@@ -448,7 +454,13 @@ class TCViTokTrainer:
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
 
         raw_model = self.model.module if self.is_ddp else self.model
-        raw_model.load_state_dict(checkpoint["model_state_dict"])
+        # strict=False: Phase transitions change trainable params — Phase 0
+        # checkpoint won't have LoRA/projector weights needed by Phase 1.
+        result = raw_model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        if result.missing_keys:
+            print(f"Checkpoint missing keys (expected for phase change): {len(result.missing_keys)} keys")
+        if result.unexpected_keys:
+            print(f"Checkpoint unexpected keys: {result.unexpected_keys}")
 
         # Optimizer state may not match across phases (different param groups)
         try:

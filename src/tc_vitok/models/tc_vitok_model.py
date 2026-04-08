@@ -442,14 +442,15 @@ class TCViTokModel(nn.Module):
         device = v_selected.device
         lm = self._llm
 
-        # Autocast: LLaVA weights are float16 — autocast handles dtype casting
-        # automatically. This is a no-op if caller already has autocast active
-        # (e.g., trainer.train_step), but protects against direct calls without it.
+        # Autocast: rely on caller's context (trainer uses BF16 autocast).
+        # Using a nested FP16 autocast here would override the caller's BF16,
+        # causing mixed BF16/FP16 dtype issues. For direct calls without a
+        # caller autocast, use BF16 as fallback (matches training dtype).
         _on_cuda = device.type == "cuda" if isinstance(device, torch.device) else "cuda" in str(device)
+        _already_in_autocast = torch.is_autocast_enabled() if _on_cuda else False
         amp_ctx = (
-            torch.autocast(device_type="cuda", dtype=torch.float16)
-            if _on_cuda
-            else nullcontext()
+            nullcontext() if _already_in_autocast
+            else (torch.autocast(device_type="cuda", dtype=torch.bfloat16) if _on_cuda else nullcontext())
         )
 
         with amp_ctx:

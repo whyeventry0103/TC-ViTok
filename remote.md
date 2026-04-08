@@ -257,7 +257,20 @@ DDP's `_verify_param_shape_across_processes` then fails because rank 1's params 
 | BUG-21a | `eval_interval: 500 → 999999` in `configs/phase0.yaml` — skip validation entirely in Phase 0 (VQA=0, nothing to validate) |
 | BUG-21b | Added `PYTHONUNBUFFERED=1` to `scripts/launch_multigpu.sh` — fixes stdout buffering when piped through `tee`, so logs appear in real-time |
 
-### 12. All Bugs Fixed in download_assets.sh
+### 12. Phase 1 Pre-Launch Audit Fixes (Session 4: Apr 9 2026)
+
+Pre-launch audit of Phase 1 code path found 4 blocking issues:
+
+| Bug | Error / Problem | Files | Fix |
+|---|---|---|---|
+| BUG-22a | `load_state_dict()` strict mode — Phase 0 checkpoint missing LoRA/projector keys → RuntimeError | `trainer.py:451` | Added `strict=False` + log missing/unexpected keys |
+| BUG-22b | `best.ckpt` never saved — Phase 0 validation disabled, so `is_best=True` never triggered | `trainer.py:193` | Final checkpoint now saves as `best.ckpt` too |
+| BUG-22c | Validation hangs every 1000 steps — full val set (13K batches, ~2h) | `phase1.yaml`, `trainer.py:336` | `eval_interval: 5000`, `max_val_batches: 100` (~55s per val) |
+| BUG-22d | BF16/FP16 autocast mismatch — `_llava_forward()` used FP16, trainer used BF16 | `tc_vitok_model.py:450` | Detect caller's autocast context, skip nested autocast if already active |
+
+**Known limitation:** GQA data not loaded in Phase 1 — `datasets: ["vqav2", "gqa"]` config key is ignored because `build_loaders()` reads singular `dataset` key. Phase 1 trains on VQAv2 only. ConcatDataset + unified vocab needed for joint training (future work).
+
+### 13. All Bugs Fixed in download_assets.sh
 
 | Bug | Was | Fixed to |
 |---|---|---|

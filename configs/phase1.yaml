@@ -36,7 +36,8 @@ data:
 
 logging:
   wandb_run_name: "phase1_joint_finetune"
-  eval_interval: 1000
+  eval_interval: 5000
+  max_val_batches: 100  # limit val to ~100 batches (~55s) instead of full 13K batches (~2h)
 
 checkpoint:
   load_from: "runs/phase0/best.ckpt"
