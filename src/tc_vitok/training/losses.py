@@ -37,6 +37,11 @@ def vqa_loss(
     Returns:
         loss: Scalar cross-entropy loss
     """
+    # Align sequence lengths (handles stub mode where logits seq_len != labels seq_len)
+    if logits.dim() == 3 and labels.dim() == 2:
+        min_len = min(logits.shape[1], labels.shape[1])
+        logits = logits[:, :min_len].contiguous()
+        labels = labels[:, :min_len].contiguous()
     logits_flat = logits.view(-1, logits.size(-1))
     labels_flat = labels.view(-1)
     return F.cross_entropy(logits_flat, labels_flat, ignore_index=ignore_index)
