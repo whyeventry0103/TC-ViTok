@@ -133,7 +133,6 @@ class TCViTokTrainer:
             if self.amp_dtype is not None:
                 print(f"Mixed precision: {self.amp_dtype}")
             if self.is_ddp:
-                import torch.distributed as dist
                 print(f"DDP world size: {dist.get_world_size()}")
 
             # Log optimizer info
