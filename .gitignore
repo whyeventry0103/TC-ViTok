@@ -52,6 +52,7 @@ venv.bak/
 
 # Data artifacts
 data/
+!src/tc_vitok/data/
 *.h5
 *.hdf5
 *.csv

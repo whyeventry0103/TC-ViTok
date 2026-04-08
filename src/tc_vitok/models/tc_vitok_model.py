@@ -311,6 +311,7 @@ class TCViTokModel(nn.Module):
         v_coarse: torch.Tensor,
         q_embed: torch.Tensor,
         images_full: torch.Tensor,
+        v_full: Optional[torch.Tensor] = None,
         questions: Optional[list] = None,
         labels: Optional[torch.Tensor] = None,
         tau: float = 1.0,
@@ -344,12 +345,13 @@ class TCViTokModel(nn.Module):
         )
 
         # Step 2: Extract full visual features (frozen CLIP ViT-L/14)
-        if self.full_encoder is None:
-            raise RuntimeError(
-                "forward_cached() requires full_encoder but load_encoders=False. "
-                "Either initialize with load_encoders=True or pre-compute v_full externally."
-            )
-        v_full = self.full_encoder(images_full)  # [B, 576, 1024]
+        if v_full is None:
+            if self.full_encoder is None:
+                raise RuntimeError(
+                    "forward_cached() requires full_encoder but load_encoders=False. "
+                    "Either initialize with load_encoders=True or pre-compute v_full externally."
+                )
+            v_full = self.full_encoder(images_full)  # [B, 576, 1024]
 
         # Step 3: GATHER selected tokens
         v_selected = gather_tokens(v_full, idx)  # [B, k, 1024]

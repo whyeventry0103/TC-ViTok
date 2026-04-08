@@ -219,11 +219,13 @@ class TCViTokTrainer:
         # Support both cached and non-cached batches
         with amp_ctx:
             if "v_coarse" in batch and "q_embed" in batch:
+                v_full_cached = batch["v_full"].to(self.device) if "v_full" in batch else None
                 outputs = raw_model.forward_cached(
                     v_coarse=batch["v_coarse"].to(self.device),
                     q_embed=batch["q_embed"].to(self.device),
                     images_full=images_full,
-                    questions=batch.get("questions"),  # needed for LLaVA text conditioning
+                    v_full=v_full_cached,
+                    questions=batch.get("questions"),
                     labels=labels,
                     tau=tau,
                     return_idx=True,
