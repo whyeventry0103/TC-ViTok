@@ -11,19 +11,20 @@ GPU 0: NVIDIA RTX 6000 Ada Generation — 49,140 MiB VRAM
 GPU 1: NVIDIA RTX 6000 Ada Generation — 49,140 MiB VRAM
 CUDA: 12.4
 Driver: 550.127.05
-OS: Linux (Ubuntu)
+OS: Linux (Ubuntu 22.04)
 Python: 3.10
 User: sk10741
 Host: ADUAED16811WKLX
 Repo path: ~/TC-ViTok
-Disk: 3.5TB total, ~199GB free (single partition at /)
+Disk: 3.5TB total, ~190GB free (single partition at /)
+aria2c: installed at /usr/bin/aria2c (v1.36.0)
 ```
 
 ---
 
 ## Storage Decision
 
-Google Drive was initially considered but has a 15GB free limit — not enough for 55GB of data. The server has 199GB free on local disk which is more than sufficient, so **everything is stored locally on the server** at `~/tc-vitok-data`. Google Drive is not used.
+Google Drive was initially considered but has a 15GB free limit — not enough for 55GB of data. The server has ~190GB free on local disk which is more than sufficient, so **everything is stored locally on the server** at `~/tc-vitok-data`. Google Drive is not used.
 
 ---
 
@@ -35,7 +36,7 @@ export HF_HOME=${DATA_ROOT}/hf_cache
 export TORCH_HOME=${DATA_ROOT}/torch_cache
 ```
 
-These are set permanently in `~/.bashrc`. All scripts and training code read from `DATA_ROOT` — changing this one variable is all you need to redirect everything.
+These are set permanently in `~/.bashrc`. All scripts and training code read from `DATA_ROOT`.
 
 ---
 
@@ -63,23 +64,7 @@ These are set permanently in `~/.bashrc`. All scripts and training code read fro
 - `mixed_precision: "bf16"`
 - All data paths use OmegaConf env-var interpolation: `${oc.env:DATA_ROOT,data}`
 
-### 2. Path Integration
-
-**`configs/base.yaml`**
-```yaml
-data_root: ${oc.env:DATA_ROOT,data}
-train_image_dir: "${data.data_root}/vqav2/train2014"
-# all paths follow this pattern
-```
-
-**`scripts/train.py`**
-```python
-if data_root:
-    os.environ.setdefault("HF_HOME", f"{data_root}/hf_cache")
-    os.environ.setdefault("TORCH_HOME", f"{data_root}/torch_cache")
-```
-
-### 3. New Scripts Created
+### 2. New Scripts Created
 
 | Script | Purpose |
 |---|---|
@@ -87,7 +72,7 @@ if data_root:
 | `scripts/setup_gdrive.sh` | rclone-based Google Drive setup (not used, kept for reference) |
 | `scripts/download_assets.sh` | Downloads all models and datasets to `$DATA_ROOT` |
 
-### 4. All Bugs Fixed
+### 3. All Bugs Fixed in download_assets.sh
 
 | Bug | Was | Fixed to |
 |---|---|---|
@@ -102,7 +87,12 @@ if data_root:
 | `AutoFeatureExtractor` removed in transformers 5.x | `AutoFeatureExtractor` | `AutoImageProcessor` |
 | `HF_HOME` still pointing to Drive after switch | old `.bashrc` line | `sed -i '/HF_HOME/d' ~/.bashrc` then re-added correctly |
 | `TORCH_HOME` not set | missing from `.bashrc` | added `export TORCH_HOME=${DATA_ROOT}/torch_cache` |
-| COCO images unzip failure | `wget -P` (directory prefix) saved to wrong path | `wget -O "${ZIP}"` (explicit output file) + existence check before unzip |
+| COCO images unzip failure | `wget -P` (directory prefix) saved to wrong path | `wget -O "${ZIP}"` (explicit output file) + zip validation before extract |
+| Corrupt zip re-attempted on re-run | no validation check | `unzip -t` check before download; deletes corrupt zip automatically |
+| COCO SSL certificate error | no cert flag | `wget --no-check-certificate` |
+| GQA questions individual JSON URLs | direct JSON URLs return 404 (removed from Stanford) | download `questions1.2.zip` bundle instead |
+| GQA questions 503 with aria2c 16 connections | Stanford throttles parallel connections | aria2c falls back to 3 working connections; or wget fallback |
+| COCO images slow at CDN (< 1 KB/s with single connection) | single wget connection throttled | `aria2c -x 16 -s 16` for fast parallel download (~60 MB/s) |
 
 ---
 
@@ -114,6 +104,7 @@ cd ~/TC-ViTok
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
 pip install "numpy<2.0" --force-reinstall
+sudo apt-get install -y aria2   # for fast parallel downloads
 ```
 
 ### Set environment variables permanently
@@ -124,83 +115,84 @@ echo 'export TORCH_HOME=${DATA_ROOT}/torch_cache' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-Verify:
-```bash
-echo $DATA_ROOT    # /home/sk10741/tc-vitok-data
-echo $HF_HOME      # /home/sk10741/tc-vitok-data/hf_cache
-echo $TORCH_HOME   # /home/sk10741/tc-vitok-data/torch_cache
-```
-
 ---
 
-## Part 2 — Download Everything (Done, running in background)
-
-Downloads were started on 2026-04-08 using two tmux sessions.
-
-### What gets downloaded
+## Part 2 — Downloads (Final Status as of 2026-04-08)
 
 | Item | Size | Destination | Status |
 |---|---|---|---|
-| DINOv2-S (via timm) | ~85 MB | `~/tc-vitok-data/torch_cache/` | ✓ Done |
+| DINOv2-S (via timm/HF) | ~85 MB | `~/tc-vitok-data/hf_cache/` | ✓ Done |
 | CLIP ViT-B/32 | ~340 MB | `~/tc-vitok-data/hf_cache/` | ✓ Done |
 | CLIP ViT-L/14-336 | ~1.7 GB | `~/tc-vitok-data/hf_cache/` | ✓ Done |
 | LLaVA-1.5-7B | ~14 GB | `~/tc-vitok-data/hf_cache/` | ✓ Done |
-| VQAv2 annotations | ~130 MB | `~/tc-vitok-data/vqav2/` | ✓ Done |
-| COCO train2014 images | ~13 GB | `~/tc-vitok-data/vqav2/train2014/` | Downloading via `download_vqav2` session |
-| COCO val2014 images | ~6 GB | `~/tc-vitok-data/vqav2/val2014/` | Downloading via `download_vqav2` session |
-| GQA questions | ~660 MB | `~/tc-vitok-data/gqa/` | ✓ Done |
-| GQA images | ~20 GB | `~/tc-vitok-data/gqa/images/` | Downloading via `download_final` session |
+| VQAv2 annotations (4 JSON files) | ~130 MB | `~/tc-vitok-data/vqav2/` | ✓ Done |
+| COCO train2014 (82,783 images) | ~13 GB | `~/tc-vitok-data/vqav2/train2014/` | ✓ Done |
+| COCO val2014 (40,504 images) | ~6 GB | `~/tc-vitok-data/vqav2/val2014/` | ✓ Done |
+| GQA images (148,854 images) | ~20 GB | `~/tc-vitok-data/gqa/images/` | ✓ Done |
+| GQA questions (questions1.2.zip) | ~1.4 GB | `~/tc-vitok-data/gqa/` | Downloading (aria2c, ~2.5h) |
 | **Total** | **~55 GB** | | |
 
-### How the two-session download works
-
-- **`download_final`** — downloading GQA images (~20 GB)
-- **`download_vqav2`** — waiting for `download_final` to finish, then automatically cleans up any corrupt zip files and downloads COCO train2014 + val2014 images
-
-The `download_vqav2` session runs this command (already started):
+### How COCO images were downloaded (fast method)
+Single wget connections to `images.cocodataset.org` were throttled to < 1 KB/s. Fixed by using aria2c with 16 parallel connections:
 ```bash
-while tmux has-session -t download_final 2>/dev/null; do sleep 60; done && rm -f ~/tc-vitok-data/vqav2/train2014.zip ~/tc-vitok-data/vqav2/val2014.zip && export DATA_ROOT=~/tc-vitok-data && bash ~/TC-ViTok/scripts/download_assets.sh --vqav2-only
+aria2c -x 16 -s 16 --check-certificate=false \
+    -d ~/tc-vitok-data/vqav2/ \
+    -o train2014.zip \
+    "https://images.cocodataset.org/zips/train2014.zip"
+unzip ~/tc-vitok-data/vqav2/train2014.zip -d ~/tc-vitok-data/vqav2/
+rm -f ~/tc-vitok-data/vqav2/train2014.zip
+```
+Achieved ~58 MB/s (finished in ~4 minutes for 13 GB).
+
+### How GQA questions are downloaded
+Individual JSON URLs (e.g. `train_balanced_questions.json`) return 404 — Stanford removed them. The zip bundle still exists:
+```bash
+export DATA_ROOT=~/tc-vitok-data
+bash scripts/download_assets.sh --gqa-only
+```
+The script downloads `questions1.2.zip` via aria2c (falls back to wget if 503). Stanford throttles to ~150 KB/s for this file.
+
+### Git pull auth issue on server
+VS Code's credential helper interferes with git. Use:
+```bash
+git -c credential.helper= pull origin main
+# If that also fails (VS Code socket still intercepting), use rsync from local Mac:
+rsync -avz --exclude='.git' /path/to/local/TC-ViTok/ sk10741@ADUAED16811WKLX:~/TC-ViTok/
 ```
 
-### Check progress when you reconnect
+### Verify all downloads
 ```bash
-tmux ls                                           # both sessions gone = everything done
-tmux capture-pane -t download_final -p | tail -10  # GQA progress
-tmux capture-pane -t download_vqav2 -p | tail -10  # COCO progress (after GQA finishes)
-```
-
-### Verify downloads after completion
-```bash
+ls ~/tc-vitok-data/vqav2/train2014/ | wc -l   # expect 82783
+ls ~/tc-vitok-data/vqav2/val2014/ | wc -l      # expect 40504
+ls ~/tc-vitok-data/gqa/images/ | wc -l         # expect ~148854
+ls ~/tc-vitok-data/gqa/*.json 2>/dev/null | wc -l  # expect 3
 ls ~/tc-vitok-data/hf_cache/models--llava-hf--llava-1.5-7b-hf/
 ls ~/tc-vitok-data/hf_cache/models--openai--clip-vit-large-patch14-336/
 ls ~/tc-vitok-data/hf_cache/models--openai--clip-vit-base-patch32/
-ls ~/tc-vitok-data/torch_cache/hub/
-ls ~/tc-vitok-data/vqav2/train2014/
-ls ~/tc-vitok-data/vqav2/val2014/
-ls ~/tc-vitok-data/gqa/images/
 ```
 
-### If download crashes midway
-Just re-run — skips already-downloaded files and resumes partial downloads:
+### If any download is missing
 ```bash
-tmux new -s download_retry
 export DATA_ROOT=~/tc-vitok-data
-bash scripts/download_assets.sh
+bash scripts/download_assets.sh              # re-run everything (skips completed)
+bash scripts/download_assets.sh --models-only
+bash scripts/download_assets.sh --vqav2-only
+bash scripts/download_assets.sh --gqa-only
 ```
 
 ---
 
 ## Part 3 — Training (Run After Downloads Complete)
 
-### Step 1 — Verify env vars are set
+### Step 1 — Verify env vars
 ```bash
-echo $DATA_ROOT
+echo $DATA_ROOT   # /home/sk10741/tc-vitok-data
 echo $HF_HOME
 echo $TORCH_HOME
 ```
-If any are empty, run `source ~/.bashrc` first.
+If empty: `source ~/.bashrc`
 
-### Step 2 — Dry run (verify pipeline works, ~30 seconds, no real data)
+### Step 2 — Dry run (~30 seconds, no real data needed)
 ```bash
 cd ~/TC-ViTok
 PYTHONPATH=src bash scripts/launch_multigpu.sh \
@@ -264,13 +256,10 @@ bash scripts/launch_multigpu.sh \
 
 ## Part 4 — After Every Reconnect
 
-Env vars in `~/.bashrc` persist across sessions automatically. Just verify on reconnect:
 ```bash
 echo $DATA_ROOT   # should print /home/sk10741/tc-vitok-data
 ```
 If empty: `source ~/.bashrc`
-
-No rclone mount needed — data is on local disk.
 
 ---
 
@@ -283,40 +272,22 @@ nvidia-smi
 # Check disk space
 df -h ~
 
-# Check what's been downloaded
-ls ~/tc-vitok-data/
-ls ~/tc-vitok-data/hf_cache/
-ls ~/tc-vitok-data/vqav2/
-ls ~/tc-vitok-data/gqa/
+# Check downloaded data
+ls ~/tc-vitok-data/vqav2/train2014/ | wc -l
+ls ~/tc-vitok-data/vqav2/val2014/ | wc -l
+ls ~/tc-vitok-data/gqa/images/ | wc -l
+ls ~/tc-vitok-data/gqa/*.json | wc -l
 
-# List all tmux sessions
+# tmux
 tmux ls
-
-# Attach to a session
-tmux attach -t download_final
-tmux attach -t download_vqav2
-tmux attach -t training
-
-# Check session output without attaching
-tmux capture-pane -t download_final -p | tail -20
-tmux capture-pane -t download_vqav2 -p | tail -20
-tmux capture-pane -t training -p | tail -20
-
-# Kill a tmux session
-tmux kill-session -t <session-name>
-
-# Send Ctrl+C to a tmux session without attaching
-tmux send-keys -t <session-name> C-c Enter
+tmux attach -t <session>
+tmux capture-pane -t <session> -p | tail -20
+tmux kill-session -t <session>
 ```
 
 ---
 
 ## Troubleshooting
-
-### Env vars missing after reconnect
-```bash
-source ~/.bashrc
-```
 
 ### CUDA out of memory
 ```yaml
@@ -335,24 +306,22 @@ PYTHONPATH=src bash scripts/launch_multigpu.sh \
     --output /tmp/t --stub --dummy-data --no-wandb --max-steps 2
 ```
 
-### Download crashed midway
+### COCO images missing / slow download
+Single connections to `images.cocodataset.org` are throttled to < 1 KB/s. Always use aria2c:
 ```bash
-tmux new -s download_retry
-export DATA_ROOT=~/tc-vitok-data
-bash scripts/download_assets.sh   # skips completed files automatically
+aria2c -x 16 -s 16 --check-certificate=false \
+    -d ~/tc-vitok-data/vqav2/ -o train2014.zip \
+    "https://images.cocodataset.org/zips/train2014.zip"
+unzip ~/tc-vitok-data/vqav2/train2014.zip -d ~/tc-vitok-data/vqav2/
+rm -f ~/tc-vitok-data/vqav2/train2014.zip
+# repeat for val2014.zip
 ```
 
-### COCO images missing after download completes
-The COCO images failed once due to a corrupt partial zip. The fix is already in the script (wget -O with existence check). If they're still missing:
+### GQA questions missing (Stanford 404)
+Individual JSON URLs no longer exist. Use the script which downloads the zip bundle:
 ```bash
-rm -f ~/tc-vitok-data/vqav2/train2014.zip ~/tc-vitok-data/vqav2/val2014.zip
 export DATA_ROOT=~/tc-vitok-data
-bash scripts/download_assets.sh --vqav2-only
-```
-
-### numpy/pandas conflict
-```bash
-pip install "numpy<2.0" --force-reinstall
+bash scripts/download_assets.sh --gqa-only
 ```
 
 ### HuggingFace model not found during training
@@ -361,10 +330,13 @@ export DATA_ROOT=~/tc-vitok-data
 bash scripts/download_assets.sh --models-only
 ```
 
-### Check if a specific model downloaded correctly
+### numpy/pandas conflict
 ```bash
-ls ~/tc-vitok-data/hf_cache/models--llava-hf--llava-1.5-7b-hf/
-ls ~/tc-vitok-data/hf_cache/models--openai--clip-vit-large-patch14-336/
-ls ~/tc-vitok-data/hf_cache/models--openai--clip-vit-base-patch32/
-ls ~/tc-vitok-data/torch_cache/hub/
+pip install "numpy<2.0" --force-reinstall
 ```
+
+### git pull fails (VS Code credential socket error)
+```bash
+git -c credential.helper= pull origin main
+```
+If still failing, push from Mac and rsync to server manually.
