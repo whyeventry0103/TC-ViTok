@@ -434,19 +434,45 @@ class TCViTokTrainer:
             "config": self.config,
         }
 
-        # Save latest checkpoint
         ckpt_path = self.output_dir / f"checkpoint_step_{self.global_step}.pt"
-        torch.save(checkpoint, ckpt_path)
+        try:
+            torch.save(checkpoint, ckpt_path)
+            print(f"Checkpoint saved: {ckpt_path}")
 
-        # Save best checkpoint
-        if is_best:
-            best_path = self.output_dir / "best.ckpt"
-            torch.save(checkpoint, best_path)
+            if is_best:
+                best_path = self.output_dir / "best.ckpt"
+                torch.save(checkpoint, best_path)
+                print(f"Best checkpoint saved: {best_path}")
 
-        print(f"Checkpoint saved: {ckpt_path}")
+            # Clean up old checkpoints to prevent disk full — keep last 2 + best
+            self._cleanup_old_checkpoints(keep=2)
+
+        except (RuntimeError, OSError) as e:
+            print(f"WARNING: Checkpoint save failed: {e}")
+            print("Training will continue — prior checkpoints are still valid.")
+            # Remove corrupt partial file
+            if ckpt_path.exists():
+                ckpt_path.unlink()
+
+    def _cleanup_old_checkpoints(self, keep: int = 2):
+        """Remove old checkpoints, keeping the N most recent + best.ckpt."""
+        import glob
+        pattern = str(self.output_dir / "checkpoint_step_*.pt")
+        ckpt_files = sorted(glob.glob(pattern), key=lambda f: int(f.split("_step_")[1].split(".")[0]))
+        # Keep the last `keep` checkpoints
+        for old_ckpt in ckpt_files[:-keep]:
+            try:
+                Path(old_ckpt).unlink()
+                print(f"Cleaned up old checkpoint: {old_ckpt}")
+            except OSError:
+                pass
 
     def load_checkpoint(self, checkpoint_path: str):
         """Load model checkpoint.
+
+        For same-phase resume (e.g., crash recovery), restores step/epoch/optimizer.
+        For cross-phase resume (e.g., Phase 0 → Phase 1), loads model weights only
+        and resets step/epoch to 0 with fresh optimizer state.
 
         Args:
             checkpoint_path: Path to checkpoint file
@@ -462,15 +488,23 @@ class TCViTokTrainer:
         if result.unexpected_keys:
             print(f"Checkpoint unexpected keys: {result.unexpected_keys}")
 
-        # Optimizer state may not match across phases (different param groups)
-        try:
-            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        except (ValueError, RuntimeError) as e:
-            print(f"WARNING: Could not load optimizer state (phase change?): {e}")
-            print("Continuing with fresh optimizer state.")
+        # Detect cross-phase resume: checkpoint phase != current trainer phase
+        ckpt_phase = checkpoint.get("config", {}).get("phase", self.phase)
+        cross_phase = (ckpt_phase != self.phase)
 
-        self.global_step = checkpoint["global_step"]
-        self.epoch = checkpoint["epoch"]
+        if cross_phase:
+            # Cross-phase: keep model weights but reset training state
+            print(f"Cross-phase resume (phase {ckpt_phase} → {self.phase}): "
+                  f"loaded model weights, reset step/epoch/optimizer to 0")
+        else:
+            # Same-phase: restore full training state
+            try:
+                self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            except (ValueError, RuntimeError) as e:
+                print(f"WARNING: Could not load optimizer state: {e}")
+                print("Continuing with fresh optimizer state.")
+            self.global_step = checkpoint["global_step"]
+            self.epoch = checkpoint["epoch"]
+            print(f"Same-phase resume from step {self.global_step}")
 
         print(f"Checkpoint loaded: {checkpoint_path}")
-        print(f"Resuming from step {self.global_step}")

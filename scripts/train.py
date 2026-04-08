@@ -426,10 +426,10 @@ def main():
         sys.stdout.flush()
 
     # ------------------------------------------------------------------ #
-    # Phase 0 training                                                     #
+    # Training (runs whichever phase the config specifies)                  #
     # ------------------------------------------------------------------ #
-    phase0_output = Path(args.output) / "phase0"
-    config_dict["logging"]["output_dir"] = str(phase0_output)
+    phase_output = Path(args.output) / f"phase{phase}"
+    config_dict["logging"]["output_dir"] = str(phase_output)
 
     # Initialize WandB for Phase 0 (rank-0 only)
     if is_main and not args.no_wandb:
@@ -442,12 +442,12 @@ def main():
 
     train_loader, val_loader = build_loaders(data_config, batch_size, num_workers, args, is_ddp=is_ddp)
 
-    phase0_metrics, phase0_dir = run_phase(
+    phase_metrics, phase_dir = run_phase(
         model, config_dict, train_loader, val_loader, device,
         resume=args.resume, local_rank=local_rank,
     )
     if is_main:
-        print(f"Phase {phase} complete. Metrics: {phase0_metrics}")
+        print(f"Phase {phase} complete. Metrics: {phase_metrics}")
 
     if is_main and not args.no_wandb and wandb.run is not None:
         wandb.finish()
@@ -474,7 +474,7 @@ def main():
             phase1_dict["logging"]["output_dir"] = str(phase1_output)
 
             # Phase 1 resumes from Phase 0 best checkpoint
-            phase0_best = phase0_dir / "best.ckpt"
+            phase0_best = phase_dir / "best.ckpt"
             phase1_resume = str(phase0_best) if phase0_best.exists() else None
             if is_main:
                 if phase1_resume:
