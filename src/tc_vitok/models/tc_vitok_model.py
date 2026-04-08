@@ -213,6 +213,7 @@ class TCViTokModel(nn.Module):
             model_name,
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True,
+            device_map="cpu",  # BUG-16 fix: load on CPU first; model.to(device) moves to GPU later
         )
         self.processor = LlavaProcessor.from_pretrained(model_name)
 

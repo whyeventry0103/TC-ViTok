@@ -126,7 +126,53 @@ In the gather-based approach, `gumbel_sigmoid_ste` returns `(mask_ste, idx)`. Th
 
 Phase 0 must use `lambda_max > 0` for TPN to train at all.
 
-### 5. All Bugs Fixed in download_assets.sh
+### 5. DDP Parameter Mismatch Fix (Session 3: Apr 8 2026)
+
+**Error:**
+```
+RuntimeError: DDP expects same model across all ranks, but Rank 1 has 474 params,
+while rank 0 has inconsistent 0 params.
+```
+Followed by NCCL timeout after 600 seconds. Also deprecation warning: `NCCL_ASYNC_ERROR_HANDLING` → `TORCH_NCCL_ASYNC_ERROR_HANDLING`.
+
+**Root cause:** Rank 0 crashed/hung during `model.to(device)` — most likely because zombie python processes from the previous SIGABRT crash still held GPU 0 memory. Both ranks independently load the 14GB LLaVA model; if old processes hold GPU 0 VRAM, rank 0 OOMs. Rank 1 then waits for rank 0's DDP init → NCCL timeout.
+
+Additionally, `LlavaForConditionalGeneration.from_pretrained()` without `device_map` may auto-place tensors on GPU during loading (before the explicit `.to(device)` call), consuming extra VRAM.
+
+| Bug | Error / Problem | Files | Fix |
+|---|---|---|---|
+| BUG-16a | Zombie GPU processes from prior crash block VRAM | `scripts/launch_multigpu.sh` | Added automatic GPU process cleanup before launch: queries `nvidia-smi` for PIDs, kills python/torchrun processes |
+| BUG-16b | LLaVA auto-places on GPU during `from_pretrained` | `tc_vitok_model.py:_init_llava` | Added `device_map="cpu"` to `from_pretrained()` — forces CPU-only loading, `.to(device)` handles GPU placement |
+| BUG-16c | No synchronization between model creation and DDP wrapping | `scripts/train.py` | Added `dist.barrier()` before `model.to(device)` and before DDP wrapping |
+| BUG-16d | OOM on `.to(device)` gives no useful error | `scripts/train.py` | Wrapped `model.to(device)` in try/except with rank-specific error message |
+| BUG-16e | Param count only logged on rank 0 | `scripts/train.py` | Now logs on ALL ranks for DDP debugging |
+| BUG-16f | Frozen vision_tower never used in forward → DDP mismatch | `scripts/train.py` | Added `find_unused_parameters=True` to DDP constructor |
+| BUG-16g | Deprecated env var `NCCL_ASYNC_ERROR_HANDLING` | `scripts/launch_multigpu.sh` | Changed to `TORCH_NCCL_ASYNC_ERROR_HANDLING` |
+
+**Before restarting training after a crash:**
+```bash
+# 1. Kill any zombie GPU processes (now automatic in launch script, but manual option)
+nvidia-smi                         # check for leftover processes
+pkill -9 -f "scripts/train.py"    # kill any orphaned training processes
+sleep 2
+
+# 2. Verify GPUs are free
+nvidia-smi                         # should show 0 MiB used / no processes
+
+# 3. Pull latest fixes
+git -c credential.helper= pull origin main
+
+# 4. Restart
+tmux new -s training
+export DATA_ROOT=~/tc-vitok-data
+bash scripts/launch_multigpu.sh \
+    --config configs/phase0.yaml \
+    --output runs/ \
+    --run-both-phases \
+    --no-wandb
+```
+
+### 6. All Bugs Fixed in download_assets.sh
 
 | Bug | Was | Fixed to |
 |---|---|---|
@@ -240,11 +286,12 @@ bash scripts/download_assets.sh --gqa-only
 
 ## Part 3 — Training Status
 
-### Current Status (as of 2026-04-08 ~14:00)
+### Current Status (as of 2026-04-08 ~16:00)
 - **Dry run**: PASSED (2 steps, 2 GPUs, BF16, stub mode) ✓
 - **Real-data test**: PASSED (2 steps, 2 GPUs, BF16, real VQAv2 + all encoders) ✓
 - **First full training attempt**: CRASHED at ~13:33 with SIGABRT (BUG-11 through BUG-15 fixed)
-- **Status**: All fixes applied and pushed. Ready to restart.
+- **Second full training attempt**: CRASHED with DDP param mismatch (BUG-16a through BUG-16g fixed)
+- **Status**: All fixes applied. Ready to restart after pushing to server.
 
 ### Before restarting — pull fixes first
 ```bash
@@ -329,7 +376,7 @@ tmux capture-pane -t training -p | tail -20
 nvidia-smi   # both GPUs should be ~100% if training is running
 ```
 
-> **ALREADY RUNNING as of Apr 8 2026 13:25** — training started, no need to re-run unless it crashes.
+> **NOT RUNNING** — crashed twice (BUG-11→15, BUG-16). All fixes applied. Pull and restart.
 
 ### What training does
 - **Phase 0** (10,000 steps): Trains TPN only, LLaVA frozen, VQAv2 data
@@ -352,8 +399,8 @@ bash scripts/launch_multigpu.sh \
 | Parameter | Value | Meaning |
 |---|---|---|
 | `k` | 144 | Tokens selected out of 576 |
-| `batch_size` | 32 | Per GPU |
-| `grad_accum_steps` | 2 | Effective batch = 128 total |
+| `batch_size` | 16 | Per GPU |
+| `grad_accum_steps` | 4 | Effective batch = 128 total |
 | `mixed_precision` | `"bf16"` | BF16 autocast |
 | `max_steps` (Phase 0) | 10,000 | ~1 epoch VQAv2 |
 | `max_steps` (Phase 1) | 50,000 | ~3 epochs VQAv2+GQA |

@@ -340,14 +340,31 @@ def main():
         load_encoders=not args.stub,
     )
 
-    if is_main:
-        print(f"Model created (stub={args.stub}, k={k})")
-        print(f"Trainable params: {model.get_num_params():,}")
+    # Log param count on ALL ranks for DDP debugging
+    n_params = sum(p.numel() for p in model.parameters())
+    n_trainable = model.get_num_params()
+    print(f"[Rank {local_rank}] Model created (stub={args.stub}, k={k})")
+    print(f"[Rank {local_rank}] Total params: {n_params:,}, Trainable: {n_trainable:,}")
 
     # Wrap model in DDP after moving to the correct CUDA device
     if is_ddp:
-        model = model.to(device)
-        model = nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+        # Barrier: ensure all ranks finished model creation before moving to GPU
+        dist.barrier()
+        try:
+            model = model.to(device)
+        except RuntimeError as e:
+            print(f"[Rank {local_rank}] FATAL: model.to({device}) failed: {e}")
+            print(f"[Rank {local_rank}] Hint: run 'nvidia-smi' — zombie GPU processes may hold VRAM")
+            dist.destroy_process_group()
+            raise
+        # Barrier: ensure all ranks finished .to(device) before DDP wrapping
+        dist.barrier()
+        print(f"[Rank {local_rank}] Model moved to {device} successfully")
+        model = nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[local_rank],
+            find_unused_parameters=True,  # BUG-16: frozen vision_tower params are never used in forward
+        )
 
     # ------------------------------------------------------------------ #
     # Phase 0 training                                                     #

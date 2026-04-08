@@ -23,6 +23,33 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
+# ── Kill zombie GPU processes from prior crashed runs ────────────────────────
+# A previous SIGABRT can leave python/torchrun holding GPU memory, causing the
+# next run to OOM on model.to(device) → DDP param mismatch across ranks.
+echo "Checking for leftover GPU processes..."
+if command -v nvidia-smi &>/dev/null; then
+    # Get PIDs of processes using the GPUs (skip header line)
+    _gpu_pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | sort -u || true)
+    if [[ -n "$_gpu_pids" ]]; then
+        echo "WARNING: Found processes on GPU: $_gpu_pids"
+        echo "Killing leftover GPU processes to free VRAM..."
+        for _pid in $_gpu_pids; do
+            # Only kill python/torchrun processes (safety: don't kill other users' work)
+            _cmd=$(ps -p "$_pid" -o comm= 2>/dev/null || true)
+            if [[ "$_cmd" == *python* ]] || [[ "$_cmd" == *torchrun* ]]; then
+                echo "  Killing PID $_pid ($_cmd)"
+                kill -9 "$_pid" 2>/dev/null || true
+            else
+                echo "  Skipping PID $_pid ($_cmd) — not a python/torchrun process"
+            fi
+        done
+        sleep 2  # wait for GPU memory to be released
+        echo "GPU cleanup done."
+    else
+        echo "GPUs are clean — no leftover processes."
+    fi
+fi
+
 # ── GPU count ────────────────────────────────────────────────────────────────
 NUM_GPUS=${NUM_GPUS:-$(python3 -c "import torch; print(torch.cuda.device_count())")}
 echo "Launching on ${NUM_GPUS} GPU(s)"
@@ -31,8 +58,8 @@ echo "Launching on ${NUM_GPUS} GPU(s)"
 export PYTHONPATH="${REPO_ROOT}/src:${PYTHONPATH:-}"
 export OMP_NUM_THREADS=1            # avoid CPU over-subscription in workers
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
-export NCCL_ASYNC_ERROR_HANDLING=1  # surface NCCL errors as Python exceptions (not SIGABRT)
-export NCCL_TIMEOUT=1800            # 30-min timeout before NCCL gives up on a stalled rank
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1  # surface NCCL errors as Python exceptions (not SIGABRT)
+export NCCL_TIMEOUT=1800                  # 30-min timeout before NCCL gives up on a stalled rank
 
 # ── DATA_ROOT → HF_HOME wiring (done in train.py too, belt-and-suspenders) ──
 if [[ -n "${DATA_ROOT:-}" ]]; then
