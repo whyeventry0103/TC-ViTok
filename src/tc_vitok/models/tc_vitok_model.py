@@ -224,9 +224,21 @@ class TCViTokModel(nn.Module):
                 ["q_proj", "k_proj", "v_proj", "o_proj"],
             ),
         )
-        self.llava.language_model = get_peft_model(
-            self.llava.language_model,
-            peft_config,
+        # Attribute name varies by transformers version:
+        # transformers >=4.36: 'language_model'; some builds use 'model'
+        self._llava_lm_attr = next(
+            (k for k in ("language_model", "model") if hasattr(self.llava, k)),
+            None,
+        )
+        if self._llava_lm_attr is None:
+            raise AttributeError(
+                f"Cannot find LM in {type(self.llava).__name__}. "
+                f"Available attrs: {[a for a in vars(self.llava) if not a.startswith('_')]}"
+            )
+        setattr(
+            self.llava,
+            self._llava_lm_attr,
+            get_peft_model(getattr(self.llava, self._llava_lm_attr), peft_config),
         )
 
         # VQA classification head: LLM hidden size → answer vocabulary
@@ -409,7 +421,7 @@ class TCViTokModel(nn.Module):
 
         B, k, _ = v_selected.shape
         device = v_selected.device
-        lm = self.llava.language_model
+        lm = getattr(self.llava, self._llava_lm_attr)
 
         # Step 1: Project visual tokens through mm_projector
         # mm_projector is a 2-layer MLP: 1024 → 4096 (LLaVA-1.5-7B)
@@ -495,7 +507,7 @@ class TCViTokModel(nn.Module):
         B, k, _ = v_selected.shape
         device = v_selected.device
         tokenizer = self.processor.tokenizer
-        lm = self.llava.language_model
+        lm = getattr(self.llava, self._llava_lm_attr)
 
         # Project visual tokens
         v_projected = self.llava.multi_modal_projector(v_selected)  # [B, k, H]
