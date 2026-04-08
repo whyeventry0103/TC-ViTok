@@ -123,8 +123,6 @@ class TCViTokTrainer:
         Returns:
             final_metrics: Dict with final training metrics
         """
-        # TODO (Phase C): Implement main training loop
-
         if self.is_main:
             print(f"\n{'='*60}")
             print(f"Starting Phase {self.phase} Training")
@@ -144,10 +142,15 @@ class TCViTokTrainer:
 
         self.model.train()
 
-        # Progress bar
-        pbar = tqdm(total=self.max_steps, desc=f"Phase {self.phase}")
+        # Progress bar — only on rank 0 to avoid stdout interleaving
+        pbar = tqdm(total=self.max_steps, desc=f"Phase {self.phase}",
+                    disable=not self.is_main)
 
         while self.global_step < self.max_steps:
+            # Shuffle data differently each epoch in DDP
+            if self.is_ddp and hasattr(self.train_loader.sampler, 'set_epoch'):
+                self.train_loader.sampler.set_epoch(self.epoch)
+
             for batch in self.train_loader:
                 # Check if training is complete
                 if self.global_step >= self.max_steps:
@@ -160,7 +163,7 @@ class TCViTokTrainer:
                 if self.is_main and self.global_step % self.log_interval == 0:
                     self.log_metrics(loss_dict)
 
-                # Validation (rank-0 only)
+                # Validation (rank-0 only, uses raw model to avoid DDP deadlock)
                 if self.is_main and self.val_loader and self.global_step % self.eval_interval == 0:
                     val_metrics = self.validate()
                     self.log_metrics(val_metrics, prefix="val")
@@ -196,8 +199,6 @@ class TCViTokTrainer:
         Returns:
             loss_dict: Dictionary with all loss components
         """
-        # TODO (Phase C): Implement training step
-
         # Get current curriculum parameters
         tau = get_tau(self.global_step, self.max_steps, self.tau_min, self.tau_max)
         lambda_sparsity = get_lambda(
@@ -245,10 +246,13 @@ class TCViTokTrainer:
                 )
 
         # Compute losses (scores for L1 sparsity, idx for entropy)
-        raw_model = self.model.module if self.is_ddp else self.model
+        # Phase 0: skip VQA loss — TPN receives no gradient from VQA (gather is
+        # non-differentiable) and the randomly-initialized vqa_head produces
+        # large float16 logits that overflow to NaN, corrupting total loss.
+        skip_vqa = (self.phase == 0)
         loss_dict = compute_total_loss(
-            logits=outputs.get("logits"),
-            labels=labels,
+            logits=None if skip_vqa else outputs.get("logits"),
+            labels=None if skip_vqa else labels,
             scores=outputs["scores"],
             idx=outputs["idx"],
             k=raw_model.k,
@@ -292,10 +296,16 @@ class TCViTokTrainer:
     def validate(self) -> Dict[str, float]:
         """Run validation loop.
 
+        Uses the raw (unwrapped) model to avoid DDP deadlock: only rank 0
+        calls validate(), so using the DDP wrapper would hang waiting for
+        rank 1 to participate in the all-reduce.
+
         Returns:
             metrics: Dictionary with validation metrics
         """
-        self.model.eval()
+        # Use raw model — DDP forward requires all ranks; validate runs on rank 0 only
+        raw_model = self.model.module if self.is_ddp else self.model
+        raw_model.eval()
 
         total_loss = 0.0
         total_vqa = 0.0
@@ -324,7 +334,7 @@ class TCViTokTrainer:
             # Use cached coarse/text features when available (no images_coarse key)
             with amp_ctx:
                 if "v_coarse" in batch and "q_embed" in batch:
-                    outputs = self.model.forward_cached(
+                    outputs = raw_model.forward_cached(
                         v_coarse=batch["v_coarse"].to(self.device),
                         q_embed=batch["q_embed"].to(self.device),
                         images_full=images_full,
@@ -334,7 +344,7 @@ class TCViTokTrainer:
                         return_idx=True,
                     )
                 else:
-                    outputs = self.model(
+                    outputs = raw_model(
                         images_coarse=batch["images_coarse"].to(self.device),
                         images_full=images_full,
                         questions=batch["questions"],
@@ -343,14 +353,14 @@ class TCViTokTrainer:
                         return_idx=True,
                     )
 
-            # Compute losses
-            _raw = self.model.module if self.is_ddp else self.model
+            # Compute losses (skip VQA in Phase 0 — same as train_step)
+            skip_vqa = (self.phase == 0)
             loss_dict = compute_total_loss(
-                logits=outputs.get("logits"),
-                labels=labels,
+                logits=None if skip_vqa else outputs.get("logits"),
+                labels=None if skip_vqa else labels,
                 scores=outputs["scores"],
                 idx=outputs["idx"],
-                k=_raw.k,
+                k=raw_model.k,
                 lambda_sparsity=lambda_sparsity,
                 lambda_entropy=self.lambda_entropy,
             )
@@ -361,7 +371,7 @@ class TCViTokTrainer:
             total_entropy += loss_dict["entropy"].item()
             num_batches += 1
 
-        self.model.train()
+        raw_model.train()
 
         n = max(num_batches, 1)
         val_loss = total_loss / n
@@ -386,8 +396,6 @@ class TCViTokTrainer:
             metrics: Dictionary of metrics to log
             prefix: Prefix for metric names ("train" or "val")
         """
-        # TODO (Phase D): Implement logging
-
         # Console logging
         metric_str = " | ".join([f"{k}: {v:.4f}" for k, v in metrics.items()])
         tqdm.write(f"[Step {self.global_step}] {prefix} | {metric_str}")
@@ -405,8 +413,6 @@ class TCViTokTrainer:
         Args:
             is_best: Whether this is the best checkpoint so far
         """
-        # TODO (Phase D): Implement checkpointing
-
         # Unwrap DDP so checkpoint is always a plain state dict
         raw_model = self.model.module if self.is_ddp else self.model
         checkpoint = {
@@ -434,13 +440,18 @@ class TCViTokTrainer:
         Args:
             checkpoint_path: Path to checkpoint file
         """
-        # TODO (Phase D): Implement checkpoint loading
-
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
 
         raw_model = self.model.module if self.is_ddp else self.model
         raw_model.load_state_dict(checkpoint["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+        # Optimizer state may not match across phases (different param groups)
+        try:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        except (ValueError, RuntimeError) as e:
+            print(f"WARNING: Could not load optimizer state (phase change?): {e}")
+            print("Continuing with fresh optimizer state.")
+
         self.global_step = checkpoint["global_step"]
         self.epoch = checkpoint["epoch"]
 

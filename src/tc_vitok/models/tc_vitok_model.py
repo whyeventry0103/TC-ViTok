@@ -272,6 +272,9 @@ class TCViTokModel(nn.Module):
         llm_hidden_size = self.llava.config.text_config.hidden_size  # 4096 for LLaVA-1.5-7B
         answer_vocab_size = lora_config.get("answer_vocab_size", 3129)
         self.vqa_head = nn.Linear(llm_hidden_size, answer_vocab_size)
+        # Small init prevents float16 overflow: large random logits → inf → NaN loss
+        nn.init.normal_(self.vqa_head.weight, std=0.02)
+        nn.init.zeros_(self.vqa_head.bias)
 
     def forward(
         self,

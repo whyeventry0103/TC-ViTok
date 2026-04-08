@@ -85,8 +85,10 @@ def create_optimizer(
                 })
         elif hasattr(model, 'llava'):
             # Real LLaVA: LoRA + projector param groups
+            # Use model._llm and model._mm_proj (canonical refs that work across
+            # both old and new transformers LLaVA architectures)
             lora_params = []
-            for name, param in model.llava.language_model.named_parameters():
+            for name, param in model._llm.named_parameters():
                 if param.requires_grad and "lora" in name.lower():
                     lora_params.append(param)
             if lora_params:
@@ -99,7 +101,7 @@ def create_optimizer(
             # Vision projector (mm_projector) + VQA classification head
             # Both are trained at lr_mlp (medium LR, adapts visual→LM interface)
             projector_params = [
-                p for p in model.llava.multi_modal_projector.parameters()
+                p for p in model._mm_proj.parameters()
                 if p.requires_grad
             ]
             if hasattr(model, "vqa_head"):
