@@ -13,6 +13,7 @@ from typing import Optional, Dict, Any
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -163,14 +164,22 @@ class TCViTokTrainer:
                 if self.is_main and self.global_step % self.log_interval == 0:
                     self.log_metrics(loss_dict)
 
-                # Validation (rank-0 only, uses raw model to avoid DDP deadlock)
-                if self.is_main and self.val_loader and self.global_step % self.eval_interval == 0:
-                    val_metrics = self.validate()
-                    self.log_metrics(val_metrics, prefix="val")
+                # Validation — rank 0 runs validate(), other ranks wait at barrier.
+                # IMPORTANT: outer condition must be deterministic across all ranks
+                # (based on global_step, not rank-local values) to prevent deadlock.
+                if self.val_loader and self.global_step % self.eval_interval == 0:
+                    if self.is_main:
+                        val_metrics = self.validate()
+                        self.log_metrics(val_metrics, prefix="val")
+                    if self.is_ddp:
+                        dist.barrier()  # sync all ranks after validation
 
-                # Checkpointing (rank-0 only)
-                if self.is_main and self.global_step % self.save_interval == 0:
-                    self.save_checkpoint()
+                # Checkpointing — rank 0 saves, other ranks wait at barrier
+                if self.global_step % self.save_interval == 0:
+                    if self.is_main:
+                        self.save_checkpoint()
+                    if self.is_ddp:
+                        dist.barrier()  # sync all ranks after checkpoint
 
                 pbar.update(1)
 
@@ -183,6 +192,8 @@ class TCViTokTrainer:
             print(f"{'='*60}\n")
             # Always save a final checkpoint at the end of training
             self.save_checkpoint()
+        if self.is_ddp:
+            dist.barrier()  # sync all ranks before returning
 
         return {"final_step": self.global_step, "final_epoch": self.epoch}
 
@@ -216,34 +227,29 @@ class TCViTokTrainer:
             else nullcontext()
         )
 
-        # Unwrap DDP to access custom methods (DDP only exposes forward())
+        # Access raw model for attributes only (k, etc.) — never for forward()
         raw_model = self.model.module if self.is_ddp else self.model
 
-        # Support both cached and non-cached batches
+        # Build kwargs for unified forward() — DDP requires all calls go
+        # through self.model (the wrapper) so gradient all-reduce hooks fire.
         with amp_ctx:
+            fwd_kwargs = dict(
+                images_full=images_full,
+                labels=labels,
+                tau=tau,
+                return_idx=True,
+            )
             if "v_coarse" in batch and "q_embed" in batch:
-                v_full_cached = batch["v_full"].to(self.device) if "v_full" in batch else None
-                outputs = raw_model.forward_cached(
-                    v_coarse=batch["v_coarse"].to(self.device),
-                    q_embed=batch["q_embed"].to(self.device),
-                    images_full=images_full,
-                    v_full=v_full_cached,
-                    questions=batch.get("questions"),
-                    labels=labels,
-                    tau=tau,
-                    return_idx=True,
-                )
+                fwd_kwargs["v_coarse"] = batch["v_coarse"].to(self.device)
+                fwd_kwargs["q_embed"] = batch["q_embed"].to(self.device)
+                if "v_full" in batch:
+                    fwd_kwargs["v_full"] = batch["v_full"].to(self.device)
+                fwd_kwargs["questions"] = batch.get("questions")
             else:
-                images_coarse = batch["images_coarse"].to(self.device)
-                questions = batch["questions"]
-                outputs = raw_model(
-                    images_coarse=images_coarse,
-                    images_full=images_full,
-                    questions=questions,
-                    labels=labels,
-                    tau=tau,
-                    return_idx=True,
-                )
+                fwd_kwargs["images_coarse"] = batch["images_coarse"].to(self.device)
+                fwd_kwargs["questions"] = batch["questions"]
+
+            outputs = self.model(**fwd_kwargs)
 
         # Compute losses (scores for L1 sparsity, idx for entropy)
         # Phase 0: skip VQA loss — TPN receives no gradient from VQA (gather is

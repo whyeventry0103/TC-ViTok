@@ -209,7 +209,24 @@ DDP's `_verify_param_shape_across_processes` then fails because rank 1's params 
 |---|---|
 | BUG-18 | Removed `device_map="cpu"` from `from_pretrained()`. Use only `low_cpu_mem_usage=True` (loads weights lazily on CPU without dispatch hooks). Added GPU memory logging and param device verification before DDP wrapping. |
 
-### 8. All Bugs Fixed in download_assets.sh
+### 8. DDP Forward Bypass — Rank 1 Dies Silently (Session 4: Apr 8 2026)
+
+**Symptom:** Both ranks initialize and wrap with DDP correctly, but GPU 1 drops to 0% utilization and rank 1's process dies. Training continues on GPU 0 only at ~1.85 it/s instead of ~3.5 it/s.
+
+**Root cause:** Three interrelated bugs:
+
+| Bug | Error / Problem | Files | Fix |
+|---|---|---|---|
+| BUG-19a | `train_step()` calls `raw_model.forward_cached()` / `raw_model()` — bypasses DDP wrapper, so gradient all-reduce hooks never fire. Ranks diverge, rank 1 eventually crashes. | `trainer.py:219-246`, `tc_vitok_model.py:279` | Unified `forward()` on `TCViTokModel` that dispatches to cached or full pipeline internally. `train_step()` now always calls `self.model(**kwargs)` (through DDP wrapper). |
+| BUG-19b | `validate()` runs on rank 0 only while rank 1 continues to next training batch — ranks desynchronize permanently. | `trainer.py:166-169` | Added `dist.barrier()` after validation and checkpointing so non-main ranks wait. |
+| BUG-19c | Checkpointing on rank 0 only without synchronization — same desync problem as validation. | `trainer.py:175-177` | Added `dist.barrier()` after checkpoint save. |
+
+**Key design change:**
+- `TCViTokModel.forward()` now accepts both raw-image kwargs (`images_coarse`, `questions`) and cached kwargs (`v_coarse`, `q_embed`). It auto-detects which path to use based on whether `v_coarse`/`q_embed` are provided.
+- `forward_cached()` still exists for backward compatibility (e.g., evaluation scripts) but is NOT called during DDP training.
+- `raw_model = self.model.module` is still used for attribute access (e.g., `raw_model.k`, `raw_model.set_training_phase()`) — only the forward call must go through the DDP wrapper.
+
+### 9. All Bugs Fixed in download_assets.sh
 
 | Bug | Was | Fixed to |
 |---|---|---|
@@ -330,7 +347,8 @@ bash scripts/download_assets.sh --gqa-only
 - **Second full training attempt**: CRASHED with DDP param mismatch (BUG-16 fixed)
 - **Third full training attempt**: CRASHED with NCCL ALLREDUCE timeout (BUG-17 — HuggingFace network timeouts desync ranks)
 - **Fourth full training attempt**: CRASHED with NCCL ALLGATHER timeout (BUG-18 — `device_map="cpu"` prevented `.to(cuda)`)
-- **Status**: All fixes applied. Ready to restart after pushing to server.
+- **Fifth training attempt**: FAILED — DDP rank 1 dies silently (BUG-19 — forward bypass + validation desync)
+- **Status**: All fixes applied (BUG-19a/b/c). Ready to restart after pushing to server.
 
 ### Before restarting — pull fixes first
 ```bash
@@ -415,7 +433,7 @@ tmux capture-pane -t training -p | tail -20
 nvidia-smi   # both GPUs should be ~100% if training is running
 ```
 
-> **NOT RUNNING** — crashed twice (BUG-11→15, BUG-16). All fixes applied. Pull and restart.
+> **NOT RUNNING** — DDP broken (BUG-19: forward bypassed DDP wrapper). All fixes applied. Pull and restart.
 
 ### What training does
 - **Phase 0** (10,000 steps): Trains TPN only, LLaVA frozen, VQAv2 data

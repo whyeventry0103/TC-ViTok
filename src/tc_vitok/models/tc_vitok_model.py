@@ -278,14 +278,23 @@ class TCViTokModel(nn.Module):
 
     def forward(
         self,
-        images_coarse: torch.Tensor,
-        images_full: torch.Tensor,
-        questions: list[str],
+        images_coarse: Optional[torch.Tensor] = None,
+        images_full: Optional[torch.Tensor] = None,
+        questions: Optional[list[str]] = None,
         labels: Optional[torch.Tensor] = None,
         tau: float = 1.0,
         return_idx: bool = False,
+        v_coarse: Optional[torch.Tensor] = None,
+        q_embed: Optional[torch.Tensor] = None,
+        v_full: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Forward pass through TC-ViTok model.
+        """Unified forward pass — dispatches to cached or full pipeline.
+
+        DDP only hooks into forward(), so ALL training calls must go through
+        this method (never call forward_cached() directly during training).
+        When v_coarse and q_embed are provided, the frozen DINOv2-S and CLIP
+        text encoders are bypassed (cached path). Otherwise the full pipeline
+        runs from raw images and question strings.
 
         Args:
             images_coarse: Low-res images for TPN, Shape: [B, 3, 98, 98]
@@ -294,6 +303,9 @@ class TCViTokModel(nn.Module):
             labels: Optional answer token IDs, Shape: [B, seq_len]
             tau: Gumbel-Sigmoid temperature
             return_idx: If True, include idx and scores in output
+            v_coarse: Pre-computed coarse features [B, 49, 384] (cached path)
+            q_embed: Pre-computed text embeddings [B, 512] (cached path)
+            v_full: Pre-computed full visual features [B, 576, 1024] (optional)
 
         Returns:
             outputs: Dictionary containing:
@@ -303,13 +315,15 @@ class TCViTokModel(nn.Module):
                 - scores: TPN raw scores [B, N]
                 - selected_tokens: Gathered visual tokens [B, k, D]
         """
-        # Step 1: Extract coarse visual features (frozen DINOv2-S)
-        v_coarse = self.coarse_encoder(images_coarse)  # [B, 49, 384]
+        # Dispatch: cached path (pre-computed features) vs full pipeline
+        use_cached = v_coarse is not None and q_embed is not None
 
-        # Step 2: Extract text embeddings (frozen CLIP)
-        q_embed = self.text_encoder(questions)  # [B, 512]
+        if not use_cached:
+            # Full pipeline: run frozen encoders
+            v_coarse = self.coarse_encoder(images_coarse)  # [B, 49, 384]
+            q_embed = self.text_encoder(questions)  # [B, 512]
 
-        # Step 3: TPN produces top-k gather indices
+        # Step 1: TPN produces top-k gather indices
         idx, s_N = self.tpn(
             v_coarse=v_coarse,
             q_embed=q_embed,
@@ -318,14 +332,20 @@ class TCViTokModel(nn.Module):
             training=self.training,
         )  # idx: [B, k], s_N: [B, N]
 
-        # Step 4: Extract full visual features (frozen CLIP ViT-L/14)
-        v_full = self.full_encoder(images_full)  # [B, 576, 1024]
+        # Step 2: Extract full visual features (frozen CLIP ViT-L/14)
+        if v_full is None:
+            if self.full_encoder is None:
+                raise RuntimeError(
+                    "forward() requires full_encoder but load_encoders=False. "
+                    "Either initialize with load_encoders=True or pre-compute v_full."
+                )
+            v_full = self.full_encoder(images_full)  # [B, 576, 1024]
 
-        # Step 5: GATHER selected tokens (real compression!)
+        # Step 3: GATHER selected tokens (real compression!)
         # Output: [B, k, 1024] — LLM sees k tokens, not N
         v_selected = gather_tokens(v_full, idx)
 
-        # Step 6: Forward through LLM backbone
+        # Step 4: Forward through LLM backbone
         if self.use_stub_llm:
             llm_outputs = self.llm(visual_tokens=v_selected, labels=labels)
         else:
@@ -359,14 +379,15 @@ class TCViTokModel(nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """Forward pass using pre-computed cached features.
 
-        Bypasses the frozen DINOv2-S and CLIP text encoders by accepting
-        pre-computed v_coarse and q_embed directly from HDF5 cache.
-        Still runs the full visual encoder (CLIP ViT-L/14) live.
+        Delegates to forward() with cached kwargs. Kept for backward
+        compatibility with evaluation scripts. During DDP training, always
+        call forward() through the DDP wrapper instead of this method.
 
         Args:
             v_coarse: Cached coarse features, Shape: [B, 49, 384]
             q_embed: Cached text embeddings, Shape: [B, 512]
             images_full: High-res images for CLIP ViT-L, Shape: [B, 3, 336, 336]
+            v_full: Pre-computed full visual features (optional)
             questions: List of question strings (needed for LLaVA text conditioning)
             labels: Optional answer class indices, Shape: [B, 1]
             tau: Gumbel-Sigmoid temperature
@@ -375,47 +396,16 @@ class TCViTokModel(nn.Module):
         Returns:
             outputs: Same format as forward()
         """
-        # Step 1: TPN produces top-k gather indices (using cached features)
-        idx, s_N = self.tpn(
+        return self.forward(
             v_coarse=v_coarse,
             q_embed=q_embed,
-            k=self.k,
+            images_full=images_full,
+            v_full=v_full,
+            questions=questions,
+            labels=labels,
             tau=tau,
-            training=self.training,
+            return_idx=return_idx,
         )
-
-        # Step 2: Extract full visual features (frozen CLIP ViT-L/14)
-        if v_full is None:
-            if self.full_encoder is None:
-                raise RuntimeError(
-                    "forward_cached() requires full_encoder but load_encoders=False. "
-                    "Either initialize with load_encoders=True or pre-compute v_full externally."
-                )
-            v_full = self.full_encoder(images_full)  # [B, 576, 1024]
-
-        # Step 3: GATHER selected tokens
-        v_selected = gather_tokens(v_full, idx)  # [B, k, 1024]
-
-        # Step 4: Forward through LLM backbone
-        if self.use_stub_llm:
-            llm_outputs = self.llm(visual_tokens=v_selected, labels=labels)
-        else:
-            llm_outputs = self._llava_forward(v_selected, questions, labels)
-
-        # Build output dict
-        outputs = {
-            "logits": llm_outputs.get("logits"),
-            "scores": s_N,
-            "selected_tokens": v_selected,
-        }
-
-        if "loss" in llm_outputs:
-            outputs["loss"] = llm_outputs["loss"]
-
-        if return_idx:
-            outputs["idx"] = idx
-
-        return outputs
 
     def _llava_forward(
         self,
