@@ -581,8 +581,12 @@ class TCViTokModel(nn.Module):
             vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
             combined_mask = torch.cat([vis_attn, text_attn], dim=1)        # [B, k+T]
 
-            # Generate answer tokens
-            generated_ids = lm.generate(
+            # Generate answer tokens.
+            # Old transformers arch: _llm is PEFT-wrapped LlamaForCausalLM → has generate().
+            # New transformers arch: _llm is PEFT-wrapped LlamaModel → no generate().
+            # Fallback: use parent LlavaForConditionalGeneration.generate() which always exists.
+            gen_fn = lm if hasattr(lm, "generate") else self.llava
+            generated_ids = gen_fn.generate(
                 inputs_embeds=combined_embeds,
                 attention_mask=combined_mask,
                 max_new_tokens=max_new_tokens,
