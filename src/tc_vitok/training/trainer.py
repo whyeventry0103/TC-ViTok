@@ -447,11 +447,16 @@ class TCViTokTrainer:
         raw_model = self.model.module if self.is_ddp else self.model
 
         # Save only trainable parameters — skips frozen 7B LLM + frozen encoders
+        # Keys use the module hierarchy path, not Python attribute names:
+        #   tpn.*                          — TPN weights
+        #   vqa_head.*                     — VQA classification head
+        #   *lora_*                        — LoRA adapter weights (PEFT naming)
+        #   *multi_modal_projector.*       — mm_projector (old+new LLaVA arch)
         trainable_state = {
             k: v for k, v in raw_model.state_dict().items()
             if any(k.startswith(prefix) for prefix in ("tpn.", "vqa_head."))
-            or "lora_" in k          # LoRA adapter weights (inside _llm)
-            or "_mm_proj." in k      # mm_projector weights
+            or "lora_" in k
+            or "multi_modal_projector." in k
         }
 
         checkpoint = {
