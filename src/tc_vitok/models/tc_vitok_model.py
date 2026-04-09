@@ -546,10 +546,10 @@ class TCViTokModel(nn.Module):
         tokenizer = self.processor.tokenizer
         lm = self._llm
 
-        # Autocast: LLaVA weights are float16; autocast handles dtype casting.
+        # Autocast: model loaded as bfloat16 — use bfloat16 autocast to match.
         _on_cuda = device.type == "cuda" if isinstance(device, torch.device) else "cuda" in str(device)
         amp_ctx = (
-            torch.autocast(device_type="cuda", dtype=torch.float16)
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
             if _on_cuda
             else nullcontext()
         )
@@ -581,11 +581,14 @@ class TCViTokModel(nn.Module):
             vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
             combined_mask = torch.cat([vis_attn, text_attn], dim=1)        # [B, k+T]
 
-            # Generate answer tokens.
-            # Old transformers arch: _llm is PEFT-wrapped LlamaForCausalLM → has generate().
-            # New transformers arch: _llm is PEFT-wrapped LlamaModel → no generate().
-            # Fallback: use parent LlavaForConditionalGeneration.generate() which always exists.
-            gen_fn = lm if hasattr(lm, "generate") else self.llava
+            # Determine which object can truly call generate().
+            # PEFT PeftModel inherits generate() from PreTrainedModel but at runtime
+            # delegates to self.get_base_model().generate() — which fails when the
+            # base model is LlamaModel (new arch, no lm_head, no generate()).
+            # LlamaForCausalLM (old arch) has lm_head → can generate.
+            # LlavaForConditionalGeneration always has generate() via GenerationMixin.
+            base = lm.get_base_model() if hasattr(lm, "get_base_model") else lm
+            gen_fn = lm if hasattr(base, "lm_head") else self.llava
             generated_ids = gen_fn.generate(
                 inputs_embeds=combined_embeds,
                 attention_mask=combined_mask,
