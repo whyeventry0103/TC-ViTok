@@ -608,6 +608,43 @@ class TCViTokModel(nn.Module):
 
         return answers
 
+    def _select_tokens(
+        self,
+        images_coarse: torch.Tensor,
+        images_full: torch.Tensor,
+        questions: list,
+    ) -> torch.Tensor:
+        """Select visual tokens via TPN. Override in subclasses for ablations.
+
+        Returns:
+            v_selected: Gathered visual tokens, Shape: [B, k, 1024]
+        """
+        v_coarse = self.coarse_encoder(images_coarse)
+        q_embed = self.text_encoder(questions)
+        idx, _ = self.tpn(
+            v_coarse=v_coarse, q_embed=q_embed, k=self.k, tau=0.1, training=False,
+        )
+        v_full = self.full_encoder(images_full)
+        return gather_tokens(v_full, idx)
+
+    @torch.no_grad()
+    def predict_class(
+        self,
+        images_coarse: torch.Tensor,
+        images_full: torch.Tensor,
+        questions: list,
+    ) -> torch.Tensor:
+        """Run vqa_head classifier. Returns logits [B, answer_vocab_size].
+
+        This is the correct evaluation path — the model was trained with
+        vqa_head classification loss, not with LM token generation.
+        Use this for VQAv2, GQA, and POPE evaluation.
+        """
+        self.eval()
+        v_selected = self._select_tokens(images_coarse, images_full, questions)
+        outputs = self._llava_forward(v_selected, questions)
+        return outputs["logits"].squeeze(1)  # [B, answer_vocab_size]
+
     @torch.no_grad()
     def generate(
         self,
@@ -616,44 +653,15 @@ class TCViTokModel(nn.Module):
         questions: list[str],
         max_new_tokens: int = 20,
     ) -> list[str]:
-        """Generate answers for VQA inference.
-
-        Args:
-            images_coarse: Low-res images, Shape: [B, 3, 98, 98]
-            images_full: High-res images, Shape: [B, 3, 336, 336]
-            questions: List of question strings
-            max_new_tokens: Maximum tokens to generate
-
-        Returns:
-            answers: List of generated answer strings
-        """
+        """Generative decode (kept for completeness; prefer predict_class for eval)."""
         self.eval()
-
-        # Encode inputs
-        v_coarse = self.coarse_encoder(images_coarse)
-        q_embed = self.text_encoder(questions)
-
-        # TPN token selection (deterministic in eval)
-        idx, s_N = self.tpn(
-            v_coarse=v_coarse,
-            q_embed=q_embed,
-            k=self.k,
-            tau=0.1,
-            training=False,
-        )
-
-        # Extract full features and gather
-        v_full = self.full_encoder(images_full)
-        v_selected = gather_tokens(v_full, idx)
-
+        v_selected = self._select_tokens(images_coarse, images_full, questions)
         if self.use_stub_llm:
-            # StubLLM: argmax of first visual position's logit → class index string
             llm_outputs = self.llm(visual_tokens=v_selected)
             logits = llm_outputs["logits"]
             preds = logits[:, 0, :].argmax(dim=-1)
             return [str(p.item()) for p in preds]
         else:
-            # Real LLaVA: generative decode with conversation template
             return self._llava_generate(v_selected, questions, max_new_tokens)
 
     def get_selection_info(
