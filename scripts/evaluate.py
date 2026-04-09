@@ -225,7 +225,7 @@ def extract_yes_no(raw_answer: str) -> str:
 # Benchmark evaluation functions
 # ─────────────────────────────────────────────────────────────────────────────
 
-def evaluate_vqav2(model, data_root, device, batch_size, max_samples=None):
+def evaluate_vqav2(model, data_root, device, batch_size, max_samples=None, log_interval=200):
     """Evaluate on VQAv2 val2014 split.
 
     Returns VQA-Score (soft accuracy, ×100) as the primary metric.
@@ -251,7 +251,7 @@ def evaluate_vqav2(model, data_root, device, batch_size, max_samples=None):
     scores = []
     per_question = []
 
-    for batch in tqdm(loader, desc="VQAv2 val"):
+    for step, batch in enumerate(tqdm(loader, desc="VQAv2 val")):
         with torch.no_grad():
             preds = model.generate(
                 images_coarse=batch["images_coarse"].to(device),
@@ -268,8 +268,16 @@ def evaluate_vqav2(model, data_root, device, batch_size, max_samples=None):
                 "score": round(score, 4),
             })
 
+        if log_interval > 0 and (step + 1) % log_interval == 0:
+            running = sum(scores) / len(scores) * 100
+            tqdm.write(
+                f"[VQAv2] step {step+1}/{len(loader)} | "
+                f"VQA-Score: {running:.2f}% | "
+                f"samples: {len(scores)}"
+            )
+
     vqa_score_pct = sum(scores) / len(scores) * 100
-    print(f"[VQAv2] VQA-Score: {vqa_score_pct:.2f}%  ({len(scores)} questions)")
+    print(f"[VQAv2] FINAL VQA-Score: {vqa_score_pct:.2f}%  ({len(scores)} questions)")
     return {
         "vqa_score": round(vqa_score_pct, 2),
         "num_samples": len(scores),
@@ -277,7 +285,7 @@ def evaluate_vqav2(model, data_root, device, batch_size, max_samples=None):
     }
 
 
-def evaluate_gqa(model, data_root, device, batch_size, max_samples=None, spatial_eval=True):
+def evaluate_gqa(model, data_root, device, batch_size, max_samples=None, spatial_eval=True, log_interval=200):
     """Evaluate on GQA val_balanced with optional spatial/global split.
 
     Returns overall exact-match accuracy and spatial vs. global breakdown.
@@ -303,7 +311,7 @@ def evaluate_gqa(model, data_root, device, batch_size, max_samples=None, spatial
     global_correct = []
     per_question = []
 
-    for batch in tqdm(loader, desc="GQA val_balanced"):
+    for step, batch in enumerate(tqdm(loader, desc="GQA val_balanced")):
         with torch.no_grad():
             preds = model.generate(
                 images_coarse=batch["images_coarse"].to(device),
@@ -337,6 +345,18 @@ def evaluate_gqa(model, data_root, device, batch_size, max_samples=None, spatial
                 "is_spatial": is_spatial,
             })
 
+        if log_interval > 0 and (step + 1) % log_interval == 0:
+            overall_run = sum(all_correct) / len(all_correct) * 100
+            sp_str = ""
+            if spatial_correct:
+                sp_acc = sum(spatial_correct) / len(spatial_correct) * 100
+                gl_acc = sum(global_correct) / len(global_correct) * 100 if global_correct else 0.0
+                sp_str = f" | Spatial: {sp_acc:.2f}% ({len(spatial_correct)}) | Global: {gl_acc:.2f}% ({len(global_correct)})"
+            tqdm.write(
+                f"[GQA] step {step+1}/{len(loader)} | "
+                f"Overall: {overall_run:.2f}% | samples: {len(all_correct)}{sp_str}"
+            )
+
     overall_acc = sum(all_correct) / len(all_correct) * 100
     result = {
         "overall_accuracy": round(overall_acc, 2),
@@ -349,17 +369,17 @@ def evaluate_gqa(model, data_root, device, batch_size, max_samples=None, spatial
         result["global_accuracy"] = round(global_acc, 2)
         result["spatial_count"] = len(spatial_correct)
         result["global_count"] = len(global_correct)
-        print(f"[GQA] Overall: {overall_acc:.2f}% | "
+        print(f"[GQA] FINAL Overall: {overall_acc:.2f}% | "
               f"Spatial: {spatial_acc:.2f}% ({len(spatial_correct)}) | "
               f"Global: {global_acc:.2f}% ({len(global_correct)})")
     else:
-        print(f"[GQA] Overall accuracy: {overall_acc:.2f}%  ({len(all_correct)} samples)")
+        print(f"[GQA] FINAL Overall accuracy: {overall_acc:.2f}%  ({len(all_correct)} samples)")
 
     result["per_question"] = per_question
     return result
 
 
-def evaluate_pope(model, data_root, device, batch_size, max_samples=None):
+def evaluate_pope(model, data_root, device, batch_size, max_samples=None, log_interval=200):
     """Evaluate on all three POPE variants (popular, random, adversarial).
 
     POPE images are COCO val2014 images — same directory as VQAv2 val.
@@ -397,7 +417,7 @@ def evaluate_pope(model, data_root, device, batch_size, max_samples=None):
         all_preds = []
         all_gt = []
 
-        for batch in tqdm(loader, desc=f"POPE/{variant}"):
+        for step, batch in enumerate(tqdm(loader, desc=f"POPE/{variant}")):
             with torch.no_grad():
                 raw_preds = model.generate(
                     images_coarse=batch["images_coarse"].to(device),
@@ -413,6 +433,16 @@ def evaluate_pope(model, data_root, device, batch_size, max_samples=None):
             ]
             all_preds.extend(preds)
             all_gt.extend(gt)
+
+            if log_interval > 0 and (step + 1) % log_interval == 0:
+                running = pope_f1(all_preds, all_gt)
+                tqdm.write(
+                    f"[POPE/{variant}] step {step+1}/{len(loader)} | "
+                    f"F1: {running['f1']*100:.2f}% | "
+                    f"Prec: {running['precision']*100:.2f}% | "
+                    f"Rec: {running['recall']*100:.2f}% | "
+                    f"samples: {len(all_preds)}"
+                )
 
         metrics = pope_f1(all_preds, all_gt)
         results[variant] = {
@@ -460,6 +490,8 @@ def parse_args():
                         help="Cap samples per benchmark (for quick smoke tests)")
     parser.add_argument("--spatial-eval", action="store_true",
                         help="Enable spatial/global split on GQA")
+    parser.add_argument("--log-interval", type=int, default=200,
+                        help="Print running accuracy every N batches (default: 200)")
     parser.add_argument("--output", default="runs/eval_results/results.json",
                         help="Output JSON path")
     parser.add_argument("--llava-model", default="llava-hf/llava-1.5-7b-hf",
@@ -525,17 +557,20 @@ def main():
     if "vqav2" in args.benchmarks:
         results["benchmarks"]["vqav2"] = evaluate_vqav2(
             model, data_root, device, args.batch_size, args.max_samples,
+            log_interval=args.log_interval,
         )
 
     if "gqa" in args.benchmarks:
         results["benchmarks"]["gqa"] = evaluate_gqa(
             model, data_root, device, args.batch_size,
             args.max_samples, spatial_eval=args.spatial_eval,
+            log_interval=args.log_interval,
         )
 
     if "pope" in args.benchmarks:
         results["benchmarks"]["pope"] = evaluate_pope(
             model, data_root, device, args.batch_size, args.max_samples,
+            log_interval=args.log_interval,
         )
 
     results["eval_time_minutes"] = round((time.time() - t_start) / 60, 1)
