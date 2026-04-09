@@ -434,15 +434,30 @@ class TCViTokTrainer:
     def save_checkpoint(self, is_best: bool = False):
         """Save model checkpoint.
 
+        Only saves trainable parameters (TPN + LoRA adapters + vqa_head +
+        mm_projector) rather than the full model state dict. This reduces
+        checkpoint size from ~16GB to ~1-2GB by skipping the frozen 7B LLM
+        backbone and frozen encoders. load_checkpoint uses strict=False so
+        the missing frozen weights are simply kept from the pretrained model.
+
         Args:
             is_best: Whether this is the best checkpoint so far
         """
         # Unwrap DDP so checkpoint is always a plain state dict
         raw_model = self.model.module if self.is_ddp else self.model
+
+        # Save only trainable parameters — skips frozen 7B LLM + frozen encoders
+        trainable_state = {
+            k: v for k, v in raw_model.state_dict().items()
+            if any(k.startswith(prefix) for prefix in ("tpn.", "vqa_head."))
+            or "lora_" in k          # LoRA adapter weights (inside _llm)
+            or "_mm_proj." in k      # mm_projector weights
+        }
+
         checkpoint = {
             "global_step": self.global_step,
             "epoch": self.epoch,
-            "model_state_dict": raw_model.state_dict(),
+            "model_state_dict": trainable_state,
             "optimizer_state_dict": self.optimizer.state_dict(),
             "config": self.config,
         }
