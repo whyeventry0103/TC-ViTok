@@ -42,10 +42,11 @@ def vqa_loss(
         min_len = min(logits.shape[1], labels.shape[1])
         logits = logits[:, :min_len].contiguous()
         labels = labels[:, :min_len].contiguous()
-    # Clamp logits to prevent BF16 overflow → NaN in cross-entropy.
-    # The VQA head is randomly initialized (std=0.02) and untrained at Phase 1
-    # start — early logits can produce extreme values that overflow in BF16.
-    logits = logits.float().clamp(-100, 100)
+    # nan_to_num + clamp: handles both NaN (from BF16/FP16 attention overflow)
+    # and ±inf (from BF16 magnitude overflow). torch.clamp alone does NOT
+    # remove NaN — clamp(nan, -100, 100) = nan. nan_to_num replaces nan→0,
+    # +inf→100, -inf→-100 before CE loss.
+    logits = torch.nan_to_num(logits.float(), nan=0.0, posinf=100.0, neginf=-100.0)
     logits_flat = logits.view(-1, logits.size(-1))
     labels_flat = labels.view(-1)
     return F.cross_entropy(logits_flat, labels_flat, ignore_index=ignore_index)

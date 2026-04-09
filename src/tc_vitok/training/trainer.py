@@ -266,6 +266,19 @@ class TCViTokTrainer:
             lambda_entropy=self.lambda_entropy,
         )
 
+        # NaN/Inf guard: skip backward entirely to prevent weight corruption.
+        # A single NaN backward pass applies NaN gradients to TPN/LoRA weights,
+        # permanently corrupting them for all subsequent steps.
+        if torch.isnan(loss_dict["total"]) or torch.isinf(loss_dict["total"]):
+            if self.is_main:
+                tqdm.write(f"[Step {self.global_step}] WARNING: NaN/Inf loss detected — skipping backward")
+            self.optimizer.zero_grad()
+            self.global_step += 1
+            loss_dict["tau"] = tau
+            loss_dict["lambda"] = lambda_sparsity
+            return {k: v.detach() if isinstance(v, torch.Tensor) else v
+                    for k, v in loss_dict.items()}
+
         # Backpropagation with gradient accumulation
         loss = loss_dict["total"] / self.grad_accum_steps
         loss.backward()

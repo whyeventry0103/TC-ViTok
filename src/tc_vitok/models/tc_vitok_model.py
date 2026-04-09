@@ -215,7 +215,7 @@ class TCViTokModel(nn.Module):
         # tensors to GPU. This caused GPU 1 to have only 727MiB while GPU 0 had 16GB.
         self.llava = LlavaForConditionalGeneration.from_pretrained(
             model_name,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,   # match training BF16 autocast (float16 caused NaN via attention overflow)
             low_cpu_mem_usage=True,
         )
         self.processor = LlavaProcessor.from_pretrained(model_name)
