@@ -501,7 +501,7 @@ class TCViTokModel(nn.Module):
         # on the visual representation rather than the question text
         last_hidden = lm_outputs.hidden_states[-1]   # [B, k+T, H] (or [B, k, H])
         visual_hidden = last_hidden[:, :k, :]        # [B, k, H]
-        pooled = visual_hidden.mean(dim=1)           # [B, H]
+        pooled = visual_hidden.mean(dim=1).float()    # [B, H] — float32 for vqa_head
 
         # Step 5: VQA classification head: H → answer_vocab
         logits = self.vqa_head(pooled).unsqueeze(1)  # [B, 1, answer_vocab]
