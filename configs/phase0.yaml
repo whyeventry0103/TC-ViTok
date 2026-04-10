@@ -22,11 +22,13 @@ training:
     - tpn
 
   # Phase 0 regularization.
-  # lambda_max = 0.0: instance normalization in TPN makes L1 penalty meaningless.
-  # With per-sample zero-mean unit-std scores, mean(|s_N|) = sqrt(2/π) ≈ 0.798
-  # always (a mathematical constant) — L1 gradient is constant, provides no signal.
-  # Scores cannot explode (norm is fixed) or be crushed (relative ordering preserved).
-  lambda_max: 0.0
+  lambda_max: 0.0        # L1 is meaningless with instance norm (mean|s_N| ≈ 0.798 always)
+  # lambda_entropy: increased 0.001 → 0.01 so entropy gradient via mask_ste competes
+  # with the weak frozen-LLM VQA signal and forces spatial diversity from the start.
+  lambda_entropy: 0.01
+  # lambda_diversity: within-batch diversity pushes TPN to produce different selections
+  # for different questions even during Phase 0 warmup.
+  lambda_diversity: 0.02
   lambda_entropy: 0.001
   T_warmup: 1000
 

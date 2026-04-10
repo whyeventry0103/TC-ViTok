@@ -158,53 +158,91 @@ def compute_total_loss(
     idx: torch.Tensor,
     k: int,
     N: int = 576,
-    lambda_sparsity: float = 0.01,
+    lambda_sparsity: float = 0.0,
     lambda_entropy: float = 0.01,
+    lambda_diversity: float = 0.0,
+    mask_ste: Optional[torch.Tensor] = None,
+    q_embed: Optional[torch.Tensor] = None,
+    gamma: float = 0.5,
 ) -> dict[str, torch.Tensor]:
-    """Compute total training loss (paper Eq. total_loss).
+    """Compute total training loss with entropy + diversity regularization.
 
     Total loss:
-        L(t) = L_VQA + lambda(t) * ||s_N||_1/N + mu * L_ent
+        L = L_VQA + lambda * ||s_N||_1/N + mu * L_ent + nu * L_div
 
-    The paper defines exactly 3 loss terms. Diversity loss (Eq. div_loss) is
-    a separate optional regularizer for query-ignoring mitigation and requires
-    paired question data from PairedVQADataset; it is NOT included here.
+    Entropy via mask_ste (NOT idx):
+        Using mask_ste (binary forward, m_soft STE backward) provides gradient
+        to ALL N token scores, including the N-k unselected tokens. This is the
+        key escape route from static crop: unselected tokens receive entropy
+        gradient d(H)/d(s_N[b,i]) ∝ m_soft[b,i]*(1-m_soft[b,i])/tau, which
+        pushes tokens that are never selected to have higher scores, giving them
+        a chance to displace the current static selection.
+        Fallback to entropy_from_idx (non-differentiable) when mask_ste is None.
 
-    Entropy is computed from gather indices (idx), not from a binary mask.
-    This matches the gather-based (Option B) approach throughout.
+    Diversity via within-batch pairs:
+        Pairs adjacent samples in the batch. Penalizes TPN when two samples with
+        different query embeddings produce similar selection masks (mask cosine
+        sim > gamma). Forces TPN to develop query-conditioned routing.
 
     Args:
-        logits: Language model logits (None if pipeline stub)
-        labels: Ground truth token IDs (None if pipeline stub)
-        scores: Raw TPN importance scores, Shape: [B, N]
-        idx: Top-k gather indices from TPN, Shape: [B, k]
+        logits: Language model logits [B, seq_len, vocab_size] (None → VQA=0)
+        labels: Ground truth token IDs [B, seq_len] (None → VQA=0)
+        scores: Instance-normalized TPN scores [B, N]
+        idx: Top-k gather indices [B, k]
         k: Token budget
-        N: Total number of spatial positions (576)
-        lambda_sparsity: Weight for L1 sparsity (paper: lambda)
-        lambda_entropy: Weight for entropy (paper: |mu|)
+        N: Total spatial positions (576)
+        lambda_sparsity: L1 sparsity weight (0.0 = disabled; instance norm makes it ~constant)
+        lambda_entropy: Entropy weight — should be O(0.01-0.05) to compete with VQA
+        lambda_diversity: Within-batch diversity weight (0.0 = disabled)
+        mask_ste: STE selection mask [B, N] — binary fwd, m_soft gradient bwd (optional)
+        q_embed: CLIP text embeddings [B, d_q] for diversity loss (optional)
+        gamma: Mask similarity threshold for diversity loss (default 0.5)
 
     Returns:
-        loss_dict: Dictionary with all loss components
+        loss_dict: {total, vqa, sparsity, entropy, diversity}
     """
+    from ..models.masking import compute_spatial_entropy, compute_diversity_loss
+
     # Main VQA loss (or zero if no logits available)
     if logits is not None and labels is not None:
         loss_vqa = vqa_loss(logits, labels)
     else:
         loss_vqa = torch.tensor(0.0, device=scores.device, requires_grad=True)
 
-    # L1 sparsity on RAW SCORES (not mask)
+    # L1 sparsity on instance-normalized scores (constant ≈ 0.798 due to norm)
     loss_sparsity = l1_sparsity_loss(scores)
 
-    # Entropy regularization from gather indices
-    # Returns positive entropy; we negate to maximize (minimizing -H = maximizing H)
-    ent = entropy_from_idx(idx, N=N)
-    loss_ent = -ent
+    # Entropy: use mask_ste for gradient to ALL N tokens when available.
+    # mask_ste routes gradient via m_soft STE to both selected AND unselected tokens.
+    # Without this, 432 unselected tokens have zero VQA gradient → trapped in static crop.
+    if mask_ste is not None and mask_ste.requires_grad:
+        ent = compute_spatial_entropy(mask_ste)   # differentiable: grad flows to all N scores
+    else:
+        ent = entropy_from_idx(idx, N=N)           # fallback for eval (non-differentiable)
+    loss_ent = -ent  # negate so minimizing total loss = maximizing entropy
 
-    # Total loss: 3 terms per paper Eq. total_loss
+    # Within-batch diversity loss: penalize query-agnostic token selection.
+    # Pairs adjacent samples in the batch. If two samples with different queries
+    # produce similar masks (sim > gamma), the loss fires. Gradient flows via mask_ste
+    # to TPN scores, pushing TPN to produce different masks for different queries.
+    loss_div = scores.new_zeros(())  # scalar zero, no gradient
+    if (mask_ste is not None and q_embed is not None
+            and lambda_diversity > 0 and mask_ste.shape[0] >= 2):
+        B = mask_ste.shape[0]
+        half = B // 2
+        loss_div = compute_diversity_loss(
+            mask_ste[:half],
+            mask_ste[half : 2 * half],
+            q_embed[:half],
+            q_embed[half : 2 * half],
+            gamma=gamma,
+        )
+
     loss_total = (
         loss_vqa
         + lambda_sparsity * loss_sparsity
         + lambda_entropy * loss_ent
+        + lambda_diversity * loss_div
     )
 
     return {
@@ -212,4 +250,5 @@ def compute_total_loss(
         "vqa": loss_vqa.detach(),
         "sparsity": loss_sparsity.detach(),
         "entropy": loss_ent.detach(),
+        "diversity": loss_div.detach() if isinstance(loss_div, torch.Tensor) else torch.tensor(0.0),
     }

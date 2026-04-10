@@ -25,12 +25,21 @@ training:
     - vision_projector
 
   # Phase 1 regularization.
-  # lambda_max = 0.0: instance normalization in TPN makes L1 penalty meaningless
-  # (mean(|s_N|) = sqrt(2/π) ≈ 0.798 always — a mathematical constant, not trainable).
-  # The topk operator already enforces exactly k tokens; L1 is doubly redundant.
-  lambda_max: 0.0
+  lambda_max: 0.0        # L1 is meaningless with instance norm (mean|s_N| ≈ 0.798 always)
   T_warmup: 5000
-  lambda_entropy: 0.001
+  # lambda_entropy: 0.001 was too small — contributed only -0.006 to total loss vs VQA ≈ 0.3.
+  # At 0.02, entropy contributes ~-0.11, competing with VQA to force spatial diversity.
+  # The entropy gradient via mask_ste (not idx) now reaches ALL 576 tokens, including
+  # unselected ones — this is the primary escape mechanism from static crop.
+  lambda_entropy: 0.02
+  # lambda_diversity: within-batch diversity loss. Pairs adjacent batch samples; fires when
+  # two samples with different queries produce similar token selections (mask_sim > gamma=0.5).
+  # Directly penalizes query-agnostic spatial bias. 0.1 ≈ 33% of typical VQA loss.
+  lambda_diversity: 0.1
+  # lora_warmfreeze_steps: LoRA gradients are zeroed for the first N steps. Forces VQA loss
+  # to be reduced through TPN routing alone, preventing LoRA from compensating for poor
+  # token selection before TPN develops query conditioning. After N steps, LoRA unfreezes.
+  lora_warmfreeze_steps: 3000
 
   # Per-group learning rates.
   # lr_tpn increased 1e-3 → 3e-3: TPN starts from near-zero Phase 0 scores;

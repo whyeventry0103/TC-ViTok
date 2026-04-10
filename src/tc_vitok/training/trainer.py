@@ -78,6 +78,11 @@ class TCViTokTrainer:
 
         # Regularization weights
         self.lambda_entropy = config["training"]["lambda_entropy"]
+        self.lambda_diversity = config["training"].get("lambda_diversity", 0.0)
+
+        # LoRA warm-freeze: keep LoRA gradients zeroed for the first N steps so TPN
+        # has time to learn query-conditioned routing before LoRA compensates.
+        self.lora_warmfreeze_steps = config["training"].get("lora_warmfreeze_steps", 0)
 
         # Logging
         self.log_interval = config["logging"]["log_interval"]
@@ -251,9 +256,9 @@ class TCViTokTrainer:
 
             outputs = self.model(**fwd_kwargs)
 
-        # Compute losses (scores for L1 sparsity, idx for entropy)
-        # VQA loss is now included in Phase 0: the tau-independent STE correction
-        # routes VQA gradient to TPN through s_N (tau-independent, always active).
+        # Compute losses.
+        # mask_ste: routes entropy gradient to ALL N tokens (not just selected k).
+        # q_embed: enables within-batch diversity loss.
         loss_dict = compute_total_loss(
             logits=outputs.get("logits"),
             labels=outputs.get("seq_labels"),
@@ -262,6 +267,9 @@ class TCViTokTrainer:
             k=raw_model.k,
             lambda_sparsity=lambda_sparsity,
             lambda_entropy=self.lambda_entropy,
+            lambda_diversity=self.lambda_diversity,
+            mask_ste=outputs.get("mask_ste"),
+            q_embed=outputs.get("q_embed"),
         )
 
         # NaN/Inf guard: skip backward entirely to prevent weight corruption.
@@ -287,6 +295,14 @@ class TCViTokTrainer:
                 self.model.parameters(),
                 self.max_grad_norm,
             )
+
+            # LoRA warm-freeze: zero LoRA gradients for the first N steps so TPN
+            # receives strong directional signal from entropy+diversity losses before
+            # LoRA can compensate by memorizing a fixed-crop VQA mapping.
+            if self.lora_warmfreeze_steps > 0 and self.global_step < self.lora_warmfreeze_steps:
+                for name, param in raw_model.named_parameters():
+                    if "lora_" in name and param.grad is not None:
+                        param.grad.zero_()
 
             # Optimizer step
             self.optimizer.step()
@@ -375,6 +391,8 @@ class TCViTokTrainer:
                         return_idx=True,
                     )
 
+            # No mask_ste at eval time (training=False → TPN returns None).
+            # Entropy falls back to entropy_from_idx; diversity loss = 0.
             loss_dict = compute_total_loss(
                 logits=outputs.get("logits"),
                 labels=outputs.get("seq_labels"),
@@ -383,6 +401,9 @@ class TCViTokTrainer:
                 k=raw_model.k,
                 lambda_sparsity=lambda_sparsity,
                 lambda_entropy=self.lambda_entropy,
+                lambda_diversity=0.0,
+                mask_ste=None,
+                q_embed=None,
             )
 
             total_loss += loss_dict["total"].item()

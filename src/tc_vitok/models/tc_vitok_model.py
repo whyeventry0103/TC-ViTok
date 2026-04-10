@@ -378,6 +378,15 @@ class TCViTokModel(nn.Module):
         if return_idx:
             outputs["idx"] = idx
 
+        # Return mask_ste and q_embed for entropy + diversity loss gradient routing.
+        # mask_ste (binary forward, m_soft backward) provides gradient to ALL N tokens,
+        # not just the k selected ones — this is the escape route from static crop.
+        # q_embed enables within-batch diversity loss to penalize query-agnostic selection.
+        if self.training and mask_ste is not None:
+            outputs["mask_ste"] = mask_ste
+        if q_embed is not None:
+            outputs["q_embed"] = q_embed.detach()  # frozen CLIP encoder, no gradient needed
+
         return outputs
 
     def forward_cached(
