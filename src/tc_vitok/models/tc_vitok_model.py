@@ -343,13 +343,21 @@ class TCViTokModel(nn.Module):
         # Step 3b: STE gradient routing — connect VQA loss to TPN parameters.
         # torch.gather is NOT differentiable w.r.t. idx, so VQA loss gradient
         # cannot reach TPN through the gather operation alone.
-        # Fix: multiply v_selected by mask_ste values at the selected positions.
-        #   - Forward: mask_ste[b, idx[b,j]] = m_hard = 1.0  → no-op (v_selected unchanged)
-        #   - Backward: gradient flows through m_soft → TPN scores
-        # Only applied when mask_ste is available (training, real LLaVA, not stub).
-        if self.training and mask_ste is not None and not self.use_stub_llm:
-            mask_at_selected = torch.gather(mask_ste, dim=1, index=idx)  # [B, k]
-            v_selected = v_selected * mask_at_selected.unsqueeze(-1)     # [B, k, D]
+        #
+        # PREVIOUS APPROACH (broken): multiply by mask_ste = m_hard + (m_soft - m_soft.detach())
+        #   gradient ∝ d(m_soft)/d(score) = m_soft*(1-m_soft)/tau
+        #   → as tau anneals 1.0→0.1, m_soft saturates to 0/1, gradient → 0 (VANISHES!)
+        #   This killed TPN learning by step ~15k.
+        #
+        # CURRENT APPROACH (tau-independent additive STE):
+        #   correction = s_N_at_selected - s_N_at_selected.detach()  [= 0 in forward]
+        #   v_selected_out = v_selected * (1 + correction)           [= v_selected in forward]
+        #   gradient: d(loss)/d(s_N_i) = Σ_d g_v[b,j,d] * v_selected[b,j,d]  [dot product]
+        #   This is tau-independent and remains active throughout training.
+        if self.training and not self.use_stub_llm:
+            scores_at_selected = torch.gather(s_N, dim=1, index=idx)      # [B, k]
+            correction = scores_at_selected - scores_at_selected.detach() # [B, k], = 0 fwd
+            v_selected = v_selected * (1.0 + correction.unsqueeze(-1))    # [B, k, D], identity fwd
 
         # Step 4: Forward through LLM backbone
         if self.use_stub_llm:

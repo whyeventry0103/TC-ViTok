@@ -24,18 +24,21 @@ training:
     - lora
     - vision_projector
 
-  # Phase 1 regularization with warmup.
-  # lambda_max reduced from 0.1 → 0.01: the 0.1 value crushed all TPN raw scores
-  # to ~0.0001 (sparsity penalty dominated VQA gradient). At inference (no gumbel
-  # noise), scores.topk(144) always returned indices 0..143 (static top-left crop)
-  # → val entropy = log(144) = 4.97 instead of ~5.9. At 0.01, scores can grow to
-  # ~0.01, producing meaningful query-conditioned relative ordering at inference.
-  lambda_max: 0.01
+  # Phase 1 regularization.
+  # lambda_max = 0.0: no sparsity penalty on TPN scores.
+  # The L1 sparsity loss crushed scores to 0 even at lambda=0.01; the topk
+  # operator already enforces exactly k tokens — no L1 penalty is needed for
+  # that. Without lambda, TPN scores are driven purely by VQA gradient (which
+  # is the correct objective). The sparsity metric is still logged for monitoring.
+  # lambda_entropy = 0.001: light diversity regularizer retained for monitoring.
+  lambda_max: 0.0
   T_warmup: 5000
-  lambda_entropy: 0.01
+  lambda_entropy: 0.001
 
-  # Paper: per-group learning rates
-  lr_tpn: 1e-3
+  # Per-group learning rates.
+  # lr_tpn increased 1e-3 → 3e-3: TPN starts from near-zero Phase 0 scores;
+  # higher LR accelerates recovery. LoRA/MLP unchanged (already adapted).
+  lr_tpn: 3e-3
   lr_lora: 2e-4
   lr_mlp: 5e-4
 
