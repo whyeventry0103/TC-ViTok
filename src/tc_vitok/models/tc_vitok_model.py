@@ -494,11 +494,17 @@ class TCViTokModel(nn.Module):
                     # Full sequence: [visual_prefix | question | answer]
                     seq_embeds = torch.cat([v_projected[i], q_embeds, a_embeds], dim=0)
 
-                    # Labels: -100 (ignore) for visual+question; answer token IDs for answer
+                    # Labels: -100 (ignore) for visual + all-but-last-question positions.
+                    # logits[i] predicts the token AFTER position i (causal LM), so:
+                    #   logits[k+T_q-1] = f([visual, full_question]) → should predict a_ids[0]
+                    # We shift answer labels one position LEFT vs the naive placement:
+                    #   ignore length = k + T_q - 1  (NOT k + T_q)
+                    #   trailing -100 pads to match seq_embeds length
                     ignore = torch.full(
-                        (k + len(q_ids),), -100, device=device, dtype=torch.long
+                        (k + len(q_ids) - 1,), -100, device=device, dtype=torch.long
                     )
-                    seq_labels = torch.cat([ignore, a_ids])  # same length as seq_embeds
+                    trailing = torch.tensor([-100], device=device, dtype=torch.long)
+                    seq_labels = torch.cat([ignore, a_ids, trailing])  # same length as seq_embeds
 
                     attn_mask = torch.ones(len(seq_embeds), device=device, dtype=torch.long)
 
