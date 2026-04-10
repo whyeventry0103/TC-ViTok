@@ -795,3 +795,150 @@ bash scripts/run_eval.sh runs/phase1_gen/best.ckpt
 ```
 
 Expected evaluation time: ~3-4 hours total (VQAv2 + GQA + POPE × 3 variants).
+
+---
+
+## Part 8 — Static Crop & Gradient Flow Fixes (Session 6: Apr 10 2026)
+
+### Problem: TPN Collapses to Static Crop Despite BUG-29–32 Fixes
+
+After applying BUG-29/30/31/32, val entropy was -4.97 (= log(144) = static crop). Training appeared healthy (train entropy -5.9), but val proved TPN selected the same 144 tokens for every image at inference. Five root causes were found and fixed.
+
+### BUG-33: Dead VQA Loss in Phase 0
+
+**Symptom:** Phase 0 training shows VQA = 0.0000 every step. TPN receives zero gradient; entropy and diversity losses fire but TPN never learns query conditioning.
+
+**Root cause:** `trainer.py` had:
+```python
+skip_vqa = (self.phase == 0)
+if skip_vqa:
+    logits = None
+```
+This set logits=None for all Phase 0 steps, silently zeroing the VQA loss. The original intent was to avoid VQA cost during TPN warmup, but it prevented TPN from learning query conditioning entirely.
+
+**Fix:** Removed the `skip_vqa` condition. Phase 0 now computes full VQA loss. TPN receives query-conditioning gradient from step 0.
+
+| Bug | File | Fix |
+|---|---|---|
+| BUG-33 | `trainer.py` | Remove `skip_vqa = (self.phase == 0)` block entirely |
+
+### BUG-34: LLM `torch.no_grad()` Blocks STE Gradient
+
+**Symptom:** After enabling VQA in Phase 0, VQA loss fires but TPN gradient is still zero. Tau-independent STE correction is computed but VQA loss gradient never reaches TPN.
+
+**Root cause:** `tc_vitok_model.py` had:
+```python
+_lm_ctx = torch.no_grad() if _lm_frozen else nullcontext()
+```
+During Phase 0, LLM params are frozen → `_lm_frozen=True` → entire LLM forward runs inside `no_grad()`. This severs the gradient tape from logits back through the LLM, through `v_selected`, and back to TPN scores — even though TPN params are NOT frozen and the tau-independent STE correction is non-zero.
+
+**Fix:**
+```python
+_lm_ctx = torch.no_grad() if (_lm_frozen and not self.training) else nullcontext()
+```
+During training, gradient always flows through LLM regardless of frozen status. The `no_grad()` optimization only applies at eval/inference.
+
+| Bug | File | Fix |
+|---|---|---|
+| BUG-34 | `tc_vitok_model.py:_run_llm` | `no_grad` only when `_lm_frozen AND not self.training` |
+
+### BUG-35: TPN Score Explosion → tanh Saturation → Instance Norm
+
+**Symptom:** With `lambda_max=0.0` (no L1 penalty) and VQA gradient flowing through TPN, Adam pushes TPN scores to O(93) in ~1700 steps. Tried adding `tanh` activation to bound scores — it saturated at ±1 in ~1000 steps with gradient ≈ 0.001 (vanishing gradient in tanh tail).
+
+**Root cause chain:**
+1. Instance norm missing → unbounded scores → Adam overshoots
+2. tanh fix → saturated at ±1 → gradient dead
+3. Both approaches failed to give TPN meaningful gradient
+
+**Fix: Instance normalization on TPN output:**
+```python
+s_N = s_upsampled.view(B, -1)           # (B, N)
+s_N_mean = s_N.mean(dim=-1, keepdim=True)
+s_N_std = s_N.std(dim=-1, keepdim=True).clamp(min=1e-8)
+s_N = (s_N - s_N_mean) / s_N_std        # zero-mean, unit-std per sample
+```
+- No saturation possible (scores always have std=1)
+- E[|s_N|] ≈ 0.798 (constant for N(0,1)) → `lambda_sparsity` has no effect → set to 0.0
+- Gumbel noise diversifies topk selection at training; deterministic at inference
+
+| Bug | File | Fix |
+|---|---|---|
+| BUG-35 | `tpn.py:forward` | Replace tanh with instance norm (mean=0, std=1 per sample) after bilinear upsample |
+
+### BUG-36: Diversity Loss Dead — mask_ste Gumbel Noise Kills Cosine Similarity
+
+**Symptom:** `diversity: 0.0000` every step despite `lambda_diversity=0.1`. Loss never fires.
+
+**Root cause:** The original diversity loss used `mask_ste` (gumbel-noisy binary masks):
+```python
+mask_sim = F.cosine_similarity(mask_ste[:half], mask_ste[half:], dim=-1)
+loss_div = (mask_sim - gamma).clamp(min=0) * (1 - q_sim)
+```
+Gumbel-sigmoid binary masks for different samples are random (different noise realizations) → `cosine_sim ≈ 0` by chance → `clamp(0 - 0.5, min=0) = 0` always. The `gamma=0.5` threshold was never crossed.
+
+**Fix: Score-based diversity (no threshold):**
+```python
+score_sim = F.cosine_similarity(scores[:half].float(), scores[half:2*half].float(), dim=-1)
+q_sim = F.cosine_similarity(q_embed[:half].float(), q_embed[half:2*half].float(), dim=-1)
+loss_div = (score_sim * (1.0 - q_sim.detach())).mean()
+```
+- Raw `s_N` (instance-normalized) reveals true spatial bias — static-crop TPN produces similar score peaks for all samples → `score_sim ≈ 1.0` → loss fires
+- No gamma/clamp → always differentiable, gradient active every step
+- Negative diversity = anticorrelated score peaks per query = **good** (TPN routing per query)
+
+| Bug | File | Fix |
+|---|---|---|
+| BUG-36 | `losses.py:compute_total_loss` | Switch from mask_ste cosine+clamp to raw score cosine, no threshold |
+
+### BUG-37: Phase 0 OOM When LLM Activations Stored for STE
+
+**Symptom:** Phase 0 OOMs at `batch_size=16`. Removing `no_grad()` from frozen LLM (BUG-34 fix) requires storing all intermediate LLM activations for the backward pass — consuming ~30GB/GPU extra.
+
+**Fix:** Reduce batch size, increase grad accumulation to maintain effective batch size:
+
+| Config | Old | New | Effective batch |
+|---|---|---|---|
+| `batch_size` | 16 | 4 | unchanged |
+| `grad_accum_steps` | 4 | 16 | 4 × 16 × 2 GPUs = 128 ✓ |
+
+Applied to both `configs/phase0.yaml` and `configs/phase1.yaml`.
+
+| Bug | File | Fix |
+|---|---|---|
+| BUG-37 | `configs/phase0.yaml`, `configs/phase1.yaml` | batch_size 16→4, grad_accum 4→16 |
+
+### Additional Phase 1 Config Changes (this session)
+
+| Parameter | Old | New | Reason |
+|---|---|---|---|
+| `lambda_max` | 0.01 | 0.0 | Instance norm makes E[|s_N|]≈0.798 constant; L1 has zero gradient |
+| `lambda_entropy` | 0.001 | 0.02 | 0.001 contributed only -0.006 to total loss vs VQA ≈ 0.3; needs to compete |
+| `lambda_diversity` | 0.0 | 0.1 | Score-based diversity now active; ≈33% of typical VQA loss |
+| `lora_warmfreeze_steps` | — | 3000 | Zero LoRA grads for first 3k steps; forces VQA to optimize TPN before LoRA compensates |
+| `lr_tpn` | 1e-3 | 3e-3 | TPN starts near-zero after instance norm; higher LR accelerates recovery |
+| `eval_interval` (Phase 0) | 999999 | 2500 | VQA now active; val/entropy meaningful; monitor for static crop early |
+| `max_val_batches` (Phase 0) | — | 50 | Limit Phase 0 val to ~60s |
+
+### Phase 1 v3 Training Results (current run)
+
+| Step | val/loss | val/vqa | val/entropy | Notes |
+|---|---|---|---|---|
+| 5000 | 0.3374 | 0.4411 | -5.1851 | Entropy healthy (static crop = -4.97) |
+| 10000 | 0.3030 | 0.4053 | -5.1183 | Slight regression |
+| 15000 | 0.3003 | 0.4032 | -5.1412 | Recovered — oscillating, not collapsing |
+| 20000 | 0.2591 | 0.3617 | -5.1334 | Stable; val loss improving 23% |
+
+Val entropy stable at -5.11 to -5.19 (not heading toward -4.97). Val VQA improving each checkpoint. Training at 2.21 it/s, ~3h45m remaining from step 20k.
+
+### After Phase 1 v3 Completes
+
+```bash
+tmux new -s eval
+bash scripts/run_eval.sh runs/phase1_v3/phase1/best.ckpt
+```
+
+Monitor progress:
+```bash
+cat $(ls -t ~/TC-ViTok/logs/train_*.log | head -1) | tr '\r' '\n' | grep "^\[Step.*val"
+```

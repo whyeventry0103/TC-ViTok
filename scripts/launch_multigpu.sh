@@ -79,10 +79,14 @@ LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs}"
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/train_$(date +%Y%m%d_%H%M%S).log"
 echo "Logging to: ${LOG_FILE}"
+echo "Monitor with: tail -f ${LOG_FILE}"
+echo "Val only:     grep '\\[Step.*val' ${LOG_FILE}"
 
 # ── Launch ───────────────────────────────────────────────────────────────────
+# Redirect to file only (not tee) — tee floods tmux scrollback buffer over SSH,
+# causing extreme terminal slowness from tqdm \r progress bar updates.
 torchrun \
     --standalone \
     --nproc_per_node="${NUM_GPUS}" \
     "${REPO_ROOT}/scripts/train.py" \
-    "$@" 2>&1 | tee "${LOG_FILE}"
+    "$@" >> "${LOG_FILE}" 2>&1
