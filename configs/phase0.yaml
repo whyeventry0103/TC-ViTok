@@ -22,11 +22,11 @@ training:
     - tpn
 
   # Phase 0 regularization.
-  # lambda_max = 0.001: tiny backup L1 safety net. With tanh bounding scores to
-  # (-1, 1), explosion is architecturally impossible regardless of lambda. This
-  # value is well below the VQA gradient magnitude so it cannot crush scores to 0,
-  # but prevents any residual score drift. lambda_entropy=0.001: monitoring only.
-  lambda_max: 0.001
+  # lambda_max = 0.0: instance normalization in TPN makes L1 penalty meaningless.
+  # With per-sample zero-mean unit-std scores, mean(|s_N|) = sqrt(2/π) ≈ 0.798
+  # always (a mathematical constant) — L1 gradient is constant, provides no signal.
+  # Scores cannot explode (norm is fixed) or be crushed (relative ordering preserved).
+  lambda_max: 0.0
   lambda_entropy: 0.001
   T_warmup: 1000
 

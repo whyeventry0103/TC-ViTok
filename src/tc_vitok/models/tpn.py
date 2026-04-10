@@ -179,14 +179,23 @@ class TokenizationPolicyNetwork(nn.Module):
         )
         s_N = s_upsampled.view(B, -1)                     # (B, N)
 
-        # Bound scores to (-1, 1) to prevent score explosion.
-        # Without bounding: Score MLP output is unbounded; Adam with no L1 regularization
-        # pushes scores to O(100+) in ~1000 steps, overwhelming Gumbel noise (O(1))
-        # → deterministic static crop (same 144 tokens always selected).
-        # tanh ensures |s_N| ≤ 1 always. Gumbel noise (scale τ=1.0) remains comparable
-        # throughout training regardless of how large Score MLP weights grow.
-        # Bilinear interpolation of tanh-bounded values stays in (-1, 1) by convexity.
-        s_N = torch.tanh(s_N)
+        # Per-sample instance normalization: zero-mean, unit-std across the N token scores.
+        #
+        # Why: Without bounding, Adam pushes scores to O(100) in ~1000 steps, overwhelming
+        # Gumbel noise (O(τ=1.0)) → same 144 tokens always selected (static crop).
+        # tanh was tried but saturates at ±1 within ~1000 steps → tanh'(x)≈0.001 at
+        # saturation → gradient vanishes through tanh, same problem as before.
+        #
+        # Instance norm properties:
+        #   - Scores always at zero-mean, unit-std per sample → Gumbel noise O(1) always
+        #     comparable to score differences throughout training (no saturation possible)
+        #   - Gradient flows: d(s_norm)/d(s_raw) = (1/σ)(I - 1/N - outer(s_norm, s_norm)/N)
+        #     non-vanishing as long as scores have any variance (degenerate only if all equal)
+        #   - Only relative ordering matters for topk selection — absolute scale is irrelevant
+        #   - No learnable parameters: cannot be tuned away by the optimizer
+        s_N_mean = s_N.mean(dim=-1, keepdim=True)
+        s_N_std = s_N.std(dim=-1, keepdim=True).clamp(min=1e-8)
+        s_N = (s_N - s_N_mean) / s_N_std
 
         # Step 8: Gumbel-Sigmoid STE for differentiable top-k
         from .masking import gumbel_sigmoid_ste
