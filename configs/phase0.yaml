@@ -11,6 +11,13 @@ description: "TPN warmup with frozen backbone (paper Phase 0: 1 epoch)"
 training:
   max_steps: 10000
 
+  # Phase 0 OOM fix: batch_size 16→4, grad_accum 4→16
+  # Effective batch = 4 × 16 × 2 GPUs = 128 (unchanged from base.yaml).
+  # Removing no_grad from frozen LLM (needed for STE gradient) requires storing
+  # full LLM activations for backprop. At batch_size=16 this OOMs; 4 is safe.
+  batch_size: 4
+  grad_accum_steps: 16
+
   trainable_components:
     - tpn
 

@@ -467,9 +467,13 @@ class TCViTokModel(nn.Module):
             else (torch.autocast(device_type="cuda", dtype=torch.bfloat16) if _on_cuda else nullcontext())
         )
 
-        # Use no_grad when LLM is fully frozen (Phase 0) to save activation memory
+        # Use no_grad when LLM is frozen AND we don't need gradient through it.
+        # During training: nullcontext — the tau-independent STE routes VQA gradient
+        # to TPN via d(loss)/d(v_selected); this requires LLM activations to be
+        # stored so backprop can flow from logits back to v_selected → correction → s_N.
+        # During eval/inference: no_grad — no gradient needed, saves ~8GB activation memory.
         _lm_frozen = not any(p.requires_grad for p in lm.parameters())
-        _lm_ctx = torch.no_grad() if _lm_frozen else nullcontext()
+        _lm_ctx = torch.no_grad() if (_lm_frozen and not self.training) else nullcontext()
 
         with amp_ctx:
             # Step 1: Project visual tokens through mm_projector (1024 → 4096)

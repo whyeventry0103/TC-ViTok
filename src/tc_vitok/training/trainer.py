@@ -252,12 +252,11 @@ class TCViTokTrainer:
             outputs = self.model(**fwd_kwargs)
 
         # Compute losses (scores for L1 sparsity, idx for entropy)
-        # Phase 0: skip VQA loss — TPN receives no gradient from VQA (gather is
-        # non-differentiable) and we want TPN to first learn spatial structure.
-        skip_vqa = (self.phase == 0)
+        # VQA loss is now included in Phase 0: the tau-independent STE correction
+        # routes VQA gradient to TPN through s_N (tau-independent, always active).
         loss_dict = compute_total_loss(
-            logits=None if skip_vqa else outputs.get("logits"),
-            labels=None if skip_vqa else outputs.get("seq_labels"),
+            logits=outputs.get("logits"),
+            labels=outputs.get("seq_labels"),
             scores=outputs["scores"],
             idx=outputs["idx"],
             k=raw_model.k,
@@ -376,11 +375,9 @@ class TCViTokTrainer:
                         return_idx=True,
                     )
 
-            # Compute losses (skip VQA in Phase 0 — same as train_step)
-            skip_vqa = (self.phase == 0)
             loss_dict = compute_total_loss(
-                logits=None if skip_vqa else outputs.get("logits"),
-                labels=None if skip_vqa else outputs.get("seq_labels"),
+                logits=outputs.get("logits"),
+                labels=outputs.get("seq_labels"),
                 scores=outputs["scores"],
                 idx=outputs["idx"],
                 k=raw_model.k,
