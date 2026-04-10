@@ -22,12 +22,11 @@ training:
     - tpn
 
   # Phase 0 regularization.
-  # lambda_max = 0.0: topk already enforces exactly k=144 tokens; L1 penalty
-  # only crushes scores to 0, which destroys the gradient signal in Phase 1.
-  # With the tau-independent STE now in place, VQA gradient flows to TPN
-  # directly (d(loss)/d(s_N_i) = dot(g_v, v_selected)), so TPN does not
-  # need L1 as a proxy training signal. lambda_entropy=0.001 kept for monitoring.
-  lambda_max: 0.0
+  # lambda_max = 0.001: tiny backup L1 safety net. With tanh bounding scores to
+  # (-1, 1), explosion is architecturally impossible regardless of lambda. This
+  # value is well below the VQA gradient magnitude so it cannot crush scores to 0,
+  # but prevents any residual score drift. lambda_entropy=0.001: monitoring only.
+  lambda_max: 0.001
   lambda_entropy: 0.001
   T_warmup: 1000
 

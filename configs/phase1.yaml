@@ -25,13 +25,11 @@ training:
     - vision_projector
 
   # Phase 1 regularization.
-  # lambda_max = 0.0: no sparsity penalty on TPN scores.
-  # The L1 sparsity loss crushed scores to 0 even at lambda=0.01; the topk
-  # operator already enforces exactly k tokens — no L1 penalty is needed for
-  # that. Without lambda, TPN scores are driven purely by VQA gradient (which
-  # is the correct objective). The sparsity metric is still logged for monitoring.
+  # lambda_max = 0.001: tiny backup L1 safety net (same reasoning as Phase 0).
+  # With tanh bounding s_N to (-1, 1), explosion is architecturally impossible
+  # so this value will never crush scores to 0 — VQA gradient is always stronger.
   # lambda_entropy = 0.001: light diversity regularizer retained for monitoring.
-  lambda_max: 0.0
+  lambda_max: 0.001
   T_warmup: 5000
   lambda_entropy: 0.001
 

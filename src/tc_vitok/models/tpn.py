@@ -179,6 +179,15 @@ class TokenizationPolicyNetwork(nn.Module):
         )
         s_N = s_upsampled.view(B, -1)                     # (B, N)
 
+        # Bound scores to (-1, 1) to prevent score explosion.
+        # Without bounding: Score MLP output is unbounded; Adam with no L1 regularization
+        # pushes scores to O(100+) in ~1000 steps, overwhelming Gumbel noise (O(1))
+        # → deterministic static crop (same 144 tokens always selected).
+        # tanh ensures |s_N| ≤ 1 always. Gumbel noise (scale τ=1.0) remains comparable
+        # throughout training regardless of how large Score MLP weights grow.
+        # Bilinear interpolation of tanh-bounded values stays in (-1, 1) by convexity.
+        s_N = torch.tanh(s_N)
+
         # Step 8: Gumbel-Sigmoid STE for differentiable top-k
         from .masking import gumbel_sigmoid_ste
 
