@@ -221,22 +221,32 @@ def compute_total_loss(
         ent = entropy_from_idx(idx, N=N)           # fallback for eval (non-differentiable)
     loss_ent = -ent  # negate so minimizing total loss = maximizing entropy
 
-    # Within-batch diversity loss: penalize query-agnostic token selection.
-    # Pairs adjacent samples in the batch. If two samples with different queries
-    # produce similar masks (sim > gamma), the loss fires. Gradient flows via mask_ste
-    # to TPN scores, pushing TPN to produce different masks for different queries.
-    loss_div = scores.new_zeros(())  # scalar zero, no gradient
-    if (mask_ste is not None and q_embed is not None
-            and lambda_diversity > 0 and mask_ste.shape[0] >= 2):
-        B = mask_ste.shape[0]
+    # Within-batch diversity loss: penalize query-agnostic score distributions.
+    #
+    # WHY NOT mask_ste: gumbel-noisy binary masks have low cosine similarity by
+    # pure chance (different noise per sample). clamp(sim - gamma, 0) always hits 0.
+    # The diversity loss was firing 0.0000 every step — dead signal.
+    #
+    # WHY SCORES: instance-normalized s_N (mean=0, std=1) captures the TRUE spatial
+    # bias of TPN regardless of gumbel noise. Static-crop TPN → both samples produce
+    # score vectors with same spatial peaks (center) → cosine_sim ≈ 1.0 → loss fires.
+    # Query-conditioned TPN → different peaks for different queries → sim ≈ low.
+    # No gamma/clamp threshold: always differentiable, gradient active every step.
+    #
+    #   L_div = mean( cosine_sim(s_N_i, s_N_j) * (1 - q_sim(q_i, q_j)) )
+    #
+    # High when TPN ignores the query (static bias). Low when TPN routes per query.
+    loss_div = scores.new_zeros(())
+    if q_embed is not None and lambda_diversity > 0 and scores.shape[0] >= 2:
+        B = scores.shape[0]
         half = B // 2
-        loss_div = compute_diversity_loss(
-            mask_ste[:half],
-            mask_ste[half : 2 * half],
-            q_embed[:half],
-            q_embed[half : 2 * half],
-            gamma=gamma,
-        )
+        score_sim = F.cosine_similarity(
+            scores[:half].float(), scores[half : 2 * half].float(), dim=-1
+        )  # [B//2] — always in [-1, 1], near 1.0 for static-crop TPN
+        q_sim = F.cosine_similarity(
+            q_embed[:half].float(), q_embed[half : 2 * half].float(), dim=-1
+        )  # [B//2] — detached (frozen CLIP), used as per-pair weight
+        loss_div = (score_sim * (1.0 - q_sim.detach())).mean()
 
     loss_total = (
         loss_vqa
