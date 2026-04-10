@@ -24,8 +24,13 @@ training:
     - lora
     - vision_projector
 
-  # Paper Phase 1: full regularization with warmup
-  lambda_max: 0.1
+  # Phase 1 regularization with warmup.
+  # lambda_max reduced from 0.1 → 0.01: the 0.1 value crushed all TPN raw scores
+  # to ~0.0001 (sparsity penalty dominated VQA gradient). At inference (no gumbel
+  # noise), scores.topk(144) always returned indices 0..143 (static top-left crop)
+  # → val entropy = log(144) = 4.97 instead of ~5.9. At 0.01, scores can grow to
+  # ~0.01, producing meaningful query-conditioned relative ordering at inference.
+  lambda_max: 0.01
   T_warmup: 5000
   lambda_entropy: 0.01
 
