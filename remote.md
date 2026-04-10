@@ -636,3 +636,162 @@ pip install "numpy<2.0" --force-reinstall
 git -c credential.helper= pull origin main
 ```
 If still failing, push from Mac and rsync to server manually.
+
+---
+
+## Part 6 — Phase 1 Completion + Evaluation Bugs (Session 5: Apr 9 2026)
+
+### Phase 1 Training Completed
+
+Phase 1 ran to completion: **50,000 steps**, final val loss **3.916**.
+Best checkpoint: `runs/phase1/best.ckpt`.
+
+### Evaluation Script Created
+
+`scripts/run_eval.sh` was created to orchestrate all evaluations:
+- TC-ViTok main model (k=144)
+- Baseline A2: random token drop
+- Baseline A3: image-only TPN (zero query embedding)
+
+Usage:
+```bash
+tmux new -s eval
+bash scripts/run_eval.sh runs/phase1/best.ckpt
+```
+
+Logs: `logs/eval_<TIMESTAMP>.log` (master), `logs/eval_tcvitok_<TIMESTAMP>.log`, etc.
+Results JSON: `runs/eval_results/*.json`
+
+---
+
+## Part 7 — Critical Fix: Classification → Generative Training Rewrite (Session 5)
+
+### Root Cause Analysis
+
+Phase 1 trained with a **3129-class VQA classification head** (`vqa_head: Linear(4096 → 3129)`), but the paper's evaluation protocol expects **generative free-form answers** from the LLM (LLaVA-style string generation).
+
+These two objectives are fundamentally incompatible:
+
+| Metric | Classification head ceiling | Paper target |
+|---|---|---|
+| VQAv2 VQA-Score | ~25% (yes/no bias) | ~76% |
+| GQA accuracy | ~20% | ~61% |
+| POPE macro-F1 | ~50% | ~84% |
+
+The classification head collapsed to predicting "yes"/"no" (top training vocab answers) for every question. This gives ~25% VQA-Score which equals a constant "yes" predictor — the model learned nothing meaningful.
+
+**Why generative evaluation is required:**
+- VQAv2 VQA-Score uses soft-accuracy: `min(count(pred in GT) / 3, 1)` across 10 annotator answers
+- This can only reach ~76% with free-form generation — a closed vocab of 3129 classes can never soft-match the diversity of 10 annotators
+- POPE expects "yes" or "no" generated strings — classification indices don't map to natural language
+- The paper explicitly describes LLaVA-style generative evaluation
+
+### What Changed (Session 5 Generative Rewrite)
+
+Full rewrite across 6 files to switch from classification to next-token prediction:
+
+#### `src/tc_vitok/data/datasets.py`
+- Removed `answer_to_idx`, `answer_list`, `vocab_size` from all dataset classes
+- All datasets now return `answer_str: str` (raw answer string) instead of `labels: tensor`
+- `collate_fn` passes `answer_str` as `List[str]`, no stacking
+
+#### `src/tc_vitok/data/caching.py`
+- `CachedFeatureDataset`: returns `answer_str` instead of `labels`
+- `cached_collate_fn`: passes `answer_str` as list
+
+#### `src/tc_vitok/models/tc_vitok_model.py`
+- Removed `vqa_head` entirely from `_init_llava()`
+- Added `_use_llava_lm_head` flag: `False` for OLD arch (logits in output), `True` for NEW arch (need `llava.lm_head`)
+- Completely rewrote `_llava_forward()` for generative next-token prediction:
+  - Training: builds `[visual_prefix | USER: q\nASSISTANT: | answer</s>]` per sample
+  - Label masking: `-100` for visual+question positions, answer token IDs for answer positions
+  - Right-pads to batch max length
+  - Returns `logits [B, seq_len, vocab_size]` + `seq_labels [B, seq_len]`
+- Removed `predict_class()` method
+- `forward()` now accepts `answer_strings: List[str]` instead of `labels: tensor`
+- `set_training_phase()`: removed vqa_head unfreeze (no longer exists)
+
+#### `src/tc_vitok/training/trainer.py`
+- `train_step`: reads `answer_strings = batch.get("answer_str")`, passes to model
+- Loss now uses `outputs.get("seq_labels")` from model output (not batch `labels`)
+- `validate()`: same changes
+- `save_checkpoint()`: removed `vqa_head.*` from trainable state filter
+
+#### `src/tc_vitok/training/optimizer.py`
+- Removed `vqa_head` parameter group
+
+#### `scripts/evaluate.py`
+- Removed `_build_vqav2_train_vocab()` and all `predict_class()` calls
+- All three evaluators now use `model.generate()` (generative decoding)
+- VQAv2: `generate()` → score against 10 GT answers
+- GQA: `generate()` → exact match against single GT answer
+- POPE: `generate(max_new_tokens=5)` → `extract_yes_no()` → F1
+
+#### `scripts/train.py`
+- Removed `answer_list=` from `VQAv2Dataset` and `GQADataset` construction
+
+### Retraining Required
+
+**Must retrain from scratch** — the Phase 1 checkpoint's LoRA weights are shaped by 50k steps of classification loss, NOT next-token prediction. Loading them for generative fine-tuning would give meaningless initialization.
+
+**Correct retraining procedure:**
+
+```bash
+# 1. Pull all changes
+git -c credential.helper= pull origin main
+
+# 2. Find Phase 0 checkpoint (TPN pre-trained, LoRA at random init)
+ls -t runs/phase0/checkpoint_step_*.pt | head -3
+# OR use: runs/phase0/best.ckpt
+
+# 3. Start Phase 1 training from Phase 0 checkpoint
+tmux new -s training2
+export DATA_ROOT=~/tc-vitok-data
+bash scripts/launch_multigpu.sh \
+    --config configs/phase1.yaml \
+    --output runs/phase1_gen/ \
+    --resume runs/phase0/best.ckpt \
+    --no-wandb
+```
+
+**Why not reuse Phase 1 checkpoint:**
+- 50k steps of `vqa_head` CE loss shaped LoRA to map visual features → class index space
+- The LM head expects hidden states in language model space, not class index space
+- These two spaces are fundamentally different — the LoRA cannot generalize
+
+**Why Phase 0 checkpoint is correct starting point:**
+- Phase 0 trained only TPN (L1 sparsity + entropy, no LM loss)
+- LoRA adapters were initialized with `get_peft_model()` but received ZERO gradient during Phase 0
+- TPN has learned good spatial selection behavior (entropy ~5.9, close to max 6.36)
+- Phase 1 with next-token prediction can now shape LoRA from a clean initialization
+
+### Evaluation Bugs Fixed (Session 5, before the rewrite was done)
+
+| Bug | Error / Problem | Fix |
+|---|---|---|
+| BUG-23 | `run_eval.sh` `$?` always 0 in error handler | `local rc=0; python ... \|\| rc=$?` instead of `if python ...; then` (which consumes `$?`) |
+| BUG-24 | Summary table reads `r["vqav2"]["accuracy"]` — wrong key | Fixed to `r["benchmarks"]["vqav2"]["vqa_score"]` |
+| BUG-25 | `AttributeError: 'LlamaModel' has no generate()` in `_llava_generate` | PEFT `PeftModel.get_base_model()` returns `LlamaModel` (no lm_head) — use `gen_fn = lm if hasattr(base, "lm_head") else self.llava` |
+| BUG-26 | VQA-Score 0.00% — evaluation called `generate()` but model trained with `vqa_head` | Fixed at root: switched to generative training (see above); evaluation now always uses `generate()` |
+| BUG-27 | VQA-Score 25% plateau — `vqa_head` collapses to yes/no bias | Fixed at root: removed `vqa_head`, replaced with next-token prediction |
+
+### Expected Results After Generative Retraining
+
+| Benchmark | Current (classification) | Expected (generative, ~LLaVA-1.5 baseline) | Paper target |
+|---|---|---|---|
+| VQAv2 VQA-Score | ~25% | ~75-77% | ~76% |
+| GQA overall | ~20% | ~60-62% | ~61% |
+| GQA spatial | ~18% | ~58-60% | ~59% |
+| POPE macro-F1 | ~50% | ~83-85% | ~84% |
+
+The generative LM with LoRA should perform near LLaVA-1.5-7B baseline. TC-ViTok's contribution is achieving these numbers with k=144 tokens (25% of N=576) rather than all 576 tokens — demonstrating that learned token selection maintains LLM performance while reducing compute.
+
+### After Phase 1 Completes (Generative Version)
+
+Run evaluation:
+```bash
+tmux new -s eval
+bash scripts/run_eval.sh runs/phase1_gen/best.ckpt
+```
+
+Expected evaluation time: ~3-4 hours total (VQAv2 + GQA + POPE × 3 variants).

@@ -228,7 +228,7 @@ def test_full_pipeline():
     print(f"  Total params: {total:,}")
 
     # Create dummy data
-    dataset = DummyVQADataset(num_samples=8, vocab_size=1000)
+    dataset = DummyVQADataset(num_samples=8)
     loader = DataLoader(dataset, batch_size=4, collate_fn=collate_fn)
 
     # Forward pass
@@ -239,7 +239,7 @@ def test_full_pipeline():
         images_coarse=batch["images_coarse"],
         images_full=batch["images_full"],
         questions=batch["questions"],
-        labels=batch["labels"],
+        answer_strings=batch.get("answer_str"),
         tau=1.0,
         return_idx=True,
     )
@@ -261,8 +261,8 @@ def test_full_pipeline():
 
     # Compute loss (idx-based API)
     loss_dict = compute_total_loss(
-        logits=outputs["logits"],
-        labels=batch["labels"],
+        logits=outputs.get("logits"),
+        labels=outputs.get("seq_labels"),
         scores=outputs["scores"],
         idx=outputs["idx"],
         k=144,

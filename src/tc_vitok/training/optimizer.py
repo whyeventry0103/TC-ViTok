@@ -98,17 +98,11 @@ def create_optimizer(
                     "weight_decay": weight_decay,
                 })
 
-            # Vision projector (mm_projector) + VQA classification head
-            # Both are trained at lr_mlp (medium LR, adapts visual→LM interface)
+            # Vision projector (mm_projector) — adapts visual→LM interface
             projector_params = [
                 p for p in model._mm_proj.parameters()
                 if p.requires_grad
             ]
-            if hasattr(model, "vqa_head"):
-                projector_params += [
-                    p for p in model.vqa_head.parameters()
-                    if p.requires_grad
-                ]
             if projector_params:
                 param_groups.append({
                     "params": projector_params,

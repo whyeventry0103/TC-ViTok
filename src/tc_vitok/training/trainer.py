@@ -205,7 +205,7 @@ class TCViTokTrainer:
                 - images_coarse: [B, 3, 98, 98]
                 - images_full: [B, 3, 336, 336]
                 - questions: List[str]
-                - labels: [B, seq_len]
+                - answer_str: List[str]  — raw answer strings for next-token prediction
 
         Returns:
             loss_dict: Dictionary with all loss components
@@ -218,7 +218,7 @@ class TCViTokTrainer:
 
         # Move batch to device
         images_full = batch["images_full"].to(self.device)
-        labels = batch["labels"].to(self.device)
+        answer_strings = batch.get("answer_str")  # List[str] — stays on CPU
 
         # BF16 / FP16 autocast context
         amp_ctx = (
@@ -235,7 +235,7 @@ class TCViTokTrainer:
         with amp_ctx:
             fwd_kwargs = dict(
                 images_full=images_full,
-                labels=labels,
+                answer_strings=answer_strings,
                 tau=tau,
                 return_idx=True,
             )
@@ -253,12 +253,11 @@ class TCViTokTrainer:
 
         # Compute losses (scores for L1 sparsity, idx for entropy)
         # Phase 0: skip VQA loss — TPN receives no gradient from VQA (gather is
-        # non-differentiable) and the randomly-initialized vqa_head produces
-        # large float16 logits that overflow to NaN, corrupting total loss.
+        # non-differentiable) and we want TPN to first learn spatial structure.
         skip_vqa = (self.phase == 0)
         loss_dict = compute_total_loss(
             logits=None if skip_vqa else outputs.get("logits"),
-            labels=None if skip_vqa else labels,
+            labels=None if skip_vqa else outputs.get("seq_labels"),
             scores=outputs["scores"],
             idx=outputs["idx"],
             k=raw_model.k,
@@ -353,7 +352,7 @@ class TCViTokTrainer:
             if num_batches >= max_val_batches:
                 break
             images_full = batch["images_full"].to(self.device)
-            labels = batch["labels"].to(self.device)
+            answer_strings = batch.get("answer_str")  # List[str]
 
             # Use cached coarse/text features when available (no images_coarse key)
             with amp_ctx:
@@ -363,7 +362,7 @@ class TCViTokTrainer:
                         q_embed=batch["q_embed"].to(self.device),
                         images_full=images_full,
                         questions=batch.get("questions"),
-                        labels=labels,
+                        answer_strings=answer_strings,
                         tau=tau,
                         return_idx=True,
                     )
@@ -372,7 +371,7 @@ class TCViTokTrainer:
                         images_coarse=batch["images_coarse"].to(self.device),
                         images_full=images_full,
                         questions=batch["questions"],
-                        labels=labels,
+                        answer_strings=answer_strings,
                         tau=tau,
                         return_idx=True,
                     )
@@ -381,7 +380,7 @@ class TCViTokTrainer:
             skip_vqa = (self.phase == 0)
             loss_dict = compute_total_loss(
                 logits=None if skip_vqa else outputs.get("logits"),
-                labels=None if skip_vqa else labels,
+                labels=None if skip_vqa else outputs.get("seq_labels"),
                 scores=outputs["scores"],
                 idx=outputs["idx"],
                 k=raw_model.k,
@@ -434,7 +433,7 @@ class TCViTokTrainer:
     def save_checkpoint(self, is_best: bool = False):
         """Save model checkpoint.
 
-        Only saves trainable parameters (TPN + LoRA adapters + vqa_head +
+        Only saves trainable parameters (TPN + LoRA adapters +
         mm_projector) rather than the full model state dict. This reduces
         checkpoint size from ~16GB to ~1-2GB by skipping the frozen 7B LLM
         backbone and frozen encoders. load_checkpoint uses strict=False so
@@ -449,12 +448,11 @@ class TCViTokTrainer:
         # Save only trainable parameters — skips frozen 7B LLM + frozen encoders
         # Keys use the module hierarchy path, not Python attribute names:
         #   tpn.*                          — TPN weights
-        #   vqa_head.*                     — VQA classification head
         #   *lora_*                        — LoRA adapter weights (PEFT naming)
         #   *multi_modal_projector.*       — mm_projector (old+new LLaVA arch)
         trainable_state = {
             k: v for k, v in raw_model.state_dict().items()
-            if any(k.startswith(prefix) for prefix in ("tpn.", "vqa_head."))
+            if k.startswith("tpn.")
             or "lora_" in k
             or "multi_modal_projector." in k
         }

@@ -222,17 +222,21 @@ class TCViTokModel(nn.Module):
 
         # Detect architecture and locate language model + mm_projector
         if hasattr(self.llava, "language_model"):
-            # OLD architecture: language_model is LlamaForCausalLM (has generate())
+            # OLD architecture: language_model is LlamaForCausalLM (has generate() + lm_head)
             lm_target = self.llava.language_model
             self._mm_proj = self.llava.multi_modal_projector
             vision_tower = getattr(self.llava, "vision_tower", None)
             lora_task = TaskType.CAUSAL_LM
+            # OLD arch: LlamaForCausalLM.forward() returns logits directly
+            self._use_llava_lm_head = False
         elif hasattr(self.llava, "model") and hasattr(self.llava.model, "language_model"):
             # NEW architecture: language_model is LlamaModel (no generate(); use FEATURE_EXTRACTION)
             lm_target = self.llava.model.language_model
             self._mm_proj = self.llava.model.multi_modal_projector
             vision_tower = getattr(self.llava.model, "vision_tower", None)
             lora_task = TaskType.FEATURE_EXTRACTION
+            # NEW arch: LlamaModel returns last_hidden_state; use llava.lm_head for logits
+            self._use_llava_lm_head = True
         else:
             top = {k: type(v).__name__ for k, v in vars(self.llava).items() if not k.startswith("_")}
             raise AttributeError(
@@ -266,22 +270,12 @@ class TCViTokModel(nn.Module):
         else:
             self.llava.model.language_model = self._llm
 
-        # VQA classification head: LLM hidden size → answer vocabulary
-        # answer_vocab_size must match the dataset's answer_to_idx vocab
-        # (VQAv2Dataset defaults to top-3129; GQADataset to top-1878)
-        llm_hidden_size = self.llava.config.text_config.hidden_size  # 4096 for LLaVA-1.5-7B
-        answer_vocab_size = lora_config.get("answer_vocab_size", 3129)
-        self.vqa_head = nn.Linear(llm_hidden_size, answer_vocab_size)
-        # Small init prevents float16 overflow: large random logits → inf → NaN loss
-        nn.init.normal_(self.vqa_head.weight, std=0.02)
-        nn.init.zeros_(self.vqa_head.bias)
-
     def forward(
         self,
         images_coarse: Optional[torch.Tensor] = None,
         images_full: Optional[torch.Tensor] = None,
-        questions: Optional[list[str]] = None,
-        labels: Optional[torch.Tensor] = None,
+        questions: Optional[list] = None,
+        answer_strings: Optional[list] = None,
         tau: float = 1.0,
         return_idx: bool = False,
         v_coarse: Optional[torch.Tensor] = None,
@@ -300,7 +294,7 @@ class TCViTokModel(nn.Module):
             images_coarse: Low-res images for TPN, Shape: [B, 3, 98, 98]
             images_full: High-res images for CLIP ViT-L, Shape: [B, 3, 336, 336]
             questions: List of question strings, length B
-            labels: Optional answer token IDs, Shape: [B, seq_len]
+            answer_strings: List of raw answer strings for next-token prediction, length B
             tau: Gumbel-Sigmoid temperature
             return_idx: If True, include idx and scores in output
             v_coarse: Pre-computed coarse features [B, 49, 384] (cached path)
@@ -309,8 +303,8 @@ class TCViTokModel(nn.Module):
 
         Returns:
             outputs: Dictionary containing:
-                - loss: VQA loss (if labels provided)
-                - logits: Language model logits
+                - logits: Language model logits [B, seq_len, vocab_size]
+                - seq_labels: Token-level labels with -100 masking [B, seq_len]
                 - idx: Top-k gather indices [B, k] (if return_idx)
                 - scores: TPN raw scores [B, N]
                 - selected_tokens: Gathered visual tokens [B, k, D]
@@ -347,9 +341,9 @@ class TCViTokModel(nn.Module):
 
         # Step 4: Forward through LLM backbone
         if self.use_stub_llm:
-            llm_outputs = self.llm(visual_tokens=v_selected, labels=labels)
+            llm_outputs = self.llm(visual_tokens=v_selected)
         else:
-            llm_outputs = self._llava_forward(v_selected, questions, labels)
+            llm_outputs = self._llava_forward(v_selected, questions, answer_strings)
 
         # Build output dict
         outputs = {
@@ -358,8 +352,8 @@ class TCViTokModel(nn.Module):
             "selected_tokens": v_selected,
         }
 
-        if "loss" in llm_outputs:
-            outputs["loss"] = llm_outputs["loss"]
+        if "seq_labels" in llm_outputs:
+            outputs["seq_labels"] = llm_outputs["seq_labels"]
 
         if return_idx:
             outputs["idx"] = idx
@@ -373,7 +367,7 @@ class TCViTokModel(nn.Module):
         images_full: torch.Tensor,
         v_full: Optional[torch.Tensor] = None,
         questions: Optional[list] = None,
-        labels: Optional[torch.Tensor] = None,
+        answer_strings: Optional[list] = None,
         tau: float = 1.0,
         return_idx: bool = False,
     ) -> Dict[str, torch.Tensor]:
@@ -389,7 +383,7 @@ class TCViTokModel(nn.Module):
             images_full: High-res images for CLIP ViT-L, Shape: [B, 3, 336, 336]
             v_full: Pre-computed full visual features (optional)
             questions: List of question strings (needed for LLaVA text conditioning)
-            labels: Optional answer class indices, Shape: [B, 1]
+            answer_strings: List of raw answer strings for next-token prediction
             tau: Gumbel-Sigmoid temperature
             return_idx: If True, include idx and scores in output
 
@@ -402,7 +396,7 @@ class TCViTokModel(nn.Module):
             images_full=images_full,
             v_full=v_full,
             questions=questions,
-            labels=labels,
+            answer_strings=answer_strings,
             tau=tau,
             return_idx=return_idx,
         )
@@ -411,31 +405,33 @@ class TCViTokModel(nn.Module):
         self,
         v_selected: torch.Tensor,
         questions: Optional[list] = None,
-        labels: Optional[torch.Tensor] = None,
+        answer_strings: Optional[list] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Forward pass through real LLaVA with injected visual tokens + question text.
+        """Forward pass through real LLaVA with next-token prediction training.
 
-        Pipeline:
+        Training pipeline (when answer_strings provided):
           1. Project k gathered tokens through LLaVA's mm_projector → [B, k, H]
-          2. Tokenize question strings, embed via LM embedding layer → [B, T, H]
-          3. Concatenate [visual_prefix | question_text] → [B, k+T, H]
-          4. Forward through LoRA-adapted LM, collect last hidden states
-          5. Pool over visual positions → [B, H], apply VQA head → [B, answer_vocab]
-          6. Cross-entropy against classification labels [B, 1]
+          2. Per sample: tokenize "USER: q\\nASSISTANT:" + " answer</s>"
+          3. Concatenate [visual_prefix | question_tokens | answer_tokens]
+          4. Label mask: -100 for visual+question positions; answer token IDs for answer
+          5. Pad all sequences to batch max length
+          6. Forward through LoRA-adapted LM
+          7. Get logits via lm_head (OLD arch: from output.logits; NEW: from llava.lm_head)
 
-        This keeps the training interface compatible with datasets.py (which stores
-        answer class indices, not tokenized sequences) while properly conditioning
-        the LM on both visual tokens and the question text.
+        Inference pipeline (when answer_strings is None):
+          - Builds [visual_prefix | question_tokens] only (no labels)
+          - Returns logits for greedy decoding (use _llava_generate for full generation)
 
         Args:
             v_selected: Selected visual tokens, Shape: [B, k, 1024]
-            questions: List of question strings, length B (optional; visual-only if None)
-            labels: Answer class indices, Shape: [B, 1], values in [0, answer_vocab_size)
+            questions: List of question strings, length B (optional)
+            answer_strings: List of raw answer strings for next-token prediction, length B
 
         Returns:
-            outputs: Dict with 'logits' [B, 1, answer_vocab] and optionally 'loss'
+            outputs: Dict with:
+                'logits': [B, seq_len, vocab_size] (float32)
+                'seq_labels': [B, seq_len] with -100 masking (only when answer_strings given)
         """
-        import torch.nn.functional as F_local
         from contextlib import nullcontext
 
         B, k, _ = v_selected.shape
@@ -443,9 +439,7 @@ class TCViTokModel(nn.Module):
         lm = self._llm
 
         # Autocast: rely on caller's context (trainer uses BF16 autocast).
-        # Using a nested FP16 autocast here would override the caller's BF16,
-        # causing mixed BF16/FP16 dtype issues. For direct calls without a
-        # caller autocast, use BF16 as fallback (matches training dtype).
+        # Using a nested FP16 autocast here would override the caller's BF16.
         _on_cuda = device.type == "cuda" if isinstance(device, torch.device) else "cuda" in str(device)
         _already_in_autocast = torch.is_autocast_enabled() if _on_cuda else False
         amp_ctx = (
@@ -453,71 +447,134 @@ class TCViTokModel(nn.Module):
             else (torch.autocast(device_type="cuda", dtype=torch.bfloat16) if _on_cuda else nullcontext())
         )
 
+        # Use no_grad when LLM is fully frozen (Phase 0) to save activation memory
+        _lm_frozen = not any(p.requires_grad for p in lm.parameters())
+        _lm_ctx = torch.no_grad() if _lm_frozen else nullcontext()
+
         with amp_ctx:
-            # Step 1: Project visual tokens through mm_projector
-            # mm_projector is a 2-layer MLP: 1024 → 4096 (LLaVA-1.5-7B)
+            # Step 1: Project visual tokens through mm_projector (1024 → 4096)
             v_projected = self._mm_proj(v_selected)  # [B, k, H]
+            embed_fn = lm.get_input_embeddings()
+            tokenizer = self.processor.tokenizer
 
-            # Step 2: Tokenize questions and embed (if provided)
-            if questions is not None:
-                tokenizer = self.processor.tokenizer
-                text_inputs = tokenizer(
-                    list(questions),
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=128,
-                    add_special_tokens=True,
+            if questions is not None and answer_strings is not None:
+                # ── Training mode: build [visual | question | answer] per sample ──
+                all_embeds = []
+                all_masks = []
+                all_labels = []
+
+                for i in range(B):
+                    # Question prompt (no answer yet)
+                    q_text = f"USER: {questions[i]}\nASSISTANT:"
+                    q_ids = tokenizer(
+                        q_text,
+                        return_tensors="pt",
+                        padding=False,
+                        truncation=True,
+                        max_length=128,
+                        add_special_tokens=True,
+                    ).input_ids[0].to(device)           # [T_q]
+                    q_embeds = embed_fn(q_ids)            # [T_q, H]
+
+                    # Answer tokens (space prefix for proper tokenization)
+                    a_text = f" {answer_strings[i]}"
+                    a_ids = tokenizer(
+                        a_text,
+                        return_tensors="pt",
+                        padding=False,
+                        truncation=True,
+                        max_length=32,
+                        add_special_tokens=False,
+                    ).input_ids[0].to(device)             # [T_a]
+                    # Append EOS to mark end of answer
+                    eos = torch.tensor([tokenizer.eos_token_id], device=device, dtype=torch.long)
+                    a_ids = torch.cat([a_ids, eos])       # [T_a + 1]
+                    a_embeds = embed_fn(a_ids)             # [T_a+1, H]
+
+                    # Full sequence: [visual_prefix | question | answer]
+                    seq_embeds = torch.cat([v_projected[i], q_embeds, a_embeds], dim=0)
+
+                    # Labels: -100 (ignore) for visual+question; answer token IDs for answer
+                    ignore = torch.full(
+                        (k + len(q_ids),), -100, device=device, dtype=torch.long
+                    )
+                    seq_labels = torch.cat([ignore, a_ids])  # same length as seq_embeds
+
+                    attn_mask = torch.ones(len(seq_embeds), device=device, dtype=torch.long)
+
+                    all_embeds.append(seq_embeds)
+                    all_masks.append(attn_mask)
+                    all_labels.append(seq_labels)
+
+                # Pad to batch max length (right-padding with zeros / -100)
+                max_len = max(e.shape[0] for e in all_embeds)
+                H = all_embeds[0].shape[-1]
+
+                padded_embeds = torch.zeros(
+                    B, max_len, H, device=device, dtype=all_embeds[0].dtype
                 )
-                input_ids = text_inputs.input_ids.to(device)           # [B, T]
-                text_attn = text_inputs.attention_mask.to(device)      # [B, T]
+                padded_masks  = torch.zeros(B, max_len, device=device, dtype=torch.long)
+                padded_labels = torch.full(
+                    (B, max_len), -100, device=device, dtype=torch.long
+                )
 
-                # Embed text tokens using the LM embedding layer
-                embed_fn = lm.get_input_embeddings()
-                text_embeds = embed_fn(input_ids)                      # [B, T, H]
+                for i in range(B):
+                    L = all_embeds[i].shape[0]
+                    padded_embeds[i, :L] = all_embeds[i]
+                    padded_masks[i, :L]  = all_masks[i]
+                    padded_labels[i, :L] = all_labels[i]
 
-                # Concatenate: visual prefix first, then question text
-                combined_embeds = torch.cat([v_projected, text_embeds], dim=1)  # [B, k+T, H]
-                vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
-                combined_mask = torch.cat([vis_attn, text_attn], dim=1)        # [B, k+T]
+                with _lm_ctx:
+                    lm_outputs = lm(
+                        inputs_embeds=padded_embeds,
+                        attention_mask=padded_masks,
+                        output_hidden_states=True,
+                    )
+
+                # Get logits (arch-dependent)
+                if self._use_llava_lm_head:
+                    logits = self.llava.lm_head(lm_outputs.last_hidden_state).float()
+                else:
+                    logits = lm_outputs.logits.float()
+
+                return {"logits": logits, "seq_labels": padded_labels}
+
             else:
-                # No question text — visual tokens only (not recommended for production)
-                combined_embeds = v_projected                                    # [B, k, H]
-                combined_mask = torch.ones(B, k, device=device, dtype=torch.long)
+                # ── Inference mode: [visual | question] only ──
+                if questions is not None:
+                    q_texts = [f"USER: {q}\nASSISTANT:" for q in questions]
+                    text_inputs = tokenizer(
+                        q_texts,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=128,
+                        add_special_tokens=True,
+                    )
+                    input_ids = text_inputs.input_ids.to(device)
+                    text_attn = text_inputs.attention_mask.to(device)
+                    text_embeds = embed_fn(input_ids)
 
-            # Step 3: Forward through LoRA-adapted language model
-            # Use no_grad when LLM is fully frozen (Phase 0) to save activation memory
-            _lm_frozen = not any(p.requires_grad for p in lm.parameters())
-            _lm_ctx = torch.no_grad() if _lm_frozen else nullcontext()
-            with _lm_ctx:
-                lm_outputs = lm(
-                    inputs_embeds=combined_embeds,
-                    attention_mask=combined_mask,
-                    output_hidden_states=True,
-                )
+                    combined_embeds = torch.cat([v_projected, text_embeds], dim=1)
+                    vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
+                    combined_mask = torch.cat([vis_attn, text_attn], dim=1)
+                else:
+                    combined_embeds = v_projected
+                    combined_mask = torch.ones(B, k, device=device, dtype=torch.long)
 
-        # Step 4: Pool last hidden state over visual token positions
-        # Using visual positions only (first k positions) focuses the pooling
-        # on the visual representation rather than the question text
-        last_hidden = lm_outputs.hidden_states[-1]   # [B, k+T, H] (or [B, k, H])
-        visual_hidden = last_hidden[:, :k, :]        # [B, k, H]
-        pooled = visual_hidden.mean(dim=1).float()    # [B, H] — float32 for vqa_head
+                with _lm_ctx:
+                    lm_outputs = lm(
+                        inputs_embeds=combined_embeds,
+                        attention_mask=combined_mask,
+                        output_hidden_states=True,
+                    )
 
-        # Step 5: VQA classification head: H → answer_vocab
-        logits = self.vqa_head(pooled).unsqueeze(1)  # [B, 1, answer_vocab]
+                if self._use_llava_lm_head:
+                    logits = self.llava.lm_head(lm_outputs.last_hidden_state).float()
+                else:
+                    logits = lm_outputs.logits.float()
 
-        result: Dict[str, torch.Tensor] = {"logits": logits}
-
-        # Step 6: Cross-entropy against answer class labels
-        if labels is not None:
-            loss = F_local.cross_entropy(
-                logits.squeeze(1),   # [B, answer_vocab]
-                labels.view(-1),     # [B]
-                ignore_index=-100,
-            )
-            result["loss"] = loss
-
-        return result
+                return {"logits": logits}
 
     def _llava_generate(
         self,
@@ -628,24 +685,6 @@ class TCViTokModel(nn.Module):
         return gather_tokens(v_full, idx)
 
     @torch.no_grad()
-    def predict_class(
-        self,
-        images_coarse: torch.Tensor,
-        images_full: torch.Tensor,
-        questions: list,
-    ) -> torch.Tensor:
-        """Run vqa_head classifier. Returns logits [B, answer_vocab_size].
-
-        This is the correct evaluation path — the model was trained with
-        vqa_head classification loss, not with LM token generation.
-        Use this for VQAv2, GQA, and POPE evaluation.
-        """
-        self.eval()
-        v_selected = self._select_tokens(images_coarse, images_full, questions)
-        outputs = self._llava_forward(v_selected, questions)
-        return outputs["logits"].squeeze(1)  # [B, answer_vocab_size]
-
-    @torch.no_grad()
     def generate(
         self,
         images_coarse: torch.Tensor,
@@ -653,7 +692,7 @@ class TCViTokModel(nn.Module):
         questions: list[str],
         max_new_tokens: int = 20,
     ) -> list[str]:
-        """Generative decode (kept for completeness; prefer predict_class for eval)."""
+        """Generative answer decoding. Use this for all VQA benchmark evaluation."""
         self.eval()
         v_selected = self._select_tokens(images_coarse, images_full, questions)
         if self.use_stub_llm:
@@ -728,12 +767,9 @@ class TCViTokModel(nn.Module):
                 # Freeze entire LLaVA (LM + mm_projector + vision_tower)
                 for param in self.llava.parameters():
                     param.requires_grad = False
-                # Freeze VQA classification head too (TPN learns independently)
-                for param in self.vqa_head.parameters():
-                    param.requires_grad = False
 
         elif phase in [1, 2]:
-            # Train TPN + LoRA + mm_projector + VQA head
+            # Train TPN + LoRA + mm_projector
             for param in self.tpn.parameters():
                 param.requires_grad = True
             if self.use_stub_llm:
@@ -743,9 +779,6 @@ class TCViTokModel(nn.Module):
                 # LoRA adapter params are set trainable by PEFT automatically
                 # Explicitly unfreeze mm_projector (vision projector, ~9M params)
                 for param in self._mm_proj.parameters():
-                    param.requires_grad = True
-                # Unfreeze VQA classification head
-                for param in self.vqa_head.parameters():
                     param.requires_grad = True
                 # Keep vision_tower frozen (never used) — check both arch locations
                 for vt_path in (

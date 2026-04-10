@@ -50,8 +50,6 @@ class DummyVQADataset(Dataset):
 
     Args:
         num_samples: Number of synthetic samples
-        seq_len: Length of dummy label sequences
-        vocab_size: Vocabulary size for dummy labels
         stub_mode: When True, emit pre-computed v_coarse/q_embed features
             instead of raw images_coarse. Use with --stub so the model can
             take the cached forward path without needing real encoders.
@@ -60,13 +58,9 @@ class DummyVQADataset(Dataset):
     def __init__(
         self,
         num_samples: int = 1000,
-        seq_len: int = 10,
-        vocab_size: int = 1000,
         stub_mode: bool = False,
     ):
         self.num_samples = num_samples
-        self.seq_len = seq_len
-        self.vocab_size = vocab_size
         self.stub_mode = stub_mode
 
         # Pre-generate dummy questions
@@ -89,13 +83,13 @@ class DummyVQADataset(Dataset):
                 "v_full": torch.randn(576, 1024),
                 "images_full": torch.randn(3, 336, 336),
                 "questions": self.questions[idx],
-                "labels": torch.randint(0, self.vocab_size, (self.seq_len,)),
+                "answer_str": "dummy",
             }
         return {
             "images_coarse": torch.randn(3, 98, 98),
             "images_full": torch.randn(3, 336, 336),
             "questions": self.questions[idx],
-            "labels": torch.randint(0, self.vocab_size, (self.seq_len,)),
+            "answer_str": "dummy",
         }
 
 
@@ -116,7 +110,6 @@ class VQAv2Dataset(Dataset):
         image_dir: Directory containing COCO images
         split: Dataset split ('train' or 'val')
         max_samples: Limit number of samples (for debugging/Phase 0)
-        answer_list: Optional pre-built answer vocabulary (list of strings)
     """
 
     def __init__(
@@ -126,7 +119,6 @@ class VQAv2Dataset(Dataset):
         image_dir: str,
         split: str = "train",
         max_samples: Optional[int] = None,
-        answer_list: Optional[List[str]] = None,
     ):
         self.image_dir = Path(image_dir)
         self.split = split
@@ -163,18 +155,6 @@ class VQAv2Dataset(Dataset):
         if max_samples is not None:
             self.samples = self.samples[:max_samples]
 
-        # Build answer vocabulary (top-N most frequent answers)
-        if answer_list is not None:
-            self.answer_to_idx = {a: i for i, a in enumerate(answer_list)}
-        else:
-            # Build from training data — top 3129 answers cover ~90% of VQAv2
-            from collections import Counter
-            answer_counts = Counter(s["answer"] for s in self.samples)
-            top_answers = [a for a, _ in answer_counts.most_common(3129)]
-            self.answer_to_idx = {a: i for i, a in enumerate(top_answers)}
-
-        self.vocab_size = len(self.answer_to_idx)
-
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -200,16 +180,11 @@ class VQAv2Dataset(Dataset):
         images_coarse = DINO_TRANSFORM(image)
         images_full = CLIP_TRANSFORM(image)
 
-        # Encode answer as label index
-        answer = sample["answer"]
-        label_idx = self.answer_to_idx.get(answer, 0)
-        labels = torch.tensor([label_idx], dtype=torch.long)
-
         return {
             "images_coarse": images_coarse,
             "images_full": images_full,
             "questions": sample["question"],
-            "labels": labels,
+            "answer_str": sample["answer"],
             "answers": sample["answers"],
             "question_id": sample["question_id"],
             "image_id": image_id,
@@ -232,7 +207,6 @@ class GQADataset(Dataset):
         image_dir: Directory containing GQA images
         scene_graphs_path: Optional path to scene graph annotations
         max_samples: Limit number of samples
-        answer_list: Optional pre-built answer vocabulary
     """
 
     def __init__(
@@ -241,7 +215,6 @@ class GQADataset(Dataset):
         image_dir: str,
         scene_graphs_path: Optional[str] = None,
         max_samples: Optional[int] = None,
-        answer_list: Optional[List[str]] = None,
     ):
         self.image_dir = Path(image_dir)
 
@@ -270,17 +243,6 @@ class GQADataset(Dataset):
         if max_samples is not None:
             self.samples = self.samples[:max_samples]
 
-        # Build answer vocabulary
-        if answer_list is not None:
-            self.answer_to_idx = {a: i for i, a in enumerate(answer_list)}
-        else:
-            from collections import Counter
-            answer_counts = Counter(s["answer"] for s in self.samples)
-            top_answers = [a for a, _ in answer_counts.most_common(1878)]
-            self.answer_to_idx = {a: i for i, a in enumerate(top_answers)}
-
-        self.vocab_size = len(self.answer_to_idx)
-
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -303,10 +265,6 @@ class GQADataset(Dataset):
         images_coarse = DINO_TRANSFORM(image)
         images_full = CLIP_TRANSFORM(image)
 
-        answer = sample["answer"]
-        label_idx = self.answer_to_idx.get(answer, 0)
-        labels = torch.tensor([label_idx], dtype=torch.long)
-
         # Build GQA annotation for spatial classification
         gqa_annotation = {
             "semantic": sample.get("semantic", {}),
@@ -320,8 +278,8 @@ class GQADataset(Dataset):
             "images_coarse": images_coarse,
             "images_full": images_full,
             "questions": sample["question"],
-            "labels": labels,
-            "answers": [answer],
+            "answer_str": sample["answer"],
+            "answers": [sample["answer"]],
             "question_id": sample["question_id"],
             "image_id": image_id,
             "gqa_annotation": gqa_annotation,
@@ -338,7 +296,6 @@ class TextVQADataset(Dataset):
         annotations_path: Path to TextVQA annotations JSON
         image_dir: Directory containing TextVQA images
         max_samples: Limit number of samples
-        answer_list: Optional pre-built answer vocabulary
     """
 
     def __init__(
@@ -346,7 +303,6 @@ class TextVQADataset(Dataset):
         annotations_path: str,
         image_dir: str,
         max_samples: Optional[int] = None,
-        answer_list: Optional[List[str]] = None,
     ):
         self.image_dir = Path(image_dir)
 
@@ -373,16 +329,6 @@ class TextVQADataset(Dataset):
         if max_samples is not None:
             self.samples = self.samples[:max_samples]
 
-        if answer_list is not None:
-            self.answer_to_idx = {a: i for i, a in enumerate(answer_list)}
-        else:
-            from collections import Counter
-            answer_counts = Counter(s["answer"] for s in self.samples)
-            top_answers = [a for a, _ in answer_counts.most_common(5000)]
-            self.answer_to_idx = {a: i for i, a in enumerate(top_answers)}
-
-        self.vocab_size = len(self.answer_to_idx)
-
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -398,15 +344,11 @@ class TextVQADataset(Dataset):
         images_coarse = DINO_TRANSFORM(image)
         images_full = CLIP_TRANSFORM(image)
 
-        answer = sample["answer"]
-        label_idx = self.answer_to_idx.get(answer, 0)
-        labels = torch.tensor([label_idx], dtype=torch.long)
-
         return {
             "images_coarse": images_coarse,
             "images_full": images_full,
             "questions": sample["question"],
-            "labels": labels,
+            "answer_str": sample["answer"],
             "answers": sample["answers"],
             "question_id": sample["question_id"],
             "image_id": image_id,
@@ -451,10 +393,6 @@ class POPEDataset(Dataset):
         if max_samples is not None:
             self.samples = self.samples[:max_samples]
 
-        # Binary vocabulary: yes=0, no=1
-        self.answer_to_idx = {"yes": 0, "no": 1}
-        self.vocab_size = 2
-
     def __len__(self) -> int:
         return len(self.samples)
 
@@ -467,16 +405,12 @@ class POPEDataset(Dataset):
         images_coarse = DINO_TRANSFORM(image)
         images_full = CLIP_TRANSFORM(image)
 
-        answer = sample["answer"]
-        label_idx = self.answer_to_idx.get(answer, 0)
-        labels = torch.tensor([label_idx], dtype=torch.long)
-
         return {
             "images_coarse": images_coarse,
             "images_full": images_full,
             "questions": sample["question"],
-            "labels": labels,
-            "answers": [answer],
+            "answer_str": sample["answer"],
+            "answers": [sample["answer"]],
             "image_id": sample["image"],
         }
 
@@ -548,13 +482,17 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     Handles mixed tensor/string/list fields. Passes through
     metadata fields (answers, image_id, etc.) as lists.
+    answer_str is passed as a list of strings for generative LM training.
     """
     result = {
         "images_coarse": torch.stack([b["images_coarse"] for b in batch]),
         "images_full": torch.stack([b["images_full"] for b in batch]),
         "questions": [b["questions"] for b in batch],
-        "labels": torch.stack([b["labels"] for b in batch]),
     }
+
+    # answer_str: raw answer strings for next-token prediction training
+    if "answer_str" in batch[0]:
+        result["answer_str"] = [b["answer_str"] for b in batch]
 
     # Pass through optional metadata fields as lists
     for key in ["answers", "question_id", "image_id", "gqa_annotation",

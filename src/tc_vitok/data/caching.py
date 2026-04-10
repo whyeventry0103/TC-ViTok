@@ -174,7 +174,7 @@ class CachedFeatureDataset(Dataset):
         if self.image_dataset is not None and self.use_images:
             base_sample = self.image_dataset[idx]
             result["images_full"] = base_sample["images_full"]
-            result["labels"] = base_sample["labels"]
+            result["answer_str"] = base_sample.get("answer_str", "")
             result["questions"] = base_sample.get("questions", "")
             # Pass through metadata
             for key in ["answers", "question_id", "image_id", "gqa_annotation"]:
@@ -183,7 +183,7 @@ class CachedFeatureDataset(Dataset):
         else:
             # Testing mode: random full-res image
             result["images_full"] = torch.randn(3, 336, 336)
-            result["labels"] = torch.zeros(1, dtype=torch.long)
+            result["answer_str"] = "dummy"
             result["questions"] = ""
 
         return result
@@ -197,17 +197,21 @@ def cached_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Collate function for CachedFeatureDataset batches.
 
     Stacks cached feature tensors and passes through metadata.
+    answer_str is passed as a list of strings for generative LM training.
     """
     result = {
         "v_coarse": torch.stack([b["v_coarse"] for b in batch]),
         "q_embed": torch.stack([b["q_embed"] for b in batch]),
         "images_full": torch.stack([b["images_full"] for b in batch]),
-        "labels": torch.stack([b["labels"] for b in batch]),
     }
 
     # Stack v_full if provided (stub mode pre-computes it to skip full_encoder)
     if "v_full" in batch[0]:
         result["v_full"] = torch.stack([b["v_full"] for b in batch])
+
+    # answer_str: raw answer strings for next-token prediction training
+    if "answer_str" in batch[0]:
+        result["answer_str"] = [b["answer_str"] for b in batch]
 
     # Pass through optional metadata
     for key in ["questions", "answers", "question_id", "image_id",

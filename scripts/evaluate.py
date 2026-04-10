@@ -116,32 +116,6 @@ class ImageOnlyTPNModel(TCViTokModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Answer vocabulary helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _build_vqav2_train_vocab(data_root: str, vocab_size: int = 3129) -> list:
-    """Rebuild VQAv2 training answer vocabulary exactly as VQAv2Dataset does.
-
-    The vqa_head was trained against this vocabulary.  We MUST use the training
-    split's vocabulary at eval time — val-split frequencies produce a different
-    top-N ordering, making the checkpoint's vqa_head outputs uninterpretable.
-    """
-    from collections import Counter
-    ann_path = f"{data_root}/vqav2/v2_mscoco_train2014_annotations.json"
-    print(f"[vocab] Building VQAv2 training vocab from {ann_path} ...")
-    with open(ann_path) as f:
-        anns = json.load(f)["annotations"]
-    answer_counts: Counter = Counter()
-    for ann in anns:
-        answers = [a["answer"] for a in ann["answers"]]
-        most_common = max(set(answers), key=answers.count)
-        answer_counts[most_common] += 1
-    top = [a for a, _ in answer_counts.most_common(vocab_size)]
-    print(f"[vocab] VQAv2 vocab size: {len(top)}  (top-3: {top[:3]})")
-    return top   # idx → answer string
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Model loading
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -154,7 +128,7 @@ def load_model(
 ) -> TCViTokModel:
     """Load TCViTokModel from Phase 1 checkpoint.
 
-    The checkpoint contains only trainable weights (tpn.*, vqa_head.*,
+    The checkpoint contains only trainable weights (tpn.*,
     lora_*, multi_modal_projector.*). The 7B LLaVA backbone is re-loaded
     from HF cache (offline) and trainable weights are overlaid via strict=False.
     """
@@ -173,7 +147,6 @@ def load_model(
         "alpha": 64,
         "targets": ["q_proj", "k_proj", "v_proj", "o_proj"],
         "dropout": 0.05,
-        "answer_vocab_size": 3129,
     }
 
     model_cls = {
@@ -204,18 +177,16 @@ def load_model(
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
     # Sanity check: TPN weights must be present
-    tpn_keys = [k for k in state_dict if k.startswith("tpn.")]
+    tpn_keys  = [k for k in state_dict if k.startswith("tpn.")]
     lora_keys = [k for k in state_dict if "lora_" in k]
     mm_keys   = [k for k in state_dict if "multi_modal_projector." in k]
-    vqa_keys  = [k for k in state_dict if k.startswith("vqa_head.")]
     if not tpn_keys:
         raise RuntimeError(
             f"No TPN weights found in checkpoint. "
             f"Keys in checkpoint: {list(state_dict.keys())[:10]}"
         )
     print(f"[load_model] Checkpoint key counts: "
-          f"TPN={len(tpn_keys)} | LoRA={len(lora_keys)} | "
-          f"mm_proj={len(mm_keys)} | vqa_head={len(vqa_keys)}")
+          f"TPN={len(tpn_keys)} | LoRA={len(lora_keys)} | mm_proj={len(mm_keys)}")
     print(f"[load_model] load_state_dict: "
           f"missing={len(missing)} (expected: frozen backbone) | unexpected={len(unexpected)}")
 
@@ -247,16 +218,12 @@ def extract_yes_no(raw_answer: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def evaluate_vqav2(model, data_root, device, batch_size, max_samples=None, log_interval=200):
-    """Evaluate on VQAv2 val2014 split using the vqa_head classifier.
+    """Evaluate on VQAv2 val2014 split using generative LM decoding.
 
-    Uses predict_class() (classification head) — the same path used during
-    training — rather than LM generation.  The training vocab is rebuilt from
-    the training annotations so indices match what the checkpoint learned.
+    Calls model.generate() to produce free-form answer strings, then scores
+    against the 10 ground-truth annotator answers using the VQA soft accuracy
+    metric. This matches the paper's evaluation protocol (Section 8.2).
     """
-    # Build training vocabulary so checkpoint indices are interpretable
-    train_vocab = _build_vqav2_train_vocab(data_root, vocab_size=3129)
-    idx2answer = {i: a for i, a in enumerate(train_vocab)}
-
     print("\n[VQAv2] Loading val2014 dataset...")
     dataset = VQAv2Dataset(
         annotations_path=f"{data_root}/vqav2/v2_mscoco_val2014_annotations.json",
@@ -264,7 +231,6 @@ def evaluate_vqav2(model, data_root, device, batch_size, max_samples=None, log_i
         image_dir=f"{data_root}/vqav2/val2014",
         split="val",
         max_samples=max_samples,
-        answer_list=train_vocab,   # use training vocab — keeps label indices consistent
     )
     loader = DataLoader(
         dataset,
@@ -281,13 +247,12 @@ def evaluate_vqav2(model, data_root, device, batch_size, max_samples=None, log_i
 
     for step, batch in enumerate(tqdm(loader, desc="VQAv2 val")):
         with torch.no_grad():
-            logits = model.predict_class(
+            preds = model.generate(
                 images_coarse=batch["images_coarse"].to(device),
                 images_full=batch["images_full"].to(device),
                 questions=batch["questions"],
-            )  # [B, vocab_size]
-        pred_indices = logits.argmax(dim=-1).cpu().tolist()
-        preds = [idx2answer.get(i, "") for i in pred_indices]
+                max_new_tokens=20,
+            )  # List[str]
 
         # Diagnostic: first batch — show a few samples
         if step == 0:
@@ -325,13 +290,9 @@ def evaluate_vqav2(model, data_root, device, batch_size, max_samples=None, log_i
 def evaluate_gqa(model, data_root, device, batch_size, max_samples=None, spatial_eval=True, log_interval=200):
     """Evaluate on GQA val_balanced with optional spatial/global split.
 
-    Uses predict_class() with the VQAv2 training vocabulary.  GQA answers
-    (yes/no/color/count/object names) overlap substantially with VQAv2 vocab.
-    Answers absent from the training vocab can never be predicted correctly.
+    Uses model.generate() to produce free-form answer strings, scored against
+    the single ground-truth GQA answer. Matches paper evaluation (Section 8.3).
     """
-    train_vocab = _build_vqav2_train_vocab(data_root, vocab_size=3129)
-    idx2answer = {i: a for i, a in enumerate(train_vocab)}
-
     print("\n[GQA] Loading val_balanced dataset...")
     dataset = GQADataset(
         questions_path=f"{data_root}/gqa/val_balanced_questions.json",
@@ -355,13 +316,12 @@ def evaluate_gqa(model, data_root, device, batch_size, max_samples=None, spatial
 
     for step, batch in enumerate(tqdm(loader, desc="GQA val_balanced")):
         with torch.no_grad():
-            logits = model.predict_class(
+            preds = model.generate(
                 images_coarse=batch["images_coarse"].to(device),
                 images_full=batch["images_full"].to(device),
                 questions=batch["questions"],
-            )
-        pred_indices = logits.argmax(dim=-1).cpu().tolist()
-        preds = [idx2answer.get(i, "") for i in pred_indices]
+                max_new_tokens=20,
+            )  # List[str]
 
         if step == 0:
             for i in range(min(4, len(preds))):
@@ -433,7 +393,8 @@ def evaluate_pope(model, data_root, device, batch_size, max_samples=None, log_in
     """Evaluate on all three POPE variants (popular, random, adversarial).
 
     POPE images are COCO val2014 images — same directory as VQAv2 val.
-    Returns per-variant F1 and macro-average F1.
+    Uses model.generate() to produce yes/no answers, then extracts the first
+    word for binary classification. Returns per-variant F1 and macro-average F1.
     """
     # POPE uses COCO val2014 images (NOT a separate coco/val2014 directory)
     image_dir = f"{data_root}/vqav2/val2014"
@@ -467,35 +428,18 @@ def evaluate_pope(model, data_root, device, batch_size, max_samples=None, log_in
         all_preds = []
         all_gt = []
 
-        # Find yes/no positions in VQAv2 training vocab for logit comparison
-        train_vocab = _build_vqav2_train_vocab(data_root, vocab_size=3129)
-        idx2answer_pope = {i: a for i, a in enumerate(train_vocab)}
-        yes_idx = next((i for i, a in idx2answer_pope.items() if a == "yes"), None)
-        no_idx  = next((i for i, a in idx2answer_pope.items() if a == "no"),  None)
-        if yes_idx is not None and no_idx is not None:
-            print(f"[POPE/{variant}] yes_idx={yes_idx}, no_idx={no_idx} in training vocab")
-        else:
-            print(f"[POPE/{variant}] WARNING: 'yes'/'no' not in training vocab — using argmax fallback")
-
         pope_diag_done = False
         for step, batch in enumerate(tqdm(loader, desc=f"POPE/{variant}")):
             with torch.no_grad():
-                logits = model.predict_class(
+                raw_answers = model.generate(
                     images_coarse=batch["images_coarse"].to(device),
                     images_full=batch["images_full"].to(device),
                     questions=batch["questions"],
-                )  # [B, vocab_size]
+                    max_new_tokens=5,  # POPE answers are "yes" or "no"
+                )  # List[str]
 
-            if yes_idx is not None and no_idx is not None:
-                # Compare logits at yes vs no positions directly
-                preds = [
-                    "yes" if logits[b, yes_idx] >= logits[b, no_idx] else "no"
-                    for b in range(logits.shape[0])
-                ]
-            else:
-                # Fallback: argmax → answer string → yes/no extraction
-                pred_indices = logits.argmax(dim=-1).cpu().tolist()
-                preds = [extract_yes_no(idx2answer_pope.get(i, "no")) for i in pred_indices]
+            # Extract yes/no from the first word of each generated answer
+            preds = [extract_yes_no(a) for a in raw_answers]
 
             gt = [
                 (a[0] if isinstance(a, list) else a).lower()
@@ -506,7 +450,10 @@ def evaluate_pope(model, data_root, device, batch_size, max_samples=None, log_in
 
             if not pope_diag_done and step == 0:
                 for i in range(min(4, len(preds))):
-                    tqdm.write(f"  [diag] pred={repr(preds[i])} | gt={repr(gt[i])}")
+                    tqdm.write(
+                        f"  [diag] raw={repr(raw_answers[i])} | "
+                        f"pred={repr(preds[i])} | gt={repr(gt[i])}"
+                    )
                 pope_diag_done = True
 
             if log_interval > 0 and (step + 1) % log_interval == 0:

@@ -170,7 +170,6 @@ def build_loaders(data_config, batch_size, num_workers, args, is_ddp: bool = Fal
                 questions_path=data_config["val_questions"],
                 image_dir=data_config["val_image_dir"],
                 split="val",
-                answer_list=list(train_dataset.answer_to_idx.keys()),
                 max_samples=data_config.get("max_samples"),
             )
         elif dataset_name == "gqa":
@@ -182,7 +181,6 @@ def build_loaders(data_config, batch_size, num_workers, args, is_ddp: bool = Fal
             val_dataset = GQADataset(
                 questions_path=data_config["gqa_val_questions"],
                 image_dir=data_config["gqa_val_image_dir"],
-                answer_list=list(train_dataset.answer_to_idx.keys()),
                 max_samples=data_config.get("max_samples"),
             )
         else:
