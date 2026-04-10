@@ -318,13 +318,14 @@ class TCViTokModel(nn.Module):
             q_embed = self.text_encoder(questions)  # [B, 512]
 
         # Step 1: TPN produces top-k gather indices
-        idx, s_N = self.tpn(
+        # During training, TPN also returns mask_ste for STE gradient routing.
+        idx, s_N, mask_ste = self.tpn(
             v_coarse=v_coarse,
             q_embed=q_embed,
             k=self.k,
             tau=tau,
             training=self.training,
-        )  # idx: [B, k], s_N: [B, N]
+        )  # idx: [B, k], s_N: [B, N], mask_ste: [B, N] or None
 
         # Step 2: Extract full visual features (frozen CLIP ViT-L/14)
         if v_full is None:
@@ -338,6 +339,17 @@ class TCViTokModel(nn.Module):
         # Step 3: GATHER selected tokens (real compression!)
         # Output: [B, k, 1024] — LLM sees k tokens, not N
         v_selected = gather_tokens(v_full, idx)
+
+        # Step 3b: STE gradient routing — connect VQA loss to TPN parameters.
+        # torch.gather is NOT differentiable w.r.t. idx, so VQA loss gradient
+        # cannot reach TPN through the gather operation alone.
+        # Fix: multiply v_selected by mask_ste values at the selected positions.
+        #   - Forward: mask_ste[b, idx[b,j]] = m_hard = 1.0  → no-op (v_selected unchanged)
+        #   - Backward: gradient flows through m_soft → TPN scores
+        # Only applied when mask_ste is available (training, real LLaVA, not stub).
+        if self.training and mask_ste is not None and not self.use_stub_llm:
+            mask_at_selected = torch.gather(mask_ste, dim=1, index=idx)  # [B, k]
+            v_selected = v_selected * mask_at_selected.unsqueeze(-1)     # [B, k, D]
 
         # Step 4: Forward through LLM backbone
         if self.use_stub_llm:
@@ -684,7 +696,7 @@ class TCViTokModel(nn.Module):
         """
         v_coarse = self.coarse_encoder(images_coarse)
         q_embed = self.text_encoder(questions)
-        idx, _ = self.tpn(
+        idx, _, __ = self.tpn(
             v_coarse=v_coarse, q_embed=q_embed, k=self.k, tau=0.1, training=False,
         )
         v_full = self.full_encoder(images_full)
@@ -727,7 +739,7 @@ class TCViTokModel(nn.Module):
         with torch.no_grad():
             v_coarse = self.coarse_encoder(images_coarse)
             q_embed = self.text_encoder(questions)
-            idx, s_N = self.tpn(
+            idx, s_N, _ = self.tpn(
                 v_coarse=v_coarse,
                 q_embed=q_embed,
                 k=self.k,

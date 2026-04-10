@@ -104,7 +104,7 @@ class ImageOnlyTPNModel(TCViTokModel):
         q_embed_zero = torch.zeros(
             B, 512, device=v_coarse.device, dtype=v_coarse.dtype
         )
-        idx, _ = self.tpn(
+        idx, _, __ = self.tpn(
             v_coarse=v_coarse,
             q_embed=q_embed_zero,
             k=self.k,

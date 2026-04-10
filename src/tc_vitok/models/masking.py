@@ -55,11 +55,17 @@ def gumbel_sigmoid_ste(
     u = torch.rand_like(scores).clamp(eps, 1 - eps)
     g = -torch.log(-torch.log(u))  # Gumbel(0, 1)
 
-    # Step 2: Soft mask via Gumbel-Sigmoid with temperature
-    m_soft = torch.sigmoid((scores + g) / tau)
+    # Step 2: Noisy scores used for BOTH soft mask and hard top-k.
+    # Using raw scores for topk (the prior bug) meant all-zero raw scores always
+    # returned indices 0..k-1 via deterministic tiebreaking → all batch samples
+    # select identical tokens → entropy = log(k) instead of log(N).
+    noisy_scores = scores + g
 
-    # Step 3: Hard top-k on RAW scores (not noisy scores)
-    idx = scores.topk(k, dim=-1).indices
+    # Step 3: Soft mask via Gumbel-Sigmoid with temperature
+    m_soft = torch.sigmoid(noisy_scores / tau)
+
+    # Step 4: Hard top-k on NOISY scores — ensures per-sample diversity
+    idx = noisy_scores.topk(k, dim=-1).indices
     m_hard = torch.zeros_like(scores)
     m_hard.scatter_(-1, idx, 1.0)
 

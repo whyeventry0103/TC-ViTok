@@ -49,7 +49,7 @@ def test_tpn_architecture():
     v_coarse = torch.randn(B, 49, 384)
     q_embed = torch.randn(B, 512)
 
-    idx, s_N = tpn(v_coarse, q_embed, k=k, tau=1.0, training=True)
+    idx, s_N, _ = tpn(v_coarse, q_embed, k=k, tau=1.0, training=True)
 
     assert idx.shape == (B, k), f"idx shape: {idx.shape}, expected ({B}, {k})"
     assert s_N.shape == (B, 576), f"s_N shape: {s_N.shape}, expected ({B}, 576)"

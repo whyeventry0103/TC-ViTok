@@ -189,11 +189,13 @@ class TokenizationPolicyNetwork(nn.Module):
                 "Mask has no gradient! STE is broken. "
                 "Check gumbel_sigmoid_ste implementation."
             )
-            # gradients flow through mask_ste; idx used for gather
+            # Return mask_ste so tc_vitok_model can route VQA gradient back to TPN.
+            # Without this, gather_tokens(v_full, idx) is NOT differentiable w.r.t. idx,
+            # so TPN would only receive gradient from sparsity loss (→ scores ≈ 0 forever).
+            return idx, s_N, mask_ste
         else:
             _, idx = gumbel_sigmoid_ste(s_N, k=k, tau=tau, training=False)
-
-        return idx, s_N
+            return idx, s_N, None
 
     def get_num_params(self) -> int:
         """Return the number of trainable parameters."""

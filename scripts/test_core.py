@@ -32,7 +32,7 @@ def test_tpn():
     B, k = 4, 144
     v = torch.randn(B, 49, 384)
     q = torch.randn(B, 512)
-    idx, s_N = tpn(v, q, k=k, tau=1.0, training=True)
+    idx, s_N, _ = tpn(v, q, k=k, tau=1.0, training=True)
 
     assert idx.shape == (B, k), f"idx shape {idx.shape}, expected ({B}, {k})"
     assert s_N.shape == (B, 576), f"s_N shape {s_N.shape}, expected ({B}, 576)"
