@@ -14,13 +14,14 @@ training:
   trainable_components:
     - tpn
 
-  # In Option B (gather-based), VQA loss has NO gradient path to TPN
-  # (gather uses integer idx — non-differentiable). TPN only receives
-  # gradient from L1 sparsity (directly on scores s_N). lambda_max=0
-  # would give TPN zero gradient and Phase 0 would do nothing.
-  # Use small nonzero lambda so TPN actually trains via L1 sparsity.
-  lambda_max: 0.01
-  lambda_entropy: 0.01
+  # Phase 0 regularization.
+  # lambda_max = 0.0: topk already enforces exactly k=144 tokens; L1 penalty
+  # only crushes scores to 0, which destroys the gradient signal in Phase 1.
+  # With the tau-independent STE now in place, VQA gradient flows to TPN
+  # directly (d(loss)/d(s_N_i) = dot(g_v, v_selected)), so TPN does not
+  # need L1 as a proxy training signal. lambda_entropy=0.001 kept for monitoring.
+  lambda_max: 0.0
+  lambda_entropy: 0.001
   T_warmup: 1000
 
   # Paper Phase 0: τ=1.0 fixed
@@ -36,6 +37,8 @@ data:
 
 logging:
   wandb_run_name: "phase0_tpn_warmup"
-  # Validation disabled for Phase 0: VQA loss is zero (gather non-differentiable),
-  # so there's nothing to validate. Previous runs hung at step 500 due to val loop.
-  eval_interval: 999999
+  # Validation enabled: tau-independent STE now routes VQA gradient to TPN,
+  # so val/vqa_loss is meaningful. Monitor val/entropy to confirm TPN learns
+  # query-conditioned selection (entropy > -log(144) = -4.97 means it works).
+  eval_interval: 2500
+  max_val_batches: 50
