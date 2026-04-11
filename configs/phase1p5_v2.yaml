@@ -1,0 +1,81 @@
+# Phase 1.5 v2: Corrected hyperparameters after phase1p5_v1 failure analysis
+#
+# Root causes of v1 failure (diagnosed at step 25k):
+#   1. lambda_distill=0.2 overwhelmed VQA gradient (43% of VQA magnitude)
+#      → val_vqa flatlined at 0.46 from step 20k-25k, never converging
+#   2. UnselectedPooler randomly initialized, injecting noise into LLM prefix
+#      for first ~20k steps before VQA could overcome the distillation anchor
+#
+# Fixes in v2:
+#   1. lambda_distill: 0.2 → 0.05 (distill = 7% of VQA magnitude; VQA dominates immediately)
+#   2. pooler_warmup_steps: 5000 — TPN gradients zeroed for first 5k steps
+#      so UnselectedPooler learns stable background representations before
+#      TPN routing competes with it
+#   3. max_steps: 50k → 100k — extended run with unlimited compute
+#   4. Tau/spread schedules extended proportionally to 100k step horizon
+#
+# Load from: Phase 0 v4 checkpoint (fresh TPN, clean LoRA init)
+# Expected: val_vqa gap vs phase1_v3 starts closing by step 15k
+
+defaults:
+  - base
+
+phase: 1
+description: "Phase 1.5 v2: lambda_distill=0.05, pooler warmup 5k, 100k steps"
+
+model:
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 100000
+  batch_size: 4
+  grad_accum_steps: 16    # effective batch = 4 × 16 × 2 GPUs = 128
+
+  lambda_max: 0.0
+  T_warmup: 5000
+  lambda_entropy: 0.02
+  lambda_diversity: 0.1
+
+  # Distillation: 0.05 keeps dense spatial supervision without dominating VQA
+  # At distill≈0.7: contribution = 0.05×0.7 = 0.035 vs VQA≈0.5 → 7% ratio (healthy)
+  lambda_distill: 0.05
+
+  # Pooler warmup: TPN gradients zeroed for first 5k steps
+  # Gives UnselectedPooler 5k steps to learn stable background summaries
+  # before TPN routing changes compete with it
+  pooler_warmup_steps: 5000
+
+  # LoRA warmfreeze: match pooler_warmup exactly so both unfreeze simultaneously.
+  # Steps 0-5k: only pooler + projector train (TPN frozen, LoRA frozen)
+  # Steps 5k+:  everything trains together — no awkward middle phases
+  lora_warmfreeze_steps: 5000
+
+  # Spatial spread: anneal proportional to 100k schedule
+  # Active steps 0-60k, linearly decay to 0 by step 90k
+  lambda_spread: 0.005
+  spread_decay_start: 60000
+  spread_decay_end: 90000
+
+  lr_tpn: 3e-3
+  lr_lora: 2e-4
+  lr_mlp: 5e-4
+
+  # Tau: anneals 1.0→0.1 over 100k steps (slower binarization, more exploration)
+  tau_max: 1.0
+  tau_min: 0.1
+
+data:
+  datasets: ["vqav2", "gqa"]
+
+logging:
+  wandb_run_name: "phase1p5_v2_corrected"
+  eval_interval: 5000
+  max_val_batches: 100
+
+checkpoint:
+  load_from: "runs/phase0_v4/phase0/best.ckpt"
+  strict: false

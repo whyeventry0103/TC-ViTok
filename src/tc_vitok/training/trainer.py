@@ -89,6 +89,12 @@ class TCViTokTrainer:
         # has time to learn query-conditioned routing before LoRA compensates.
         self.lora_warmfreeze_steps = config["training"].get("lora_warmfreeze_steps", 0)
 
+        # Pooler warm-up: zero TPN gradients for the first N steps so UnselectedPooler
+        # learns stable background representations before TPN routing starts moving.
+        # Steps 0-pooler_warmup: only pooler + LoRA + projector update.
+        # Steps pooler_warmup+: everything updates normally.
+        self.pooler_warmup_steps = config["training"].get("pooler_warmup_steps", 0)
+
         # Logging
         self.log_interval = config["logging"]["log_interval"]
         self.eval_interval = config["logging"]["eval_interval"]
@@ -347,6 +353,15 @@ class TCViTokTrainer:
             if self.lora_warmfreeze_steps > 0 and self.global_step < self.lora_warmfreeze_steps:
                 for name, param in raw_model.named_parameters():
                     if "lora_" in name and param.grad is not None:
+                        param.grad.zero_()
+
+            # Pooler warm-up: zero TPN gradients so UnselectedPooler stabilizes
+            # before TPN routing competes. TPN still participates in forward
+            # (gumbel noise gives varied routing each batch), but its weights
+            # don't update — the pooler learns on a slowly-drifting token set.
+            if self.pooler_warmup_steps > 0 and self.global_step < self.pooler_warmup_steps:
+                for param in raw_model.tpn.parameters():
+                    if param.grad is not None:
                         param.grad.zero_()
 
             # Optimizer step

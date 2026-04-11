@@ -550,16 +550,17 @@ to prevent k from collapsing to k_max. Good Phase 2 efficiency ablation.
 ## Eval Checklist (paste results here when done)
 
 ```
-TC-ViTok k=144:
+TC-ViTok k=144 (Phase 1 v3 — runs/phase1_v3/phase1/best.ckpt):
   VQAv2 VQA-Score:      _______  (target: 76.0%)
   GQA overall:          _______  (target: 61.0%)
   GQA spatial:          _______  (target: 59.0%)
   GQA global:           _______  (target: 62.0%)
   POPE macro-F1:        _______  (target: 84.0%)
+  Eval status:          [OK] run completed 2026-04-10 — read runs/eval_results/*.json
 
 Random-drop baseline:
   VQAv2:                _______
-  GQA spatial:          _______
+  Eval status:          [FAIL] — needs rerun
 
 Image-only TPN baseline:
   VQAv2:                _______
@@ -567,3 +568,117 @@ Image-only TPN baseline:
 
 Key gap (TC vs image-only, GQA spatial): _______  → routing verdict: WORKS / WEAK / FAILED
 ```
+
+---
+
+## Phase 1.5 Implementation Status (as of 2026-04-12)
+
+All components from the "Phase 1.5 Architecture: Complete Forward Pass" section above
+are **fully implemented and running**. Smoke test passed (3 steps, 4 optimizer groups,
+no OOM, no crash). Full training running at `runs/phase1p5_v1`.
+
+### What Was Built (Session 5: 2026-04-11)
+
+| Component | File | Status |
+|---|---|---|
+| `complement_gather(V, idx)` | `tc_vitok_model.py` | ✅ |
+| `sinusoidal_2d_pe(flat_indices, D)` | `tc_vitok_model.py` | ✅ |
+| `UnselectedPooler(d_model=1024, n_slots=4, n_heads=4)` | `tc_vitok_model.py` | ✅ |
+| Orthogonal deflation in `forward()` | `tc_vitok_model.py` | ✅ |
+| `_get_teacher_importance()` — full prompt + hidden state cosine sim | `tc_vitok_model.py` | ✅ |
+| `spatial_spread_loss(mask_soft, N, grid)` | `losses.py` | ✅ |
+| `attention_distillation_loss(s_N, teacher_imp, T=1.0, teacher_scale=10.0)` | `losses.py` | ✅ |
+| `compute_total_loss` extended with spread/distill params | `losses.py` | ✅ |
+| `get_lambda_spread(step, max_val, decay_start, decay_end)` | `curriculum.py` | ✅ |
+| `unsel_pooler` param group in optimizer | `optimizer.py` | ✅ |
+| Teacher pass in `train_step` | `trainer.py` | ✅ |
+| `datasets: ["vqav2", "gqa"]` via ConcatDataset | `scripts/train.py` | ✅ |
+| `configs/phase1p5.yaml` | configs/ | ✅ |
+| `tests/test_phase1p5.py` — 52 tests | tests/ | ✅ |
+
+### Bugs Fixed During Phase 1.5 Implementation
+
+| ID | Issue | Fix |
+|---|---|---|
+| BUG-38 | Padding corruption in teacher importance — h[i, ans_start:] averages padding zeros | Store seq_lens before padding; slice h[i, ans_start:seq_lens[i]] |
+| BUG-39 | Wrong LLaVA prompt structure — visual tokens prepended before BOS | Split: prefix_embeds ("USER: ") + v_proj_full + suffix_embeds ("\nQ\nASSISTANT:"); track visual_starts |
+| BUG-40 | VRAM spikes — lm_out (~19GB) held alive during student forward | Explicit del chain: all_embeds → padded_embeds/masks → lm_out → h |
+| BUG-41 | Teacher distribution flat — T=2.0, cosine_sim std≈0.1 → p_top only 1.16× uniform | teacher_scale=10.0, T=1.0; maps cosine_sim std 0.1→1.0; ~19× concentration verified |
+| BUG-42 | configs/phase1p5.yaml wrong checkpoint path | Fixed: runs/phase0_v4/best.ckpt → runs/phase0_v4/phase0/best.ckpt |
+| BUG-43 | diagnose_routing.py used nonexistent from_pretrained(); wrong image sizes | Fixed to constructor + load_state_dict; dual preprocessors (98px DINOv2, 336px CLIP) |
+
+---
+
+## Phase 1.5 Training Analysis (live — step ~21k of 50k)
+
+### Val Metrics vs Phase 1 v3 Baseline
+
+| Step | p1.5 val_vqa | p1v3 val_vqa | Gap | Interpretation |
+|------|-------------|-------------|-----|----------------|
+| 5k   | 0.5129      | 0.4411      | +0.072 | UnselectedPooler injecting noise |
+| 10k  | 0.4951      | 0.4053      | +0.090 | Gap widening — distill too strong |
+| 15k  | 0.5001      | 0.4032      | +0.097 | Regression (pooler warmup plateau) |
+| 20k  | 0.4610      | 0.3617      | +0.099 | Recovery; distill declining |
+
+**Phase 1.5 converges 35% slower** than Phase 1 v3 (0.052 vs 0.079 VQA CE improvement
+over steps 5k→20k). Root causes:
+1. UnselectedPooler randomly initialized — adds noise prefix tokens for first ~15k steps
+2. lambda_distill=0.2 contributes 43% of VQA gradient magnitude, pulling TPN toward
+   teacher's full-token routing preferences rather than 144-token VQA-optimal routing
+3. GQA training data harder distribution
+
+**Positive signs:**
+- Distill IS declining: 1.2-1.4 (step 11k) → 0.7-1.1 (step 21k)
+- Spread IS increasing: -107 → -113 (more spatial diversity, above uniform -95.8)
+- No collapse, no NaN, entropy stable at -5.83 train
+
+### Plan of Action
+
+**Step 25k is the decision point.** Monitor these specific numbers:
+
+| Metric | Green: add distill decay, extend 100k | Yellow: extend, watch 30k | Red: restart |
+|--------|---------------------------------------|--------------------------|--------------|
+| val_vqa | < 0.42 | 0.42–0.45 | > 0.45 |
+| Gap vs p1v3 | < 0.085 (narrowing) | 0.085–0.095 | > 0.095 (widening) |
+| distill train | < 0.70 | 0.70–0.85 | > 0.85 (plateau) |
+
+**If Green or Yellow:** Add distill annealing in trainer.py:
+```python
+# After step 20k, decay lambda_distill from 0.2 to 0.02 over next 30k steps
+lambda_distill = max(0.02, 0.2 * (1.0 - (step - 20000) / 30000))
+```
+Extend max_steps to 100k. Tau stays at 0.1 floor from step 50k onward (fine).
+
+**If Red:** Restart from `runs/phase0_v4/phase0/best.ckpt` with:
+- lambda_distill: 0.2 → 0.05
+- pooler_warmup_steps: 5000 (freeze TPN, only train pooler + LoRA first 5k steps)
+- max_steps: 100000
+
+---
+
+## Novelty Analysis (Reviewer #2 Assessment — 2026-04-12)
+
+### Component Novelty Breakdown
+
+| Component | Novelty | Prior art |
+|---|---|---|
+| Query-conditioned TPN routing | **Standard engineering** | Q-Former (BLIP-2), InstructBLIP |
+| Gumbel-Softmax + STE | **Standard engineering** | Jang et al. 2017, Maddison et al. 2017 |
+| Teacher distillation for token selection | **Standard engineering** | EViT (Liang et al. 2022), DynamicViT |
+| Cross-attention 4-slot pooler | **Standard engineering** | Slot Attention, Perceiver, Q-Former |
+| **Orthogonal deflation of complement set** | **NOVEL — Golden Ticket** | No prior paper found |
+| Spatial spread loss (variance penalty) | Incremental contribution | ToDRE addresses same problem differently |
+
+### Publication Odds (assuming results hit target)
+
+| Venue | Odds | Condition |
+|---|---|---|
+| CVPR/ICCV/ECCV main | 12-18% | Must beat FastV + PruMerge, not just random drop |
+| NeurIPS | 15-22% | Theoretical framing of orthogonal deflation + principled ablations |
+| ECCV/EMNLP workshop | 75%+ | Results don't need to be SOTA |
+
+### Required Ablations to Defend Against Reviewer #2
+
+1. **Orthogonal deflation ablation**: Table with (a) no background pooling, (b) pooling without deflation, (c) pooling with deflation. If (b)→(c) gives ≥ 0.5% VQAv2, the claim is defensible.
+2. **Comparison to FastV, LLaVA-PruMerge, ToMe-for-LLaVA at same 144-token budget** — must beat them, not just random drop. Run these baselines BEFORE writing paper.
+3. **Query-conditioning ablation**: GQA spatial accuracy (TC-ViTok) vs (image-only TPN baseline). If gap > 3%, the query-conditioning narrative holds.

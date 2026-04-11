@@ -384,18 +384,29 @@ bash scripts/download_assets.sh --gqa-only
 
 ## Part 3 — Training Status
 
-### Current Status (as of 2026-04-09)
-- **Dry run**: PASSED (2 steps, 2 GPUs, BF16, stub mode) ✓
-- **Real-data test**: PASSED (2 steps, 2 GPUs, BF16, real VQAv2 + all encoders) ✓
-- **First full training attempt**: CRASHED at ~13:33 with SIGABRT (BUG-11 through BUG-15 fixed)
-- **Second full training attempt**: CRASHED with DDP param mismatch (BUG-16 fixed)
-- **Third full training attempt**: CRASHED with NCCL ALLREDUCE timeout (BUG-17 — HuggingFace network timeouts desync ranks)
-- **Fourth full training attempt**: CRASHED with NCCL ALLGATHER timeout (BUG-18 — `device_map="cpu"` prevented `.to(cuda)`)
-- **Fifth training attempt**: FAILED — DDP rank 1 dies silently (BUG-19 — forward bypass + validation desync)
-- **Sixth training attempt**: DDP working but 34% SLOWER than single GPU (BUG-20 — DDP overhead for 887K params)
-- **Seventh training attempt**: Crashed — `UnboundLocalError: dist` on rank 1 (BUG-19d — local import shadowed module-level)
-- **Eighth training attempt**: Hangs at step 500 — validation loop runs full 7.6B model on val set (BUG-21)
-- **Status**: All fixes applied (BUG-19 through BUG-21). Phase 0 running single-GPU with validation disabled.
+### Current Status (as of 2026-04-12)
+
+| Run | Steps | Final val_vqa | Final val_loss | Status |
+|---|---|---|---|---|
+| phase0_v4 | 10,000 | — | — | ✅ COMPLETE — checkpoint used for Phase 1.5 |
+| phase1_v3 | 50,000 | 0.3334 | 0.2309 | ✅ COMPLETE — best baseline |
+| phase1p5_v1 | ~21k/50k | 0.4610 (step 20k) | 0.3608 | 🔄 RUNNING |
+
+### Phase 1 v3 — Final Metrics (COMPLETE)
+- val loss: 0.2309, val VQA: 0.3334, val entropy: -5.1252
+- Eval: run_eval.sh completed [OK] for TC-ViTok, [FAIL] for random baseline
+- Checkpoint: `runs/phase1_v3/phase1/best.ckpt`
+
+### Phase 1.5 v1 — Live Training
+- Running: `runs/phase1p5_v1/phase1/`, tmux session `phase1p5` (~1.03 it/s)
+- Config: `configs/phase1p5.yaml` (LoRA rank 64, lambda_distill=0.2, lambda_spread=0.005, datasets=vqav2+gqa)
+- Started from: `runs/phase0_v4/phase0/best.ckpt`
+- Components active: UnselectedPooler, orthogonal deflation, teacher distillation, spatial spread loss
+- Step 25k is the decision point (see innovations.md Plan of Action)
+
+### Historical attempts (pre-generative rewrite, Apr 8-10)
+- **First–Eighth training attempts**: CRASHED (SIGABRT, DDP mismatch, NCCL timeout, etc.) — all fixed BUG-11 through BUG-21
+- **Phase 1 gen1–gen4, v2, v3**: Various restarts fixing label shift (BUG-28), gumbel topk (BUG-29), mask_ste (BUG-30), lambda_max (BUG-31), tau-independent STE (BUG-32)
 
 ### Before restarting — pull fixes first
 ```bash
@@ -941,4 +952,100 @@ bash scripts/run_eval.sh runs/phase1_v3/phase1/best.ckpt
 Monitor progress:
 ```bash
 cat $(ls -t ~/TC-ViTok/logs/train_*.log | head -1) | tr '\r' '\n' | grep "^\[Step.*val"
+```
+
+---
+
+## Part 9 — Phase 1.5: Full Architecture + Training Analysis (Session 7: Apr 11-12 2026)
+
+### Phase 1 v3 Final Results
+
+- **Completed**: 50,000 steps at ~2.20 it/s (~6h18m total)
+- **Final metrics**: val loss 0.2309, val VQA 0.3334, val entropy -5.1252
+- **Checkpoint**: `runs/phase1_v3/phase1/best.ckpt` (539MB)
+- **Eval**: run_eval.sh completed [OK] for TC-ViTok — read actual VQA-score % with `cat runs/eval_results/*.json`
+- **TPN routing diagnostic**: entropy 5.850 vs random 6.329; center bias 13.1%; query conditioning gap only 0.019 (very weak — model routes foreground but not query-conditioned)
+
+### Phase 1.5 Architecture Implemented
+
+All five Phase 1.5 components implemented and running. See `innovations.md` for full spec.
+
+**New files/changes:**
+- `tc_vitok_model.py`: `complement_gather`, `sinusoidal_2d_pe`, `UnselectedPooler`, orthogonal deflation in `forward()`, `_get_teacher_importance()` with 3 bug fixes
+- `losses.py`: `spatial_spread_loss`, `attention_distillation_loss` (teacher_scale=10.0), extended `compute_total_loss`
+- `curriculum.py`: `get_lambda_spread`
+- `optimizer.py`: UnselectedPooler param group
+- `trainer.py`: teacher pass, lambda_distill, lambda_spread, mask_soft
+- `scripts/train.py`: ConcatDataset for `datasets: ["vqav2", "gqa"]`
+- `configs/phase1p5.yaml`: LoRA rank 64, lambda_distill=0.2, lambda_spread=0.005
+- `tests/test_phase1p5.py`: 52 tests covering all new components
+
+**Bugs fixed during Phase 1.5 implementation:**
+
+| Bug | Issue | Fix |
+|---|---|---|
+| BUG-38 | Padding corruption in teacher importance (h[i, ans_start:] averages padding zeros) | Store seq_lens before padding; slice h[i, ans_start:seq_lens[i]] |
+| BUG-39 | Wrong LLaVA prompt structure in teacher pass (visual before BOS) | Split: prefix("USER: ") + visual + suffix("\nQ\nASSISTANT:"); track visual_starts |
+| BUG-40 | VRAM spikes — lm_out (~19GB) held alive | Explicit del chain at earliest possible points |
+| BUG-41 | Teacher distribution flat — T=2.0, cosine_sim std≈0.1 → p_top only 1.16× uniform | teacher_scale=10.0, T=1.0 → ~19× concentration |
+| BUG-42 | configs/phase1p5.yaml wrong checkpoint path (runs/phase0_v4/best.ckpt) | Fixed to runs/phase0_v4/phase0/best.ckpt |
+| BUG-43 | diagnose_routing.py used nonexistent TCViTokModel.from_pretrained() | Fixed to constructor + load_state_dict; separate preprocessors for 98px/336px |
+
+### Phase 1.5 Launch Command
+
+```bash
+# Smoke test first (3 steps, verify compilation)
+PYTHONPATH=src python scripts/train.py \
+    --config configs/phase1p5.yaml \
+    --output runs/smoke_p15 \
+    --dummy-data --max-steps 3 --no-wandb
+
+# Full training (after smoke passes)
+tmux new -s phase1p5
+bash scripts/launch_multigpu.sh configs/phase1p5.yaml runs/phase1p5_v1
+```
+
+### Phase 1.5 Training Metrics (live)
+
+| Step | val_loss | val_vqa | val_entropy | Gap vs p1v3 |
+|------|----------|---------|-------------|-------------|
+| 5k   | 0.4123   | 0.5129  | -5.0266     | +0.072 |
+| 10k  | 0.3950   | 0.4951  | -5.0071     | +0.090 |
+| 15k  | 0.4000   | 0.5001  | -5.0057     | +0.097 |
+| 20k  | 0.3608   | 0.4610  | -5.0112     | +0.099 |
+
+**Status:** Gap vs Phase 1 v3 is widening (0.072→0.099). Phase 1.5 converges 35% slower due to:
+1. UnselectedPooler randomly initialized — noisy prefix tokens for first ~15k steps
+2. lambda_distill=0.2 contributes 43% of VQA gradient magnitude, redirecting TPN toward teacher's 576-token preferences
+
+**Positive signs:** Distill declining (1.2-1.4 → 0.7-1.1), spread increasing (-107→-113), no collapse.
+
+### Step 25k Decision: Ride Out vs Restart
+
+Check at step 25k:
+```bash
+cat $(ls -t ~/TC-ViTok/logs/train_*.log | head -1) | tr '\r' '\n' | grep "^\[Step.*val"
+```
+
+| Metric | Green (add decay, extend 100k) | Yellow (watch 30k) | Red (restart) |
+|--------|-------------------------------|--------------------|---------------|
+| val_vqa | < 0.42 | 0.42-0.45 | > 0.45 |
+| Gap vs p1v3 | < 0.085 (narrowing) | 0.085-0.095 | > 0.095 |
+| distill | < 0.70 | 0.70-0.85 | > 0.85 |
+
+**If Green/Yellow:** Add distill annealing in trainer.py (no restart):
+```python
+lambda_distill = max(0.02, 0.2 * (1.0 - (step - 20000) / 30000))
+```
+Extend max_steps to 100k.
+
+**If Red:** Restart from `runs/phase0_v4/phase0/best.ckpt` with lambda_distill=0.05, pooler_warmup_steps=5000.
+
+### Available Checkpoints (as of 2026-04-12)
+
+```
+runs/phase0_v4/phase0/best.ckpt     186MB  ← use for Phase 1.5 restarts
+runs/phase1_v3/phase1/best.ckpt     539MB  ← best Phase 1 baseline
+runs/phase1p5_v1/phase1/...         ongoing ← Phase 1.5 live
+runs/eval_results/*.json             ← Phase 1 eval results (read these!)
 ```
