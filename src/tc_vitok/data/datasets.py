@@ -494,10 +494,17 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     if "answer_str" in batch[0]:
         result["answer_str"] = [b["answer_str"] for b in batch]
 
-    # Pass through optional metadata fields as lists
+    # # Pass through optional metadata fields as lists
+    # for key in ["answers", "question_id", "image_id", "gqa_annotation",
+    #             "paired_question"]:
+    #     if key in batch[0]:
+    #         result[key] = [b[key] for b in batch]
+
+    # return result
+        # Pass through optional metadata fields as lists safely (handles ConcatDataset mixed batches)
     for key in ["answers", "question_id", "image_id", "gqa_annotation",
                 "paired_question"]:
-        if key in batch[0]:
-            result[key] = [b[key] for b in batch]
+        if any(key in b for b in batch):
+            result[key] = [b.get(key) for b in batch]
 
     return result

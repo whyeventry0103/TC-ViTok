@@ -63,5 +63,5 @@ logging:
   max_val_batches: 100
 
 checkpoint:
-  load_from: "runs/phase0_v4/best.ckpt"
+  load_from: "runs/phase0_v4/phase0/best.ckpt"
   strict: false
