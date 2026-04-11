@@ -58,13 +58,38 @@ from tc_vitok.models.tc_vitok_model import TCViTokModel
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[diag] Loading model on {device}...")
 
-model = TCViTokModel.from_pretrained(
-    checkpoint_path=args.checkpoint,
+tpn_config = {
+    "n_heads": 4,
+    "d_model": 384,
+    "d_coarse": 384,
+    "d_h": 512,
+    "d_text": 512,
+    "M": 49,
+    "N": 576,
+}
+lora_config = {
+    "rank": 32,
+    "alpha": 64,
+    "targets": ["q_proj", "k_proj", "v_proj", "o_proj"],
+    "dropout": 0.05,
+}
+
+model = TCViTokModel(
+    k=K,
+    tpn_config=tpn_config,
+    use_stub_llm=False,
+    llava_model_name="llava-hf/llava-1.5-7b-hf",
+    lora_config=lora_config,
     load_encoders=True,
-    device=device,
 )
+
+ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+state_dict = ckpt.get("model_state_dict", ckpt)
+model.load_state_dict(state_dict, strict=False)
+
 model.eval()
-model.set_training_phase(1)  # use Phase 1 settings (TPN + LoRA active)
+model.set_training_phase(1)
+model = model.to(device)
 print("[diag] Model loaded.\n")
 
 # ── Load a few VQAv2 samples ──────────────────────────────────────────────────
@@ -91,7 +116,13 @@ heatmap_random = np.zeros(GRID * GRID, dtype=np.float32)
 heatmap_imgonly = np.zeros(GRID * GRID, dtype=np.float32)
 
 from torchvision import transforms
-preprocess = transforms.Compose([
+preprocess_coarse = transforms.Compose([
+    transforms.Resize((98, 98)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
+])
+preprocess_full = transforms.Compose([
     transforms.Resize((336, 336)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
@@ -116,15 +147,18 @@ with torch.no_grad():
 
         try:
             img = Image.open(img_file).convert("RGB")
-            img_tensor = preprocess(img).unsqueeze(0).to(device)  # [1, 3, 336, 336]
+            img_coarse = preprocess_coarse(img).unsqueeze(0).to(device)  # [1, 3, 98, 98]
+            img_full   = preprocess_full(img).unsqueeze(0).to(device)    # [1, 3, 336, 336]
         except Exception:
             continue
 
         # ── 1. TPN routing (query-conditioned) ───────────────────────────────
         outputs = model(
-            images=img_tensor,
+            images_coarse=img_coarse,
+            images_full=img_full,
             questions=[question],
             answer_strings=None,
+            return_idx=True,
         )
         idx_tpn = outputs["idx"][0].cpu().numpy()          # [k]
         heatmap_tpn[idx_tpn] += 1
@@ -132,9 +166,11 @@ with torch.no_grad():
         # ── 2. Image-only TPN (zero out query embedding) ─────────────────────
         # Temporarily zero the query embedding by using a blank question
         outputs_io = model(
-            images=img_tensor,
+            images_coarse=img_coarse,
+            images_full=img_full,
             questions=[""],          # empty question → near-zero query embedding
             answer_strings=None,
+            return_idx=True,
         )
         idx_imgonly = outputs_io["idx"][0].cpu().numpy()   # [k]
         heatmap_imgonly[idx_imgonly] += 1
