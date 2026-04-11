@@ -194,7 +194,8 @@ def spatial_spread_loss(
 def attention_distillation_loss(
     s_N: torch.Tensor,
     teacher_importance: torch.Tensor,
-    T: float = 2.0,
+    T: float = 1.0,
+    teacher_scale: float = 10.0,
 ) -> torch.Tensor:
     """KL divergence between TPN score distribution and teacher importance map.
 
@@ -203,16 +204,33 @@ def attention_distillation_loss(
     hidden states. TPN is trained to match this distribution — dense supervision
     at every step vs sparse VQA cross-entropy.
 
+    Scale mismatch problem (BUG-42):
+        teacher_importance ∈ [-1, 1] (cosine similarity), typical std ≈ 0.05-0.15.
+        s_N is instance-normalized: mean=0, std=1 by construction.
+        With T=2.0, softmax(cosine_sim / 2.0) over 576 tokens produces a near-
+        uniform distribution (top token is only 1.16× the uniform baseline).
+        The teacher gives essentially no signal — every token looks equally important.
+
+    Fix: multiply teacher_importance by teacher_scale (default 10.0) before
+    softmax, mapping cosine sims from std≈0.1 to std≈1, matching s_N's scale.
+    Use T=1.0 for both sides — at matched scales, T=1.0 is genuinely "no
+    extra smoothing". The 19× concentration at the important token (verified
+    empirically) provides a clear, non-degenerate training target.
+
     Args:
-        s_N: TPN instance-normalized scores [B, N]
-        teacher_importance: Teacher cosine similarity scores [B, N], detached
-        T: Temperature for softening distributions (default 2.0)
+        s_N: TPN instance-normalized scores [B, N], std=1
+        teacher_importance: Teacher cosine similarity scores [B, N], detached, std≈0.1
+        T: Softmax temperature, applied to both teacher and student (default 1.0)
+        teacher_scale: Multiplicative scale applied to teacher_importance before
+            softmax to match s_N's dynamic range (default 10.0)
 
     Returns:
         loss: KL(teacher || student) * T² (temperature-scaled, scalar)
     """
-    p_t = F.softmax(teacher_importance / T, dim=-1)          # [B, N]
-    lp_s = F.log_softmax(s_N / T, dim=-1)                   # [B, N]
+    # Scale teacher from cosine-sim range (std≈0.1) into s_N range (std≈1)
+    # before applying the shared temperature T.
+    p_t  = F.softmax(teacher_importance * teacher_scale / T, dim=-1)  # [B, N]
+    lp_s = F.log_softmax(s_N / T, dim=-1)                            # [B, N]
     return F.kl_div(lp_s, p_t, reduction="batchmean") * (T ** 2)
 
 
