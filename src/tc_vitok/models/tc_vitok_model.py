@@ -994,12 +994,16 @@ class TCViTokModel(nn.Module):
                 all_embeds.append(seq)
                 all_masks.append(torch.ones(len(seq), device=device, dtype=torch.long))
 
-            max_len = max(e.shape[0] for e in all_embeds)
+            # Store true sequence lengths BEFORE padding so we can exclude
+            # padding tokens when averaging answer hidden states below.
+            seq_lens = [e.shape[0] for e in all_embeds]  # [B] — true lengths
+
+            max_len = max(seq_lens)
             H = all_embeds[0].shape[-1]
             padded_embeds = torch.zeros(B, max_len, H, device=device, dtype=all_embeds[0].dtype)
             padded_masks  = torch.zeros(B, max_len, device=device, dtype=torch.long)
             for i in range(B):
-                L = all_embeds[i].shape[0]
+                L = seq_lens[i]
                 padded_embeds[i, :L] = all_embeds[i]
                 padded_masks[i, :L]  = all_masks[i]
 
@@ -1026,14 +1030,18 @@ class TCViTokModel(nn.Module):
             # Visual positions: first N tokens
             h_vis = h[:, :N, :]                                  # [B, N, D_lm]
 
-            # Per-sample: mean of answer-token hidden states → [B, 1, D_lm]
+            # Per-sample: mean of VALID answer-token hidden states → [B, 1, D_lm].
+            # Slice h[i, ans_start : seq_lens[i]] — excludes zero-padding positions
+            # that would corrupt the cosine similarity target if included in the mean.
             importances = []
             for i in range(B):
                 ans_start = answer_starts[i]
-                if ans_start < h.shape[1]:
-                    h_ans = h[i, ans_start:, :].mean(0, keepdim=True)  # [1, D_lm]
+                ans_end   = seq_lens[i]          # true end; excludes padding
+                if ans_start < ans_end:
+                    h_ans = h[i, ans_start:ans_end, :].mean(0, keepdim=True)  # [1, D_lm]
                 else:
-                    h_ans = h[i, -1:, :]
+                    # Degenerate case: no answer tokens (empty answer_string)
+                    h_ans = h[i, ans_start - 1 : ans_start, :]
                 imp = F.cosine_similarity(
                     h_ans.expand(N, -1), h_vis[i], dim=-1
                 )                                                # [N]
