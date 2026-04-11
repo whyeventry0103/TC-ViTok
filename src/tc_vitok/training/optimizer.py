@@ -110,6 +110,20 @@ def create_optimizer(
                     "weight_decay": weight_decay,
                 })
 
+            # UnselectedPooler (Phase 1.5) — 4-slot cross-attention for soft recycling
+            # Trained at lr_mlp: same scale as mm_projector, learns in parallel
+            if hasattr(model, "unsel_pooler") and model.unsel_pooler is not None:
+                pooler_params = [
+                    p for p in model.unsel_pooler.parameters()
+                    if p.requires_grad
+                ]
+                if pooler_params:
+                    param_groups.append({
+                        "params": pooler_params,
+                        "lr": lr_mlp,
+                        "weight_decay": weight_decay,
+                    })
+
     # Create AdamW optimizer
     optimizer = AdamW(param_groups)
 

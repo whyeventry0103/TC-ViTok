@@ -100,6 +100,35 @@ def get_lambda(
     return lambda_val
 
 
+def get_lambda_spread(
+    step: int,
+    max_val: float = 0.005,
+    decay_start: int = 30000,
+    decay_end: int = 50000,
+) -> float:
+    """Annealing schedule for spatial spread penalty weight.
+
+    Active at max_val from step 0 to decay_start to prevent static crop.
+    Linearly decays to 0 between decay_start and decay_end so late-training
+    VQA gradient can freely zoom in for fine-grained questions (OCR, small objects).
+
+    Args:
+        step: Current training step
+        max_val: Peak lambda_spread value (default 0.005)
+        decay_start: Step at which linear decay begins (default 30k)
+        decay_end: Step at which lambda_spread reaches 0 (default 50k)
+
+    Returns:
+        lambda_spread: Weight at current step
+    """
+    if step >= decay_end:
+        return 0.0
+    if step < decay_start:
+        return max_val
+    frac = (step - decay_start) / (decay_end - decay_start)
+    return max_val * (1.0 - frac)
+
+
 def get_lr_schedule(
     step: int,
     warmup_steps: int,

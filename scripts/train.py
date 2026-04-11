@@ -27,6 +27,7 @@ import wandb
 from omegaconf import OmegaConf
 
 from tc_vitok.models.tc_vitok_model import TCViTokModel
+from torch.utils.data import ConcatDataset
 from tc_vitok.data.datasets import (
     DummyVQADataset, VQAv2Dataset, GQADataset, collate_fn,
 )
@@ -155,16 +156,41 @@ def build_loaders(data_config, batch_size, num_workers, args, is_ddp: bool = Fal
         train_collate = cached_collate_fn
         val_collate = cached_collate_fn
     else:
-        # Real dataset — requires annotation paths in config
-        dataset_name = data_config.get("dataset", "vqav2")
-        if dataset_name == "vqav2":
-            train_dataset = VQAv2Dataset(
-                annotations_path=data_config["train_annotations"],
-                questions_path=data_config["train_questions"],
-                image_dir=data_config["train_image_dir"],
-                split="train",
-                max_samples=data_config.get("max_samples"),
-            )
+        # Real dataset — supports single dataset string or list of datasets.
+        # phase1.yaml uses `datasets: ["vqav2", "gqa"]` which was previously ignored.
+        dataset_names = data_config.get("datasets", None)
+        if dataset_names is None:
+            # Fallback to singular `dataset` key for backward compatibility
+            dataset_names = [data_config.get("dataset", "vqav2")]
+
+        def _build_train_dataset(name: str):
+            if name == "vqav2":
+                return VQAv2Dataset(
+                    annotations_path=data_config["train_annotations"],
+                    questions_path=data_config["train_questions"],
+                    image_dir=data_config["train_image_dir"],
+                    split="train",
+                    max_samples=data_config.get("max_samples"),
+                )
+            elif name == "gqa":
+                return GQADataset(
+                    questions_path=data_config["gqa_train_questions"],
+                    image_dir=data_config["gqa_train_image_dir"],
+                    max_samples=data_config.get("max_samples"),
+                )
+            else:
+                raise ValueError(f"Unknown dataset: {name}")
+
+        train_parts = [_build_train_dataset(n) for n in dataset_names]
+        if len(train_parts) > 1:
+            train_dataset = ConcatDataset(train_parts)
+            print(f"Training on concatenated datasets: {dataset_names} "
+                  f"({sum(len(d) for d in train_parts):,} total samples)")
+        else:
+            train_dataset = train_parts[0]
+
+        # Validation always uses VQAv2 (GQA val is for eval, not curriculum loss)
+        if "vqav2" in dataset_names:
             val_dataset = VQAv2Dataset(
                 annotations_path=data_config["val_annotations"],
                 questions_path=data_config["val_questions"],
@@ -172,19 +198,13 @@ def build_loaders(data_config, batch_size, num_workers, args, is_ddp: bool = Fal
                 split="val",
                 max_samples=data_config.get("max_samples"),
             )
-        elif dataset_name == "gqa":
-            train_dataset = GQADataset(
-                questions_path=data_config["gqa_train_questions"],
-                image_dir=data_config["gqa_train_image_dir"],
-                max_samples=data_config.get("max_samples"),
-            )
+        else:
+            # GQA-only training: use GQA val for curriculum loss monitoring
             val_dataset = GQADataset(
                 questions_path=data_config["gqa_val_questions"],
                 image_dir=data_config["gqa_val_image_dir"],
                 max_samples=data_config.get("max_samples"),
             )
-        else:
-            raise ValueError(f"Unknown dataset: {dataset_name}")
 
         train_collate = collate_fn
         val_collate = collate_fn

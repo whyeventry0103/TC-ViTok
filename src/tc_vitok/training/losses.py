@@ -151,6 +151,71 @@ def entropy_from_idx(idx: torch.Tensor, N: int = 576) -> torch.Tensor:
     return entropy
 
 
+def spatial_spread_loss(
+    mask_soft: torch.Tensor,
+    N: int = 576,
+    grid: int = 24,
+) -> torch.Tensor:
+    """Penalize spatial clustering in the soft token selection distribution.
+
+    Maximizes variance of the expected selection position, forcing TPN to
+    spread selections across the image rather than clustering in one region.
+    Differentiable via mask_soft (sigmoid(s_N / tau)) so gradient flows to
+    ALL 576 TPN scores at every step.
+
+    Anneal to zero after step 30k (see get_lambda_spread in curriculum.py) so
+    late-training VQA gradient can freely zoom in for fine-grained questions.
+
+    Args:
+        mask_soft: Soft selection weights [B, N] — sigmoid(s_N / tau)
+        N: Total tokens (576)
+        grid: Grid side length (24 for 24×24)
+
+    Returns:
+        loss: -(var_row + var_col).mean() — minimizing maximizes spatial spread
+    """
+    device = mask_soft.device
+    positions = torch.arange(N, device=device).float()
+    row = (positions // grid)   # [N]
+    col = (positions % grid)    # [N]
+
+    # Normalize to probability distribution over spatial positions
+    p = mask_soft / (mask_soft.sum(dim=-1, keepdim=True) + 1e-8)  # [B, N]
+
+    E_row = (p * row).sum(dim=-1)    # [B]
+    E_col = (p * col).sum(dim=-1)    # [B]
+
+    var_row = (p * (row - E_row.unsqueeze(-1)) ** 2).sum(dim=-1)  # [B]
+    var_col = (p * (col - E_col.unsqueeze(-1)) ** 2).sum(dim=-1)  # [B]
+
+    return -(var_row + var_col).mean()
+
+
+def attention_distillation_loss(
+    s_N: torch.Tensor,
+    teacher_importance: torch.Tensor,
+    T: float = 2.0,
+) -> torch.Tensor:
+    """KL divergence between TPN score distribution and teacher importance map.
+
+    The teacher (frozen base LLaVA with all 576 tokens) produces a per-token
+    importance score via cosine similarity of answer hidden states with visual
+    hidden states. TPN is trained to match this distribution — dense supervision
+    at every step vs sparse VQA cross-entropy.
+
+    Args:
+        s_N: TPN instance-normalized scores [B, N]
+        teacher_importance: Teacher cosine similarity scores [B, N], detached
+        T: Temperature for softening distributions (default 2.0)
+
+    Returns:
+        loss: KL(teacher || student) * T² (temperature-scaled, scalar)
+    """
+    p_t = F.softmax(teacher_importance / T, dim=-1)          # [B, N]
+    lp_s = F.log_softmax(s_N / T, dim=-1)                   # [B, N]
+    return F.kl_div(lp_s, p_t, reduction="batchmean") * (T ** 2)
+
+
 def compute_total_loss(
     logits: Optional[torch.Tensor],
     labels: Optional[torch.Tensor],
@@ -161,28 +226,19 @@ def compute_total_loss(
     lambda_sparsity: float = 0.0,
     lambda_entropy: float = 0.01,
     lambda_diversity: float = 0.0,
+    lambda_spread: float = 0.0,
+    lambda_distill: float = 0.0,
     mask_ste: Optional[torch.Tensor] = None,
+    mask_soft: Optional[torch.Tensor] = None,
     q_embed: Optional[torch.Tensor] = None,
+    teacher_importance: Optional[torch.Tensor] = None,
     gamma: float = 0.5,
 ) -> dict[str, torch.Tensor]:
-    """Compute total training loss with entropy + diversity regularization.
+    """Compute total training loss with Phase 1.5 regularization terms.
 
     Total loss:
-        L = L_VQA + lambda * ||s_N||_1/N + mu * L_ent + nu * L_div
-
-    Entropy via mask_ste (NOT idx):
-        Using mask_ste (binary forward, m_soft STE backward) provides gradient
-        to ALL N token scores, including the N-k unselected tokens. This is the
-        key escape route from static crop: unselected tokens receive entropy
-        gradient d(H)/d(s_N[b,i]) ∝ m_soft[b,i]*(1-m_soft[b,i])/tau, which
-        pushes tokens that are never selected to have higher scores, giving them
-        a chance to displace the current static selection.
-        Fallback to entropy_from_idx (non-differentiable) when mask_ste is None.
-
-    Diversity via within-batch pairs:
-        Pairs adjacent samples in the batch. Penalizes TPN when two samples with
-        different query embeddings produce similar selection masks (mask cosine
-        sim > gamma). Forces TPN to develop query-conditioned routing.
+        L = L_VQA + λ_spar * ||s_N||_1/N + λ_ent * L_ent + λ_div * L_div
+              + λ_spread * L_spread + λ_distill * L_distill
 
     Args:
         logits: Language model logits [B, seq_len, vocab_size] (None → VQA=0)
@@ -191,15 +247,19 @@ def compute_total_loss(
         idx: Top-k gather indices [B, k]
         k: Token budget
         N: Total spatial positions (576)
-        lambda_sparsity: L1 sparsity weight (0.0 = disabled; instance norm makes it ~constant)
-        lambda_entropy: Entropy weight — should be O(0.01-0.05) to compete with VQA
+        lambda_sparsity: L1 sparsity weight (0.0 = disabled)
+        lambda_entropy: Entropy weight — 0.01-0.05 to compete with VQA
         lambda_diversity: Within-batch diversity weight (0.0 = disabled)
+        lambda_spread: Spatial spread penalty weight (anneal 0.005→0 after step 30k)
+        lambda_distill: Teacher distillation KL weight (0.2 nominal)
         mask_ste: STE selection mask [B, N] — binary fwd, m_soft gradient bwd (optional)
+        mask_soft: sigmoid(s_N / tau) [B, N] — for spatial_spread_loss (optional)
         q_embed: CLIP text embeddings [B, d_q] for diversity loss (optional)
+        teacher_importance: Frozen teacher per-token cosine sim [B, N] (optional)
         gamma: Mask similarity threshold for diversity loss (default 0.5)
 
     Returns:
-        loss_dict: {total, vqa, sparsity, entropy, diversity}
+        loss_dict: {total, vqa, sparsity, entropy, diversity, spread, distill}
     """
     from ..models.masking import compute_spatial_entropy, compute_diversity_loss
 
@@ -248,11 +308,26 @@ def compute_total_loss(
         )  # [B//2] — detached (frozen CLIP), used as per-pair weight
         loss_div = (score_sim * (1.0 - q_sim.detach())).mean()
 
+    # Spatial spread loss: differentiable spatial diversity penalty via mask_soft.
+    # Maximizes variance of selection position → TPN spreads across image.
+    # Requires mask_soft = sigmoid(s_N / tau). Annealed to 0 after step 30k.
+    loss_spread = scores.new_zeros(())
+    if mask_soft is not None and lambda_spread > 0:
+        loss_spread = spatial_spread_loss(mask_soft, N=N)
+
+    # Teacher distillation: KL(teacher_importance || s_N distribution).
+    # Dense token-level supervision from frozen base LLaVA with all 576 tokens.
+    loss_distill = scores.new_zeros(())
+    if teacher_importance is not None and lambda_distill > 0:
+        loss_distill = attention_distillation_loss(scores, teacher_importance)
+
     loss_total = (
         loss_vqa
         + lambda_sparsity * loss_sparsity
         + lambda_entropy * loss_ent
         + lambda_diversity * loss_div
+        + lambda_spread * loss_spread
+        + lambda_distill * loss_distill
     )
 
     return {
@@ -261,4 +336,6 @@ def compute_total_loss(
         "sparsity": loss_sparsity.detach(),
         "entropy": loss_ent.detach(),
         "diversity": loss_div.detach() if isinstance(loss_div, torch.Tensor) else torch.tensor(0.0),
+        "spread": loss_spread.detach() if isinstance(loss_spread, torch.Tensor) else torch.tensor(0.0),
+        "distill": loss_distill.detach() if isinstance(loss_distill, torch.Tensor) else torch.tensor(0.0),
     }

@@ -20,7 +20,7 @@ from tqdm import tqdm
 import wandb
 
 from .losses import compute_total_loss
-from .curriculum import get_tau, get_lambda, get_lr_schedule
+from .curriculum import get_tau, get_lambda, get_lambda_spread, get_lr_schedule
 from .optimizer import create_optimizer, get_optimizer_info
 
 
@@ -79,6 +79,11 @@ class TCViTokTrainer:
         # Regularization weights
         self.lambda_entropy = config["training"]["lambda_entropy"]
         self.lambda_diversity = config["training"].get("lambda_diversity", 0.0)
+        # Phase 1.5: spatial spread penalty and teacher distillation
+        self.lambda_spread_max = config["training"].get("lambda_spread", 0.0)
+        self.lambda_distill = config["training"].get("lambda_distill", 0.0)
+        self.spread_decay_start = config["training"].get("spread_decay_start", 30000)
+        self.spread_decay_end   = config["training"].get("spread_decay_end",   50000)
 
         # LoRA warm-freeze: keep LoRA gradients zeroed for the first N steps so TPN
         # has time to learn query-conditioned routing before LoRA compensates.
@@ -220,6 +225,12 @@ class TCViTokTrainer:
         lambda_sparsity = get_lambda(
             self.global_step, self.T_warmup, self.lambda_max
         )
+        lambda_spread = get_lambda_spread(
+            self.global_step,
+            max_val=self.lambda_spread_max,
+            decay_start=self.spread_decay_start,
+            decay_end=self.spread_decay_end,
+        )
 
         # Move batch to device
         images_full = batch["images_full"].to(self.device)
@@ -237,6 +248,29 @@ class TCViTokTrainer:
 
         # Build kwargs for unified forward() — DDP requires all calls go
         # through self.model (the wrapper) so gradient all-reduce hooks fire.
+        # ── Teacher distillation pass (Phase 1.5) ────────────────────────────
+        # Run frozen base LLaVA with all 576 tokens BEFORE student forward.
+        # Sequential execution: teacher activations freed before student allocates.
+        # Skipped when: stub mode, lambda_distill=0, or no answer_strings.
+        teacher_importance = None
+        if (
+            self.lambda_distill > 0
+            and not raw_model.use_stub_llm
+            and answer_strings is not None
+            and "images_coarse" in batch    # full pipeline only (not cached path)
+        ):
+            images_coarse_t = batch["images_coarse"].to(self.device)
+            questions_t = batch["questions"]
+            with torch.no_grad():
+                v_coarse_t = raw_model.coarse_encoder(images_coarse_t)
+                q_embed_t  = raw_model.text_encoder(questions_t)
+                del v_coarse_t, q_embed_t  # not needed for teacher
+                v_full_t = raw_model.full_encoder(images_full)
+                teacher_importance = raw_model._get_teacher_importance(
+                    v_full_t, questions_t, answer_strings
+                )
+                del v_full_t  # free before student forward
+
         with amp_ctx:
             fwd_kwargs = dict(
                 images_full=images_full,
@@ -256,20 +290,31 @@ class TCViTokTrainer:
 
             outputs = self.model(**fwd_kwargs)
 
+        # mask_soft for spatial_spread_loss: sigmoid(s_N / tau).
+        # Computed here to avoid storing it inside model (no extra backward graph).
+        scores = outputs["scores"]
+        mask_soft = torch.sigmoid(scores / (tau + 1e-8)) if lambda_spread > 0 else None
+
         # Compute losses.
         # mask_ste: routes entropy gradient to ALL N tokens (not just selected k).
+        # mask_soft: used for spatial spread loss (sigmoid, differentiable).
         # q_embed: enables within-batch diversity loss.
+        # teacher_importance: dense KL supervision from frozen base model.
         loss_dict = compute_total_loss(
             logits=outputs.get("logits"),
             labels=outputs.get("seq_labels"),
-            scores=outputs["scores"],
+            scores=scores,
             idx=outputs["idx"],
             k=raw_model.k,
             lambda_sparsity=lambda_sparsity,
             lambda_entropy=self.lambda_entropy,
             lambda_diversity=self.lambda_diversity,
+            lambda_spread=lambda_spread,
+            lambda_distill=self.lambda_distill,
             mask_ste=outputs.get("mask_ste"),
+            mask_soft=mask_soft,
             q_embed=outputs.get("q_embed"),
+            teacher_importance=teacher_importance,
         )
 
         # NaN/Inf guard: skip backward entirely to prevent weight corruption.
@@ -392,7 +437,7 @@ class TCViTokTrainer:
                     )
 
             # No mask_ste at eval time (training=False → TPN returns None).
-            # Entropy falls back to entropy_from_idx; diversity loss = 0.
+            # Entropy falls back to entropy_from_idx; diversity/spread/distill = 0.
             loss_dict = compute_total_loss(
                 logits=outputs.get("logits"),
                 labels=outputs.get("seq_labels"),
@@ -402,8 +447,12 @@ class TCViTokTrainer:
                 lambda_sparsity=lambda_sparsity,
                 lambda_entropy=self.lambda_entropy,
                 lambda_diversity=0.0,
+                lambda_spread=0.0,
+                lambda_distill=0.0,
                 mask_ste=None,
+                mask_soft=None,
                 q_embed=None,
+                teacher_importance=None,
             )
 
             total_loss += loss_dict["total"].item()
@@ -473,6 +522,7 @@ class TCViTokTrainer:
             if k.startswith("tpn.")
             or "lora_" in k
             or "multi_modal_projector." in k
+            or k.startswith("unsel_pooler.")   # Phase 1.5: 4-slot cross-attention pooler
         }
 
         checkpoint = {

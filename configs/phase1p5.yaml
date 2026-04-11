@@ -1,0 +1,67 @@
+# Phase 1.5: Full Architecture Retraining — innovations.md full plan
+#
+# Implements all Phase 1.5 additions over Phase 1:
+#   - Orthogonal soft recycling (UnselectedPooler, 4 slots, ~512K new params)
+#   - GQA training data concatenated with VQAv2 (fixes ignored datasets list)
+#   - Spatial spread loss (lambda_spread=0.005, annealed to 0 at step 30k)
+#   - Teacher distillation (lambda_distill=0.2, frozen base LLaVA with 576 tokens)
+#   - LoRA rank 32→64 for more LLM adaptation capacity
+#   - lora_warmfreeze_steps: 3000 (same as Phase 1)
+#
+# Retrain from Phase 0 checkpoint: runs/phase0_v4/best.ckpt
+# Expected: 75-77% VQAv2 (up from 72.47%)
+
+defaults:
+  - base
+
+phase: 1
+description: "Phase 1.5: orthogonal recycling + GQA data + spread + distillation"
+
+model:
+  lora:
+    rank: 64        # 32 → 64: more LLM adaptation capacity (+0.5-1% expected)
+    alpha: 128      # keep alpha = 2x rank
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 50000
+  batch_size: 4
+  grad_accum_steps: 16    # effective batch = 4 × 16 × 2 GPUs = 128
+
+  lambda_max: 0.0         # L1 disabled (instance norm makes it constant)
+  T_warmup: 5000
+  lambda_entropy: 0.02
+  lambda_diversity: 0.1
+
+  # Phase 1.5: spatial spread penalty
+  # Annealed 0.005 → 0 from step 30k → 50k (curriculum.py get_lambda_spread)
+  lambda_spread: 0.005
+  spread_decay_start: 30000
+  spread_decay_end: 50000
+
+  # Phase 1.5: teacher distillation
+  # Frozen base LLaVA (LoRA disabled) processes all 576 tokens → per-token importance
+  # KL(teacher_importance || s_N) forces TPN to match teacher's spatial attention
+  lambda_distill: 0.2
+
+  lora_warmfreeze_steps: 3000
+
+  lr_tpn: 3e-3
+  lr_lora: 2e-4
+  lr_mlp: 5e-4
+
+  tau_max: 1.0
+  tau_min: 0.1
+
+data:
+  datasets: ["vqav2", "gqa"]   # fixed: was silently ignored before
+
+logging:
+  wandb_run_name: "phase1p5_full_arch"
+  eval_interval: 5000
+  max_val_batches: 100
+
+checkpoint:
+  load_from: "runs/phase0_v4/best.ckpt"
+  strict: false

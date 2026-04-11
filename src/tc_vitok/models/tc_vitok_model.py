@@ -16,10 +16,12 @@ The model is trained in 3 phases:
 Paper reference: Section 5 (Full Architecture)
 """
 
-from typing import Optional, Dict, Any
+import math
+from typing import Optional, Dict, Any, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .tpn import TokenizationPolicyNetwork
 from .encoders import CoarseVisualEncoder, TextEncoder, FullVisualEncoder
@@ -44,6 +46,119 @@ def gather_tokens(
     d_v = V.shape[-1]
     idx_exp = idx.unsqueeze(-1).expand(-1, -1, d_v)  # [B, k, d_v]
     return torch.gather(V, dim=1, index=idx_exp)       # [B, k, d_v]
+
+
+def complement_gather(
+    V: torch.Tensor,
+    idx: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Extract unselected tokens (complement of idx) from V.
+
+    Args:
+        V: Full visual features, Shape: [B, N, D]
+        idx: Top-k selected indices, Shape: [B, k]
+
+    Returns:
+        v_unsel: Unselected token features, Shape: [B, N-k, D]
+        unsel_idx: Flat indices of unselected positions, Shape: [B, N-k]
+    """
+    B, N, D = V.shape
+    k = idx.shape[1]
+
+    # Build boolean mask: True = selected
+    sel_mask = torch.zeros(B, N, device=V.device, dtype=torch.bool)
+    sel_mask.scatter_(1, idx, True)
+
+    # Unselected positions — exactly N-k per row (constant)
+    all_pos = torch.arange(N, device=V.device).unsqueeze(0).expand(B, N)
+    unsel_idx = all_pos[~sel_mask].reshape(B, N - k)          # [B, N-k]
+
+    idx_exp = unsel_idx.unsqueeze(-1).expand(-1, -1, D)
+    v_unsel = torch.gather(V, dim=1, index=idx_exp)           # [B, N-k, D]
+    return v_unsel, unsel_idx
+
+
+def sinusoidal_2d_pe(
+    flat_indices: torch.Tensor,
+    D: int,
+    grid: int = 24,
+) -> torch.Tensor:
+    """2D sinusoidal positional encoding for a set of flat grid positions.
+
+    Re-injects spatial structure into orthogonally-deflated unselected tokens
+    so the UnselectedPooler cross-attention can attend based on WHERE each
+    background token is located in the image.
+
+    Args:
+        flat_indices: [B, L] — flat indices in [0, grid²)
+        D: Feature dimension of the visual tokens (must be divisible by 4)
+        grid: Grid side length (24 for 24×24 = 576 tokens)
+
+    Returns:
+        pe: [B, L, D] positional encoding, same dtype as float32
+    """
+    row = (flat_indices // grid).float()   # [B, L]
+    col = (flat_indices % grid).float()    # [B, L]
+    half = D // 4
+    div = torch.exp(
+        torch.arange(half, device=flat_indices.device).float()
+        * (-math.log(10000.0) / half)
+    )                                      # [half]
+    B, L = flat_indices.shape
+    pe = torch.zeros(B, L, D, device=flat_indices.device, dtype=torch.float32)
+    pe[..., 0:half]        = torch.sin(row.unsqueeze(-1) * div)
+    pe[..., half:2*half]   = torch.cos(row.unsqueeze(-1) * div)
+    pe[..., 2*half:3*half] = torch.sin(col.unsqueeze(-1) * div)
+    pe[..., 3*half:]       = torch.cos(col.unsqueeze(-1) * div)
+    return pe
+
+
+class UnselectedPooler(nn.Module):
+    """4-slot cross-attention pooler for orthogonally-deflated unselected tokens.
+
+    Compresses the N-k unselected background tokens into 4 compact summary
+    vectors. Each slot independently learns to aggregate a different aspect
+    (global layout, background texture, peripheral objects, scene context).
+    2D sinusoidal PE is injected into the keys/values so the slots know
+    WHERE each background token is in the image.
+
+    New trainable params: ~512K (4 × d_model for slots, MHA weights + norms)
+
+    Args:
+        d_model: Visual feature dimension (1024 for CLIP ViT-L/14)
+        n_slots: Number of summary tokens (4 per innovations.md spec)
+        n_heads: Attention heads for cross-attention (4)
+    """
+
+    def __init__(self, d_model: int = 1024, n_slots: int = 4, n_heads: int = 4):
+        super().__init__()
+        self.n_slots = n_slots
+        self.slots = nn.Parameter(torch.randn(1, n_slots, d_model) * 0.02)
+        self.cross_attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(
+        self,
+        v_unsel_orth: torch.Tensor,
+        unsel_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """Pool orthogonal background tokens into n_slots summary vectors.
+
+        Args:
+            v_unsel_orth: Orthogonally-deflated unselected tokens [B, N-k, D]
+            unsel_indices: Flat grid indices of unselected positions [B, N-k]
+
+        Returns:
+            summary: [B, n_slots, D]
+        """
+        B = v_unsel_orth.shape[0]
+        D = v_unsel_orth.shape[-1]
+        # Reinject 2D position info (lost during orthogonal deflation)
+        pe = sinusoidal_2d_pe(unsel_indices, D).to(dtype=v_unsel_orth.dtype)
+        kv = v_unsel_orth + pe                              # [B, N-k, D]
+        q = self.slots.expand(B, -1, -1)                   # [B, n_slots, D]
+        out, _ = self.cross_attn(q, kv, kv)
+        return self.norm(out)                               # [B, n_slots, D]
 
 
 class StubLLM(nn.Module):
@@ -177,6 +292,14 @@ class TCViTokModel(nn.Module):
         # 3. Tokenization Policy Network (TPN, trainable)
         tpn_config = tpn_config or {}
         self.tpn = TokenizationPolicyNetwork(**tpn_config)
+
+        # 4. Unselected token pooler (Phase 1.5: orthogonal soft recycling)
+        # Compresses N-k background tokens into 4 summary vectors injected as
+        # a prefix before the k selected tokens. Zero params in stub mode.
+        if not use_stub_llm:
+            self.unsel_pooler = UnselectedPooler(d_model=1024, n_slots=4, n_heads=4)
+        else:
+            self.unsel_pooler = None
 
         # 5. VLM backbone
         if use_stub_llm:
@@ -359,11 +482,44 @@ class TCViTokModel(nn.Module):
             correction = scores_at_selected - scores_at_selected.detach() # [B, k], = 0 fwd
             v_selected = v_selected * (1.0 + correction.unsqueeze(-1))    # [B, k, D], identity fwd
 
+        # Step 3c: Orthogonal soft recycling (Phase 1.5)
+        # Compress N-k unselected background tokens into 4 summary vectors and
+        # prepend them to the LLM prefix. This recovers information hard-dropped
+        # in Phase 1, expected to close the 3.5% gap to 76% VQAv2.
+        #
+        # Orthogonal deflation: project out mean(v_selected) from unselected tokens
+        # before pooling, so summary slots carry COMPLEMENTARY information (not
+        # redundant near-threshold tokens). See Efficient3D / innovations.md Concept 3.
+        if not self.use_stub_llm and self.unsel_pooler is not None:
+            v_unsel, unsel_idx = complement_gather(v_full, idx)   # [B, N-k, D], [B, N-k]
+
+            # Orthogonal deflation: remove the selected-token subspace
+            v_sel_mean = v_selected.mean(dim=1)                   # [B, D]
+            v_sel_norm_sq = (
+                (v_sel_mean * v_sel_mean).sum(-1, keepdim=True) + 1e-8
+            )                                                      # [B, 1]
+            dot = (v_unsel * v_sel_mean.unsqueeze(1)).sum(
+                -1, keepdim=True
+            )                                                      # [B, N-k, 1]
+            proj_coeff = dot / v_sel_norm_sq.unsqueeze(1)         # [B, N-k, 1]
+            v_unsel_orth = (
+                v_unsel - proj_coeff * v_sel_mean.unsqueeze(1)
+            )                                                      # [B, N-k, D]
+
+            # Pool orthogonal background into 4 summary tokens
+            v_summary = self.unsel_pooler(v_unsel_orth, unsel_idx)  # [B, 4, D]
+
+            # LLM prefix: [4 summary | k selected] — total k+4 tokens
+            v_input = torch.cat([v_summary, v_selected], dim=1)   # [B, k+4, D]
+        else:
+            v_input = v_selected                                   # [B, k, D]
+
         # Step 4: Forward through LLM backbone
+        # _llava_forward uses B, seq_len, _ = v_input.shape so k here = k+4 (or k in stub mode)
         if self.use_stub_llm:
             llm_outputs = self.llm(visual_tokens=v_selected)
         else:
-            llm_outputs = self._llava_forward(v_selected, questions, answer_strings)
+            llm_outputs = self._llava_forward(v_input, questions, answer_strings)
 
         # Build output dict
         outputs = {
@@ -774,6 +930,117 @@ class TCViTokModel(nn.Module):
 
         return {"idx": idx, "scores": s_N, "mask": mask}
 
+    @torch.no_grad()
+    def _get_teacher_importance(
+        self,
+        v_full: torch.Tensor,
+        questions: list,
+        answer_strings: list,
+    ) -> torch.Tensor:
+        """Run frozen base LLaVA with all 576 tokens to get per-token importance.
+
+        Implements hidden-state cosine similarity distillation (innovations.md P1b).
+        The base model (LoRA disabled) sees all N visual tokens + question + answer.
+        Per-token importance = cosine_sim(mean(answer_hidden_states), token_hidden_state).
+
+        Runs with torch.no_grad() — no gradient, ~19GB peak GPU memory.
+        Sequential: teacher first, then free activations, then student forward.
+
+        Args:
+            v_full: Full CLIP visual features [B, N, D] (already computed)
+            questions: List of question strings, length B
+            answer_strings: List of answer strings, length B
+
+        Returns:
+            importance: Per-token importance scores [B, N], detached
+        """
+        from contextlib import nullcontext
+        B, N, _ = v_full.shape
+        device = v_full.device
+        lm = self._llm
+        tokenizer = self.processor.tokenizer
+
+        _on_cuda = "cuda" in str(device)
+        amp_ctx = (
+            torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            if _on_cuda else nullcontext()
+        )
+
+        with amp_ctx:
+            # Project all 576 tokens through mm_projector
+            v_proj_full = self._mm_proj(v_full)              # [B, N, H]
+            embed_fn = lm.get_input_embeddings()
+
+            all_embeds, all_masks, answer_starts = [], [], []
+            for i in range(B):
+                q_text = f"USER: {questions[i]}\nASSISTANT:"
+                q_ids = tokenizer(
+                    q_text, return_tensors="pt", padding=False,
+                    truncation=True, max_length=128, add_special_tokens=True,
+                ).input_ids[0].to(device)
+                q_embeds = embed_fn(q_ids)
+
+                a_text = f" {answer_strings[i]}"
+                a_ids = tokenizer(
+                    a_text, return_tensors="pt", padding=False,
+                    truncation=True, max_length=32, add_special_tokens=False,
+                ).input_ids[0].to(device)
+                eos = torch.tensor([tokenizer.eos_token_id], device=device, dtype=torch.long)
+                a_ids = torch.cat([a_ids, eos])
+                a_embeds = embed_fn(a_ids)
+
+                seq = torch.cat([v_proj_full[i], q_embeds, a_embeds], dim=0)
+                answer_starts.append(N + len(q_ids))
+                all_embeds.append(seq)
+                all_masks.append(torch.ones(len(seq), device=device, dtype=torch.long))
+
+            max_len = max(e.shape[0] for e in all_embeds)
+            H = all_embeds[0].shape[-1]
+            padded_embeds = torch.zeros(B, max_len, H, device=device, dtype=all_embeds[0].dtype)
+            padded_masks  = torch.zeros(B, max_len, device=device, dtype=torch.long)
+            for i in range(B):
+                L = all_embeds[i].shape[0]
+                padded_embeds[i, :L] = all_embeds[i]
+                padded_masks[i, :L]  = all_masks[i]
+
+            # Run base LLM with LoRA disabled (teacher = base pretrained model)
+            lm.disable_adapter_layers()
+            try:
+                lm_out = lm(
+                    inputs_embeds=padded_embeds,
+                    attention_mask=padded_masks,
+                    output_hidden_states=True,
+                    use_cache=False,
+                )
+            finally:
+                lm.enable_adapter_layers()
+
+            # Extract hidden states [B, max_len, D_lm]
+            if self._use_llava_lm_head:
+                # NEW arch: LlamaModel → last_hidden_state
+                h = lm_out.last_hidden_state
+            else:
+                # OLD arch: LlamaForCausalLM → hidden_states[-1]
+                h = lm_out.hidden_states[-1]
+
+            # Visual positions: first N tokens
+            h_vis = h[:, :N, :]                                  # [B, N, D_lm]
+
+            # Per-sample: mean of answer-token hidden states → [B, 1, D_lm]
+            importances = []
+            for i in range(B):
+                ans_start = answer_starts[i]
+                if ans_start < h.shape[1]:
+                    h_ans = h[i, ans_start:, :].mean(0, keepdim=True)  # [1, D_lm]
+                else:
+                    h_ans = h[i, -1:, :]
+                imp = F.cosine_similarity(
+                    h_ans.expand(N, -1), h_vis[i], dim=-1
+                )                                                # [N]
+                importances.append(imp)
+
+        return torch.stack(importances, dim=0).detach()          # [B, N]
+
     def set_training_phase(self, phase: int):
         """Configure which components are trainable based on training phase.
 
@@ -796,9 +1063,12 @@ class TCViTokModel(nn.Module):
                 param.requires_grad = False
 
         if phase == 0:
-            # Train TPN only — freeze all LLM components
+            # Train TPN only — freeze all LLM components and unsel_pooler
             for param in self.tpn.parameters():
                 param.requires_grad = True
+            if self.unsel_pooler is not None:
+                for param in self.unsel_pooler.parameters():
+                    param.requires_grad = False
             if self.use_stub_llm:
                 for param in self.llm.parameters():
                     param.requires_grad = False
@@ -808,9 +1078,13 @@ class TCViTokModel(nn.Module):
                     param.requires_grad = False
 
         elif phase in [1, 2]:
-            # Train TPN + LoRA + mm_projector
+            # Train TPN + LoRA + mm_projector + unsel_pooler (Phase 1.5)
             for param in self.tpn.parameters():
                 param.requires_grad = True
+            # UnselectedPooler: new module, always trainable in Phase 1+
+            if self.unsel_pooler is not None:
+                for param in self.unsel_pooler.parameters():
+                    param.requires_grad = True
             if self.use_stub_llm:
                 for param in self.llm.parameters():
                     param.requires_grad = True
