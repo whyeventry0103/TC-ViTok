@@ -384,8 +384,8 @@ class POPEDataset(Dataset):
                     continue
                 entry = json.loads(line)
                 self.samples.append({
-                    "question": entry["question"],
-                    "answer": entry["answer"].lower(),
+                    "question": entry.get("question", entry.get("text", "")),
+                    "answer": entry.get("answer", entry.get("label", "")).lower(),
                     "image": entry["image"],
                     "category": entry.get("category", ""),
                 })
