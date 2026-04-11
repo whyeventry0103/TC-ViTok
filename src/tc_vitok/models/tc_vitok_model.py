@@ -971,41 +971,89 @@ class TCViTokModel(nn.Module):
             v_proj_full = self._mm_proj(v_full)              # [B, N, H]
             embed_fn = lm.get_input_embeddings()
 
-            all_embeds, all_masks, answer_starts = [], [], []
-            for i in range(B):
-                q_text = f"USER: {questions[i]}\nASSISTANT:"
-                q_ids = tokenizer(
-                    q_text, return_tensors="pt", padding=False,
-                    truncation=True, max_length=128, add_special_tokens=True,
-                ).input_ids[0].to(device)
-                q_embeds = embed_fn(q_ids)
+            # ── Bug fix #2: correct LLaVA-1.5 prompt structure ───────────────
+            # LLaVA-1.5 was trained with:
+            #   <s> USER: [image_tokens]\n{question}\nASSISTANT: {answer}</s>
+            # Visual tokens are sandwiched between the "USER: " prefix and the
+            # "\n{question}\nASSISTANT:" suffix — NOT prepended before <bos>.
+            # Using the original structure gives the teacher (base LLaVA) the
+            # most meaningful hidden-state patterns for the distillation target.
+            #
+            # Per-sample tracking:
+            #   visual_starts[i]: position in sequence where visual tokens begin
+            #   answer_starts[i]: position where answer tokens begin
+            #   seq_lens[i]:      true sequence length (excludes zero-padding)
+            all_embeds  = []
+            all_masks   = []
+            visual_starts  = []
+            answer_starts  = []
 
+            for i in range(B):
+                # Prefix: "<s> USER: " — includes BOS via add_special_tokens=True
+                prefix_ids = tokenizer(
+                    "USER: ",
+                    return_tensors="pt",
+                    padding=False,
+                    truncation=False,
+                    add_special_tokens=True,   # adds <s> (BOS)
+                ).input_ids[0].to(device)      # [T_pre]
+                prefix_embeds = embed_fn(prefix_ids)
+
+                # Suffix: "\n{question}\nASSISTANT:" — no BOS (already in prefix)
+                suffix_text = f"\n{questions[i]}\nASSISTANT:"
+                suffix_ids = tokenizer(
+                    suffix_text,
+                    return_tensors="pt",
+                    padding=False,
+                    truncation=True,
+                    max_length=128,
+                    add_special_tokens=False,
+                ).input_ids[0].to(device)      # [T_suf]
+                suffix_embeds = embed_fn(suffix_ids)
+
+                # Answer: " {answer}</s>"
                 a_text = f" {answer_strings[i]}"
                 a_ids = tokenizer(
-                    a_text, return_tensors="pt", padding=False,
-                    truncation=True, max_length=32, add_special_tokens=False,
+                    a_text,
+                    return_tensors="pt",
+                    padding=False,
+                    truncation=True,
+                    max_length=32,
+                    add_special_tokens=False,
                 ).input_ids[0].to(device)
-                eos = torch.tensor([tokenizer.eos_token_id], device=device, dtype=torch.long)
+                eos = torch.tensor(
+                    [tokenizer.eos_token_id], device=device, dtype=torch.long
+                )
                 a_ids = torch.cat([a_ids, eos])
                 a_embeds = embed_fn(a_ids)
 
-                seq = torch.cat([v_proj_full[i], q_embeds, a_embeds], dim=0)
-                answer_starts.append(N + len(q_ids))
+                # Full sequence: [<s> USER: | visual_tokens | \n{q}\nASSISTANT: | answer</s>]
+                T_pre = len(prefix_ids)
+                T_suf = len(suffix_ids)
+                seq = torch.cat([prefix_embeds, v_proj_full[i], suffix_embeds, a_embeds], dim=0)
+
+                visual_starts.append(T_pre)
+                answer_starts.append(T_pre + N + T_suf)
                 all_embeds.append(seq)
                 all_masks.append(torch.ones(len(seq), device=device, dtype=torch.long))
 
-            # Store true sequence lengths BEFORE padding so we can exclude
-            # padding tokens when averaging answer hidden states below.
-            seq_lens = [e.shape[0] for e in all_embeds]  # [B] — true lengths
+            # ── Bug fix #1: record true lengths BEFORE padding ───────────────
+            # Needed to exclude zero-padding hidden states from the h_ans mean.
+            seq_lens = [e.shape[0] for e in all_embeds]  # [B]
 
             max_len = max(seq_lens)
             H = all_embeds[0].shape[-1]
-            padded_embeds = torch.zeros(B, max_len, H, device=device, dtype=all_embeds[0].dtype)
-            padded_masks  = torch.zeros(B, max_len, device=device, dtype=torch.long)
+            padded_embeds = torch.zeros(
+                B, max_len, H, device=device, dtype=all_embeds[0].dtype
+            )
+            padded_masks = torch.zeros(B, max_len, device=device, dtype=torch.long)
             for i in range(B):
                 L = seq_lens[i]
                 padded_embeds[i, :L] = all_embeds[i]
                 padded_masks[i, :L]  = all_masks[i]
+
+            # Free per-sample lists and projected features — no longer needed
+            del all_embeds, all_masks, v_proj_full
 
             # Run base LLM with LoRA disabled (teacher = base pretrained model)
             lm.disable_adapter_layers()
@@ -1019,33 +1067,43 @@ class TCViTokModel(nn.Module):
             finally:
                 lm.enable_adapter_layers()
 
-            # Extract hidden states [B, max_len, D_lm]
+            # ── Bug fix #3: free padded tensors immediately after LM forward ──
+            # lm_out holds ~19GB of activations. padded_embeds / padded_masks
+            # are no longer needed. Explicit del ensures CUDA frees them before
+            # the student forward — without this, the student OOMs on the 2nd pass.
+            del padded_embeds, padded_masks
+
+            # Extract last-layer hidden states [B, max_len, D_lm]
             if self._use_llava_lm_head:
-                # NEW arch: LlamaModel → last_hidden_state
-                h = lm_out.last_hidden_state
+                h = lm_out.last_hidden_state          # NEW arch: LlamaModel
             else:
-                # OLD arch: LlamaForCausalLM → hidden_states[-1]
-                h = lm_out.hidden_states[-1]
+                h = lm_out.hidden_states[-1]          # OLD arch: LlamaForCausalLM
+            del lm_out                                # free ~19GB activation memory
 
-            # Visual positions: first N tokens
-            h_vis = h[:, :N, :]                                  # [B, N, D_lm]
-
-            # Per-sample: mean of VALID answer-token hidden states → [B, 1, D_lm].
-            # Slice h[i, ans_start : seq_lens[i]] — excludes zero-padding positions
-            # that would corrupt the cosine similarity target if included in the mean.
+            # Per-sample importance: cosine_sim(mean(h_answer), h_visual).
+            # h_visual: visual positions are at [visual_start : visual_start + N]
+            #           (NOT 0:N — BOS + "USER: " prefix comes first).
+            # h_answer: slice [ans_start : seq_lens[i]] to exclude padding tokens.
             importances = []
             for i in range(B):
+                vis_start = visual_starts[i]
                 ans_start = answer_starts[i]
-                ans_end   = seq_lens[i]          # true end; excludes padding
+                ans_end   = seq_lens[i]               # true end, excludes padding
+
+                h_vis_i = h[i, vis_start : vis_start + N, :]   # [N, D_lm]
+
                 if ans_start < ans_end:
-                    h_ans = h[i, ans_start:ans_end, :].mean(0, keepdim=True)  # [1, D_lm]
+                    h_ans = h[i, ans_start:ans_end, :].mean(0, keepdim=True)   # [1, D_lm]
                 else:
-                    # Degenerate case: no answer tokens (empty answer_string)
+                    # Degenerate: empty answer_string — use last question token
                     h_ans = h[i, ans_start - 1 : ans_start, :]
+
                 imp = F.cosine_similarity(
-                    h_ans.expand(N, -1), h_vis[i], dim=-1
-                )                                                # [N]
+                    h_ans.expand(N, -1), h_vis_i, dim=-1
+                )                                     # [N]
                 importances.append(imp)
+
+            del h  # free hidden states before student forward
 
         return torch.stack(importances, dim=0).detach()          # [B, N]
 
