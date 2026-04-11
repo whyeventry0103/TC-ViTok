@@ -352,8 +352,8 @@ class TCViTokTrainer:
             # LoRA can compensate by memorizing a fixed-crop VQA mapping.
             if self.lora_warmfreeze_steps > 0 and self.global_step < self.lora_warmfreeze_steps:
                 for name, param in raw_model.named_parameters():
-                    if "lora_" in name and param.grad is not None:
-                        param.grad.zero_()
+                    if "lora_" in name:
+                        param.grad = None  # None → AdamW skips entirely (no weight decay); zero_() doesn't
 
             # Pooler warm-up: zero TPN gradients so UnselectedPooler stabilizes
             # before TPN routing competes. TPN still participates in forward
@@ -361,8 +361,7 @@ class TCViTokTrainer:
             # don't update — the pooler learns on a slowly-drifting token set.
             if self.pooler_warmup_steps > 0 and self.global_step < self.pooler_warmup_steps:
                 for param in raw_model.tpn.parameters():
-                    if param.grad is not None:
-                        param.grad.zero_()
+                    param.grad = None  # None → AdamW skips entirely (no weight decay); zero_() doesn't
 
             # Optimizer step
             self.optimizer.step()
