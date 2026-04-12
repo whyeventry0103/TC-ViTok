@@ -682,3 +682,108 @@ Extend max_steps to 100k. Tau stays at 0.1 floor from step 50k onward (fine).
 1. **Orthogonal deflation ablation**: Table with (a) no background pooling, (b) pooling without deflation, (c) pooling with deflation. If (b)→(c) gives ≥ 0.5% VQAv2, the claim is defensible.
 2. **Comparison to FastV, LLaVA-PruMerge, ToMe-for-LLaVA at same 144-token budget** — must beat them, not just random drop. Run these baselines BEFORE writing paper.
 3. **Query-conditioning ablation**: GQA spatial accuracy (TC-ViTok) vs (image-only TPN baseline). If gap > 3%, the query-conditioning narrative holds.
+
+---
+
+## Phase 1.5 v4 Design: Slot Diversity via Soft Orthogonality Penalty
+
+**Status:** Planned — implement after v3 validates the no-warmup training regime.
+
+### Problem Statement (from v3 design analysis)
+
+The current UnselectedPooler has a gap: the 4 output slots can attend to identical
+background tokens and produce correlated/redundant summaries. The existing deflation
+only removes the selected-token subspace from the INPUTS — it does not enforce that
+the 4 OUTPUT slots are diverse.
+
+### Why Hard Gram-Schmidt is Wrong (two traps, user-identified 2026-04-12)
+
+**Trap 1 — LayerNorm explosion on zero-residuals:**
+If Slot 2 is collinear with Slot 1, GS zeroes its residual. LayerNorm backward
+amplifies the gradient by 1/sqrt(var + eps) ≈ 316× (at var≈0). In BF16 (max ~65504),
+three such amplifications → overflow → NaN loss. The instability is in the backward
+pass, not the forward.
+
+**Trap 2 — Self-reinforcing slot death:**
+A zeroed slot → LLM adapts to ignore it → ∂L/∂slot_k ≈ 0 → no gradient reaches
+the attention weights → slot stays dead. The "gradient-informed" claim breaks down
+once the LLM adapts to ignore the dead slot. Hard GS hides redundancy from the LLM
+rather than resolving it.
+
+**Why iterative deflation (matching pursuit) is also wrong:**
+- 4× slower (slots are sequential, not parallelizable)
+- Gradient instability: ∂L/∂slot_1 flows through residuals from slots 2,3,4
+- BF16 drift: repeated subtraction `residual = residual - proj` accumulates fp16 error
+
+### The Correct Solution: Soft Cosine Orthogonality Loss
+
+Add `lambda_slot_orth × L_slot_orth` to the total training loss, where:
+
+```python
+def slot_orthogonality_loss(v_summary: torch.Tensor) -> torch.Tensor:
+    """Penalize cosine similarity between all pairs of slot output vectors.
+
+    Operates on pre-LayerNorm slot embeddings to avoid LN scale interaction.
+    In high-D space (D=1024), random vectors are nearly orthogonal by default
+    (E[cosine_sim] ≈ 0), so the penalty starts near zero and fires only when
+    slots genuinely over-specialize on the same background features.
+
+    Args:
+        v_summary: Pre-norm slot outputs [B, n_slots, D]
+
+    Returns:
+        loss: mean squared cosine similarity across all slot pairs (scalar)
+    """
+    # L2-normalize each slot
+    v_norm = F.normalize(v_summary, dim=-1)          # [B, n_slots, D]
+    # Gram matrix of cosine similarities
+    gram = torch.bmm(v_norm, v_norm.transpose(1, 2)) # [B, n_slots, n_slots]
+    # Only off-diagonal pairs (i ≠ j) — mask diagonal
+    n = v_summary.shape[1]
+    mask = ~torch.eye(n, dtype=torch.bool, device=gram.device)
+    return gram[:, mask].pow(2).mean()
+```
+
+**Properties:**
+- Always-nonzero gradient: drives attention weights to diverge continuously
+- No near-zero vectors: operates on L2-normalized vectors → no LN explosion risk
+- Numerically safe in BF16: F.normalize clamps implicitly, pow(2) is bounded
+- Starts near 0 for random slots (high-D orthogonality), grows only when slots correlate
+- Fully symmetric: treats all 4 slots equally (no slot hierarchy like GS)
+- Paper claim: "trained with explicit orthogonality penalty ensuring slot diversity"
+
+### Implementation Plan for v4
+
+**losses.py:** Add `slot_orthogonality_loss(v_summary)` function.
+
+**tc_vitok_model.py:** Expose pre-norm slot outputs in `forward()` return dict:
+```python
+# In UnselectedPooler.forward():
+out, _ = self.cross_attn(q, kv, kv)
+v_summary_prenorm = out                  # return this for loss
+return self.norm(out), v_summary_prenorm # [B, n_slots, D] each
+```
+
+**trainer.py:** Compute and add slot orthogonality loss when `lambda_slot_orth > 0`.
+
+**configs/phase1p5_v4.yaml:**
+```yaml
+lambda_slot_orth: 0.01    # small — slots start near-orthogonal in 1024-D space
+```
+
+### Hyperparameter: lambda_slot_orth = 0.01
+
+Rationale: At slot diversity = 0 (perfectly orthogonal), loss = 0. At slot collapse
+(all 4 slots identical), loss = 1.0 (mean sq cosine sim of 1.0). Contribution at
+collapse: 0.01 × 1.0 = 0.01 << VQA ≈ 0.5. The penalty fires hard enough to prevent
+collapse but never dominates. If early training shows val_vqa degrading, reduce to 0.005.
+
+### Ablation for Paper
+
+| Variant | lambda_slot_orth | Expected val_vqa |
+|---|---|---|
+| v3 (baseline) | 0 | TBD |
+| v4 (soft penalty) | 0.01 | TBD |
+| v4 no-deflation ablation | 0.01 | TBD (lower — proves deflation matters) |
+
+If (v4 - v3) ≥ 0.3% VQAv2, the slot diversity mechanism has a defensible paper contribution.
