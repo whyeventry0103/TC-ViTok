@@ -1,0 +1,97 @@
+# Phase 1.5 v4: Bounded losses — boundary margin + slot orthogonality
+#
+# v3 failure diagnosis (step 10k):
+#   spatial_spread_loss is unbounded negative (-112). With lambda_spread=0.005,
+#   contribution = 0.005 × (-112) = -0.56, dominating VQA's +0.26.
+#   Optimizer reward-hacks spread instead of improving VQA.
+#   val_vqa went UP (0.52 → 0.53) — optimization failure.
+#
+# v4 design principles:
+#   1. All loss terms bounded ≥ 0 (or small bounded negative for entropy)
+#   2. VQA always dominates the gradient budget
+#   3. No KL distillation (fights instance normalization)
+#   4. Only enforce RELATIVE ordering at boundary (boundary margin loss)
+#   5. Soft slot diversity penalty (no Gram-Schmidt collapse risk)
+#
+# Removed from v3:
+#   lambda_spread: 0.005 → 0.0  (unbounded negative, reward hacking)
+#   lambda_distill: 0.05 → 0.0  (KL fights instance norm, replaced by boundary)
+#
+# New in v4:
+#   lambda_boundary: 0.05  (hinge loss, max contribution 0.305, typical 0.005)
+#   lambda_slot_orth: 0.01 (cosine² penalty, max contribution 0.01)
+#   boundary_margin: 0.1   (0.1σ in instance-norm space)
+#
+# Expected training trajectory:
+#   Steps 0-3k:  TPN + pooler + mm_projector train together (same as v3)
+#   Step 3k:     LoRA unfreezes from B=0 — zero discontinuity
+#   Step 5k val: val_vqa ~0.44-0.48 (comparable to Phase 1 v3's 0.4411)
+#   Step 25k:    target val_vqa < 0.38 (boundary guides TPN toward teacher)
+#   Step 100k:   target val_vqa < 0.30 (beat Phase 1 v3 baseline of 0.3334)
+#
+# Load from: Phase 0 v4 checkpoint (same as v1-v3)
+
+defaults:
+  - base
+
+phase: 1
+description: "Phase 1.5 v4: boundary margin + slot orth, no spread/KL"
+
+model:
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 100000
+  batch_size: 4
+  grad_accum_steps: 16    # effective batch = 4 × 16 × 2 GPUs = 128
+
+  lambda_max: 0.0
+  T_warmup: 5000
+  lambda_entropy: 0.02
+  lambda_diversity: 0.1
+
+  # REMOVED: KL distillation (fights instance norm — see v3 failure analysis)
+  lambda_distill: 0.0
+
+  # REMOVED: Spatial spread (unbounded negative — reward hacking in v3)
+  lambda_spread: 0.0
+
+  # NEW: Boundary margin loss — hinge on teacher's k-th vs (k+1)-th token
+  # Bounded ≥ 0 always. Max contribution: 0.05 × 6.1 = 0.305 (extreme case)
+  # Typical contribution: 0.05 × 0.05 = 0.0025 (negligible vs VQA ~0.3)
+  lambda_boundary: 0.05
+  boundary_margin: 0.1     # 0.1σ gap in instance-norm score space
+
+  # NEW: Slot orthogonality penalty — soft cosine² between pooler slots
+  # Bounded [0, 1]. Max contribution: 0.01. Starts near 0 (random D=1024 vectors)
+  lambda_slot_orth: 0.01
+
+  # End-to-end co-adaptation from step 0 (validated in v3 pre-failure)
+  pooler_warmup_steps: 0
+
+  # LoRA freeze: 3000 steps (Phase 1 v3 validated value)
+  lora_warmfreeze_steps: 3000
+
+  lr_tpn: 3e-3
+  lr_lora: 2e-4
+  lr_mlp: 5e-4
+
+  # Tau: 1.0→0.1 over 100k steps
+  tau_max: 1.0
+  tau_min: 0.1
+
+data:
+  datasets: ["vqav2", "gqa"]
+
+logging:
+  wandb_run_name: "phase1p5_v4_boundary"
+  eval_interval: 5000
+  max_val_batches: 100
+
+checkpoint:
+  load_from: "runs/phase0_v4/phase0/best.ckpt"
+  strict: false

@@ -787,3 +787,210 @@ collapse but never dominates. If early training shows val_vqa degrading, reduce 
 | v4 no-deflation ablation | 0.01 | TBD (lower — proves deflation matters) |
 
 If (v4 - v3) ≥ 0.3% VQAv2, the slot diversity mechanism has a defensible paper contribution.
+
+---
+
+## Phase 1.5 v4 Addition: Boundary Margin Loss (TPN Distillation Replacement)
+
+**Status:** Planned — add alongside soft orthogonality penalty in v4.
+
+### Motivation: Why KL Distillation is the Wrong Loss for TPN
+
+Current distillation: `KL(softmax(teacher_scale × teacher_cosim) || softmax(s_N))`
+
+This supervises all 576 TPN scores toward a soft teacher distribution. Two problems:
+
+1. **Instance norm conflict:** KL pushes scores toward extreme values (high for teacher-preferred tokens, low for others). Instance normalization forces mean=0, std=1 every forward pass. These objectives fight each other on every step — KL wants large magnitude separation, instance norm collapses it back.
+
+2. **Wrong inductive bias:** The TPN's job is binary selection (top-k). Matching a soft probability distribution over 576 tokens is the wrong target — the TPN only needs to get the ORDERING right at the k/k+1 boundary, not the exact probability values everywhere.
+
+### The Correct Formulation: Boundary Margin Loss
+
+Only enforce that the TPN places the teacher's k-th preferred token above the teacher's (k+1)-th preferred token by a margin. Ignore everything else.
+
+```python
+def boundary_margin_loss(
+    s_N: torch.Tensor,
+    teacher_importance: torch.Tensor,
+    k: int = 144,
+    margin: float = 0.1,
+) -> torch.Tensor:
+    """Enforce correct TPN ordering at the teacher's selection boundary.
+
+    Does NOT push scores toward ±∞ (compatible with instance normalization).
+    Does NOT supervise the full 576-token distribution (avoids over-constraint).
+    Only asks: is s_N[teacher_144th] > s_N[teacher_145th] + margin?
+
+    Args:
+        s_N: Instance-normalized TPN scores [B, N], mean=0 std=1
+        teacher_importance: Teacher cosine similarity scores [B, N], raw (not softmaxed)
+        k: Token budget (144)
+        margin: Minimum score gap at the boundary (0.1 ≈ 0.1σ in instance-norm space)
+
+    Returns:
+        loss: hinge loss scalar, 0 when boundary is correct, >0 when inverted
+    """
+    # Find teacher's k-th and (k+1)-th ranked token indices
+    _, teacher_sorted = teacher_importance.sort(dim=-1, descending=True)
+    kth_idx  = teacher_sorted[:, k-1:k]     # [B, 1] — teacher's last selected token
+    kp1_idx  = teacher_sorted[:, k:k+1]     # [B, 1] — teacher's first rejected token
+
+    s_kth  = s_N.gather(1, kth_idx)         # [B, 1] — TPN score at teacher boundary-in
+    s_kp1  = s_N.gather(1, kp1_idx)         # [B, 1] — TPN score at teacher boundary-out
+
+    # Hinge: loss = 0 if s_kth > s_kp1 + margin, else penalize the violation
+    return F.relu(margin - (s_kth - s_kp1)).mean()
+```
+
+**Why this is compatible with instance norm:**
+- Instance norm forces s_N to have std=1, so scores live in roughly [-3, +3]
+- `margin=0.1` = 0.1σ separation at the boundary — small relative to score range
+- The loss only constrains the RELATIVE ordering of two tokens, never their absolute values
+- Instance norm can freely rescale/shift; the boundary constraint is scale-invariant
+
+**Hyperparameter:** `lambda_boundary = 0.05`. Contribution when boundary is violated by 0.1:
+`0.05 × 0.1 = 0.005` << VQA ≈ 0.5. Low weight — only corrects gross boundary errors.
+
+**Replace or augment current KL?** Replace. KL fights instance norm (see above). Boundary
+margin is strictly better: same semantic signal (match teacher's selection priority) with
+zero architecture conflict. Set `lambda_distill: 0.0`, `lambda_boundary: 0.05` in v4.yaml.
+
+**Implementation locations:**
+- `losses.py`: add `boundary_margin_loss()` function
+- `training/trainer.py`: compute and pass to `compute_total_loss()`
+- `configs/phase1p5_v4.yaml`: `lambda_distill: 0.0`, `lambda_boundary: 0.05`, `margin: 0.1`
+
+---
+
+## Phase 1.5 v5 Addition: Residual Pooler Distillation
+
+**Status:** Planned — implement after v4 validates soft orthogonality + boundary margin.
+
+### Concept: Supervise the Pooler With What the Teacher Left Behind
+
+The teacher (576 tokens) assigns importance to ALL tokens including the 432 the TPN drops.
+Currently this signal is wasted. The pooler is trained purely by VQA gradient flowing
+backward through the LLM — a weak, indirect signal for a randomly-initialized component.
+
+**Core idea:** Use the teacher's importance scores for the 432 unselected tokens as an
+explicit supervisory target for the pooler's cross-attention distribution. The pooler
+is told: "attend to these background tokens in roughly this priority order."
+
+### Why the User's Original Implementation Had Three Bugs
+
+**Bug 1 — Wrong teacher signal format:**
+`_get_teacher_importance` returns cosine similarities in [-1, 1]. Negative values make
+`sum()` potentially zero or negative → division NaN. Cosine sims are NOT a distribution.
+**Fix:** apply `F.softmax(teacher_cosim * teacher_scale, dim=-1)` to convert to a valid
+probability distribution before using as a KL target.
+
+**Bug 2 — Pooler attention not normalized:**
+```python
+total_pooler_attn = pooler_attn.sum(dim=1)   # sums to 4 (4 slots × sum-to-1 each)
+F.kl_div(total_pooler_attn.log(), ...)        # log(4×p) ≠ log_prob
+```
+`sum(dim=1)` over 4 softmax attention maps gives values in [0, 4]. KL divergence requires
+a log-probability on the left. **Fix:** normalize before taking log.
+
+**Bug 3 — Attention weights discarded:**
+```python
+out, _ = self.cross_attn(q, kv, kv)   # attention weights silently dropped
+```
+`MultiheadAttention` default: `need_weights=False` (doesn't even compute them).
+**Fix:** `need_weights=True, average_attn_weights=False` returns per-head weights [B, H, N-k].
+
+### Corrected Implementation
+
+```python
+# In UnselectedPooler.forward() — return attention weights:
+out, attn_weights = self.cross_attn(
+    q, kv, kv,
+    need_weights=True,
+    average_attn_weights=True,   # average over heads → [B, n_slots, N-k]
+)
+# Return both for external loss computation:
+return self.norm(out), attn_weights   # [B, n_slots, D], [B, n_slots, N-k]
+```
+
+```python
+def residual_pooler_distill_loss(
+    pooler_attn: torch.Tensor,
+    teacher_importance: torch.Tensor,
+    unsel_idx: torch.Tensor,
+    teacher_scale: float = 10.0,
+) -> torch.Tensor:
+    """KL divergence between pooler's aggregate attention and teacher's residual.
+
+    Supervises the pooler to attend to the background tokens the teacher found
+    most important — the contextual tokens TPN was forced to leave behind.
+
+    Args:
+        pooler_attn: Pooler cross-attention weights [B, n_slots, N-k]
+        teacher_importance: Teacher cosine similarity scores [B, N] (raw, in [-1,1])
+        unsel_idx: Indices of unselected tokens [B, N-k] (from complement_gather)
+        teacher_scale: Scale before softmax to sharpen distribution (matches BUG-41 fix)
+
+    Returns:
+        loss: KL(pooler_aggregate || teacher_residual) scalar
+    """
+    B, N = teacher_importance.shape
+
+    # Step 1: Convert teacher cosine similarities to valid distribution
+    # teacher_scale=10.0 maps std≈0.1 cosine sims to std≈1.0 (from BUG-41 fix)
+    teacher_dist = F.softmax(teacher_importance * teacher_scale, dim=-1)  # [B, N]
+
+    # Step 2: Extract teacher's distribution over the 432 UNSELECTED tokens only
+    teacher_residual = teacher_dist.gather(1, unsel_idx)                  # [B, N-k]
+    # Renormalize to sum=1 over just the unselected set
+    teacher_residual = teacher_residual / (
+        teacher_residual.sum(dim=-1, keepdim=True) + 1e-8
+    )                                                                      # [B, N-k]
+
+    # Step 3: Aggregate pooler attention across slots → single distribution over N-k tokens
+    # Each slot's attn sums to 1 (softmax). Sum across slots → [0, n_slots]. Renormalize.
+    total_pooler_attn = pooler_attn.sum(dim=1)                            # [B, N-k]
+    total_pooler_attn = total_pooler_attn / (
+        total_pooler_attn.sum(dim=-1, keepdim=True) + 1e-8
+    )                                                                      # [B, N-k], sums to 1
+
+    # Step 4: KL(pooler || teacher_residual)
+    # F.kl_div expects log-probabilities on left, probabilities on right
+    log_pooler = torch.log(total_pooler_attn + 1e-8)
+    return F.kl_div(log_pooler, teacher_residual, reduction="batchmean")
+```
+
+### Conceptual Caveat (honest limitation for the paper)
+
+The teacher computes importance scores over 576 tokens simultaneously — each token's
+importance is contextualized by all 576. The pooler sees only 432 unselected tokens after
+orthogonal deflation. Teacher's ranking of token 200 among 576 ≠ pooler's optimal
+attention to token 200 among 432 (different context, different normalization).
+
+**Mitigation for paper:** Frame this as "approximate residual supervision" — a soft prior
+that guides the pooler toward contextually-important background tokens, not a hard label.
+The gradient from VQA still dominates; this adds a directional bias. Ablation table (v5 with
+vs without residual supervision) quantifies whether the approximation helps.
+
+**VRAM cost:** `need_weights=True` in MHA stores [B, n_slots, N-k] = [4, 4, 432] per
+example. At batch=4: 4 × 4 × 4 × 432 × 2 bytes (BF16) ≈ 55KB per batch. Negligible.
+
+**Implementation locations for v5:**
+- `tc_vitok_model.py`: `UnselectedPooler.forward()` returns `(out, attn_weights)`
+- `tc_vitok_model.py`: main `forward()` returns `pooler_attn` in output dict
+- `losses.py`: add `residual_pooler_distill_loss()` function
+- `trainer.py`: pass `pooler_attn` and `unsel_idx` to loss computation
+- `configs/phase1p5_v5.yaml`: `lambda_residual_distill: 0.02`
+
+---
+
+## Complete Four-Component Paper Narrative
+
+| Component | Mechanism | Loss | Novel? |
+|---|---|---|---|
+| TPN selection | Boundary margin loss | `λ_boundary × hinge(s_kth - s_kp1, margin)` | Yes — boundary-only, instance-norm-compatible |
+| Pooler input | Orthogonal deflation | (architecture, no loss) | Yes — first to project selected subspace from background |
+| Pooler output | Soft slot orthogonality | `λ_slot_orth × mean(cosine_sim(slot_i, slot_j)²)` | Yes — always-nonzero gradient, no LayerNorm explosion |
+| Pooler supervision | Residual distillation | `λ_residual × KL(pooler_agg \|\| teacher_residual)` | Yes — first to use teacher's leftover attention as pooler target |
+
+Each component is ablatable independently. If all four contribute ≥ 0.3% each, the paper
+has four defensible claims and a coherent "complete supervision" story.

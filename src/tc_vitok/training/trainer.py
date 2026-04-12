@@ -84,6 +84,10 @@ class TCViTokTrainer:
         self.lambda_distill = config["training"].get("lambda_distill", 0.0)
         self.spread_decay_start = config["training"].get("spread_decay_start", 30000)
         self.spread_decay_end   = config["training"].get("spread_decay_end",   50000)
+        # Phase 1.5 v4: boundary margin + slot orthogonality (replaces spread + KL distill)
+        self.lambda_boundary = config["training"].get("lambda_boundary", 0.0)
+        self.lambda_slot_orth = config["training"].get("lambda_slot_orth", 0.0)
+        self.boundary_margin = config["training"].get("boundary_margin", 0.1)
 
         # LoRA warm-freeze: keep LoRA gradients zeroed for the first N steps so TPN
         # has time to learn query-conditioned routing before LoRA compensates.
@@ -257,10 +261,10 @@ class TCViTokTrainer:
         # ── Teacher distillation pass (Phase 1.5) ────────────────────────────
         # Run frozen base LLaVA with all 576 tokens BEFORE student forward.
         # Sequential execution: teacher activations freed before student allocates.
-        # Skipped when: stub mode, lambda_distill=0, or no answer_strings.
+        # Skipped when: stub mode, no teacher-dependent loss, or no answer_strings.
         teacher_importance = None
         if (
-            self.lambda_distill > 0
+            (self.lambda_distill > 0 or self.lambda_boundary > 0)
             and not raw_model.use_stub_llm
             and answer_strings is not None
             and "images_coarse" in batch    # full pipeline only (not cached path)
@@ -317,10 +321,14 @@ class TCViTokTrainer:
             lambda_diversity=self.lambda_diversity,
             lambda_spread=lambda_spread,
             lambda_distill=self.lambda_distill,
+            lambda_boundary=self.lambda_boundary,
+            lambda_slot_orth=self.lambda_slot_orth,
+            boundary_margin=self.boundary_margin,
             mask_ste=outputs.get("mask_ste"),
             mask_soft=mask_soft,
             q_embed=outputs.get("q_embed"),
             teacher_importance=teacher_importance,
+            v_summary_prenorm=outputs.get("v_summary_prenorm"),
         )
 
         # NaN/Inf guard: skip backward entirely to prevent weight corruption.

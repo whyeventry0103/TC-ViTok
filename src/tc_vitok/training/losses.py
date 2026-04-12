@@ -234,6 +234,64 @@ def attention_distillation_loss(
     return F.kl_div(lp_s, p_t, reduction="batchmean") * (T ** 2)
 
 
+def boundary_margin_loss(
+    s_N: torch.Tensor,
+    teacher_importance: torch.Tensor,
+    k: int = 144,
+    margin: float = 0.1,
+) -> torch.Tensor:
+    """Enforce correct TPN ordering at the teacher's selection boundary.
+
+    Only constrains TWO tokens: the teacher's k-th and (k+1)-th ranked tokens.
+    Does NOT push scores toward ±∞ (compatible with instance normalization).
+    Hinge loss: exactly 0 when boundary is correct, bounded positive otherwise.
+
+    Max loss = relu(margin - (-2*max_score)) ≈ 6.1 for instance-norm scores.
+    Typical loss ≈ 0.0-0.1 (boundary tokens are usually close in score).
+
+    Args:
+        s_N: Instance-normalized TPN scores [B, N], mean=0 std=1
+        teacher_importance: Teacher cosine similarity scores [B, N], raw [-1,1]
+        k: Token budget (144)
+        margin: Minimum score gap at boundary (0.1 ≈ 0.1σ in inst-norm space)
+
+    Returns:
+        loss: hinge loss scalar, 0 when boundary correct, >0 when inverted
+    """
+    # Sort teacher scores descending → get indices of k-th and (k+1)-th tokens
+    _, teacher_sorted_idx = teacher_importance.sort(dim=-1, descending=True)
+    kth_idx = teacher_sorted_idx[:, k - 1 : k]       # [B, 1] — teacher's last selected
+    kp1_idx = teacher_sorted_idx[:, k : k + 1]       # [B, 1] — teacher's first rejected
+
+    s_kth = s_N.gather(1, kth_idx)                    # [B, 1] — TPN score at boundary-in
+    s_kp1 = s_N.gather(1, kp1_idx)                    # [B, 1] — TPN score at boundary-out
+
+    return F.relu(margin - (s_kth - s_kp1)).mean()
+
+
+def slot_orthogonality_loss(v_summary_prenorm: torch.Tensor) -> torch.Tensor:
+    """Penalize cosine similarity between all pairs of slot output vectors.
+
+    Operates on pre-LayerNorm slot embeddings (raw cross-attention outputs).
+    In D=1024, random vectors have E[cos²] ≈ 1/1024 ≈ 0.001, so the loss
+    starts near zero and fires only when slots genuinely over-specialize.
+
+    Loss ∈ [0, 1]: 0 when all slots orthogonal, 1 when all identical.
+    Max contribution with lambda=0.01: 0.01 (50× smaller than typical VQA).
+
+    Args:
+        v_summary_prenorm: Pre-norm slot outputs [B, n_slots, D]
+
+    Returns:
+        loss: mean squared cosine similarity across all slot pairs (scalar)
+    """
+    v_norm = F.normalize(v_summary_prenorm.float(), dim=-1)   # [B, n_slots, D]
+    gram = torch.bmm(v_norm, v_norm.transpose(1, 2))          # [B, n_slots, n_slots]
+    n = v_summary_prenorm.shape[1]
+    mask = ~torch.eye(n, dtype=torch.bool, device=gram.device) # off-diagonal only
+    return gram[:, mask].pow(2).mean()
+
+
 def compute_total_loss(
     logits: Optional[torch.Tensor],
     labels: Optional[torch.Tensor],
@@ -246,17 +304,26 @@ def compute_total_loss(
     lambda_diversity: float = 0.0,
     lambda_spread: float = 0.0,
     lambda_distill: float = 0.0,
+    lambda_boundary: float = 0.0,
+    lambda_slot_orth: float = 0.0,
+    boundary_margin: float = 0.1,
     mask_ste: Optional[torch.Tensor] = None,
     mask_soft: Optional[torch.Tensor] = None,
     q_embed: Optional[torch.Tensor] = None,
     teacher_importance: Optional[torch.Tensor] = None,
+    v_summary_prenorm: Optional[torch.Tensor] = None,
     gamma: float = 0.5,
 ) -> dict[str, torch.Tensor]:
-    """Compute total training loss with Phase 1.5 regularization terms.
+    """Compute total training loss with Phase 1.5 v4 regularization terms.
 
-    Total loss:
-        L = L_VQA + λ_spar * ||s_N||_1/N + λ_ent * L_ent + λ_div * L_div
-              + λ_spread * L_spread + λ_distill * L_distill
+    Total loss (v4):
+        L = L_VQA + λ_ent * L_ent + λ_div * L_div
+              + λ_boundary * L_boundary + λ_slot_orth * L_slot_orth
+              + λ_spread * L_spread + λ_distill * L_distill  (both 0 in v4)
+
+    All terms are non-negative or bounded:
+        VQA ≥ 0, boundary ≥ 0, slot_orth ∈ [0,1], entropy ∈ [-6.36, 0]
+    No unbounded negative terms → VQA dominates the gradient budget.
 
     Args:
         logits: Language model logits [B, seq_len, vocab_size] (None → VQA=0)
@@ -266,18 +333,23 @@ def compute_total_loss(
         k: Token budget
         N: Total spatial positions (576)
         lambda_sparsity: L1 sparsity weight (0.0 = disabled)
-        lambda_entropy: Entropy weight — 0.01-0.05 to compete with VQA
-        lambda_diversity: Within-batch diversity weight (0.0 = disabled)
-        lambda_spread: Spatial spread penalty weight (anneal 0.005→0 after step 30k)
-        lambda_distill: Teacher distillation KL weight (0.2 nominal)
-        mask_ste: STE selection mask [B, N] — binary fwd, m_soft gradient bwd (optional)
-        mask_soft: sigmoid(s_N / tau) [B, N] — for spatial_spread_loss (optional)
+        lambda_entropy: Entropy weight — 0.02 to encourage diverse selection
+        lambda_diversity: Within-batch diversity weight (0.1)
+        lambda_spread: Spatial spread weight (0.0 in v4 — removed)
+        lambda_distill: KL distillation weight (0.0 in v4 — replaced by boundary)
+        lambda_boundary: Boundary margin loss weight (0.05 in v4)
+        lambda_slot_orth: Slot orthogonality penalty weight (0.01 in v4)
+        boundary_margin: Hinge margin for boundary loss (0.1)
+        mask_ste: STE selection mask [B, N] (optional)
+        mask_soft: sigmoid(s_N / tau) [B, N] (optional, unused in v4)
         q_embed: CLIP text embeddings [B, d_q] for diversity loss (optional)
-        teacher_importance: Frozen teacher per-token cosine sim [B, N] (optional)
+        teacher_importance: Teacher cosine sim scores [B, N] (optional)
+        v_summary_prenorm: Pre-LayerNorm pooler outputs [B, n_slots, D] (optional)
         gamma: Mask similarity threshold for diversity loss (default 0.5)
 
     Returns:
-        loss_dict: {total, vqa, sparsity, entropy, diversity, spread, distill}
+        loss_dict: {total, vqa, sparsity, entropy, diversity, spread, distill,
+                    boundary, slot_orth}
     """
     from ..models.masking import compute_spatial_entropy, compute_diversity_loss
 
@@ -291,53 +363,48 @@ def compute_total_loss(
     loss_sparsity = l1_sparsity_loss(scores)
 
     # Entropy: use mask_ste for gradient to ALL N tokens when available.
-    # mask_ste routes gradient via m_soft STE to both selected AND unselected tokens.
-    # Without this, 432 unselected tokens have zero VQA gradient → trapped in static crop.
     if mask_ste is not None and mask_ste.requires_grad:
-        ent = compute_spatial_entropy(mask_ste)   # differentiable: grad flows to all N scores
+        ent = compute_spatial_entropy(mask_ste)
     else:
-        ent = entropy_from_idx(idx, N=N)           # fallback for eval (non-differentiable)
-    loss_ent = -ent  # negate so minimizing total loss = maximizing entropy
+        ent = entropy_from_idx(idx, N=N)
+    loss_ent = -ent
 
-    # Within-batch diversity loss: penalize query-agnostic score distributions.
-    #
-    # WHY NOT mask_ste: gumbel-noisy binary masks have low cosine similarity by
-    # pure chance (different noise per sample). clamp(sim - gamma, 0) always hits 0.
-    # The diversity loss was firing 0.0000 every step — dead signal.
-    #
-    # WHY SCORES: instance-normalized s_N (mean=0, std=1) captures the TRUE spatial
-    # bias of TPN regardless of gumbel noise. Static-crop TPN → both samples produce
-    # score vectors with same spatial peaks (center) → cosine_sim ≈ 1.0 → loss fires.
-    # Query-conditioned TPN → different peaks for different queries → sim ≈ low.
-    # No gamma/clamp threshold: always differentiable, gradient active every step.
-    #
-    #   L_div = mean( cosine_sim(s_N_i, s_N_j) * (1 - q_sim(q_i, q_j)) )
-    #
-    # High when TPN ignores the query (static bias). Low when TPN routes per query.
+    # Within-batch diversity loss on raw score vectors.
     loss_div = scores.new_zeros(())
     if q_embed is not None and lambda_diversity > 0 and scores.shape[0] >= 2:
         B = scores.shape[0]
         half = B // 2
         score_sim = F.cosine_similarity(
             scores[:half].float(), scores[half : 2 * half].float(), dim=-1
-        )  # [B//2] — always in [-1, 1], near 1.0 for static-crop TPN
+        )
         q_sim = F.cosine_similarity(
             q_embed[:half].float(), q_embed[half : 2 * half].float(), dim=-1
-        )  # [B//2] — detached (frozen CLIP), used as per-pair weight
+        )
         loss_div = (score_sim * (1.0 - q_sim.detach())).mean()
 
-    # Spatial spread loss: differentiable spatial diversity penalty via mask_soft.
-    # Maximizes variance of selection position → TPN spreads across image.
-    # Requires mask_soft = sigmoid(s_N / tau). Annealed to 0 after step 30k.
+    # Spatial spread loss (v1-v3 legacy, disabled in v4: lambda_spread=0)
     loss_spread = scores.new_zeros(())
     if mask_soft is not None and lambda_spread > 0:
         loss_spread = spatial_spread_loss(mask_soft, N=N)
 
-    # Teacher distillation: KL(teacher_importance || s_N distribution).
-    # Dense token-level supervision from frozen base LLaVA with all 576 tokens.
+    # KL distillation (v1-v3 legacy, disabled in v4: lambda_distill=0)
     loss_distill = scores.new_zeros(())
     if teacher_importance is not None and lambda_distill > 0:
         loss_distill = attention_distillation_loss(scores, teacher_importance)
+
+    # Boundary margin loss (v4): enforce TPN agrees with teacher at selection boundary.
+    # Hinge loss ≥ 0 always. Typical contribution: 0.05 × 0.05 = 0.0025.
+    loss_boundary = scores.new_zeros(())
+    if teacher_importance is not None and lambda_boundary > 0:
+        loss_boundary = boundary_margin_loss(
+            scores, teacher_importance, k=k, margin=boundary_margin,
+        )
+
+    # Slot orthogonality penalty (v4): penalize cosine similarity between pooler slots.
+    # Loss ∈ [0, 1]. Typical contribution: 0.01 × 0.001 = 0.00001.
+    loss_slot_orth = scores.new_zeros(())
+    if v_summary_prenorm is not None and lambda_slot_orth > 0:
+        loss_slot_orth = slot_orthogonality_loss(v_summary_prenorm)
 
     loss_total = (
         loss_vqa
@@ -346,6 +413,8 @@ def compute_total_loss(
         + lambda_diversity * loss_div
         + lambda_spread * loss_spread
         + lambda_distill * loss_distill
+        + lambda_boundary * loss_boundary
+        + lambda_slot_orth * loss_slot_orth
     )
 
     return {
@@ -356,4 +425,6 @@ def compute_total_loss(
         "diversity": loss_div.detach() if isinstance(loss_div, torch.Tensor) else torch.tensor(0.0),
         "spread": loss_spread.detach() if isinstance(loss_spread, torch.Tensor) else torch.tensor(0.0),
         "distill": loss_distill.detach() if isinstance(loss_distill, torch.Tensor) else torch.tensor(0.0),
+        "boundary": loss_boundary.detach() if isinstance(loss_boundary, torch.Tensor) else torch.tensor(0.0),
+        "slot_orth": loss_slot_orth.detach() if isinstance(loss_slot_orth, torch.Tensor) else torch.tensor(0.0),
     }

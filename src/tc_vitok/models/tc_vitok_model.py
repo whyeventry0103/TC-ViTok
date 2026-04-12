@@ -141,7 +141,7 @@ class UnselectedPooler(nn.Module):
         self,
         v_unsel_orth: torch.Tensor,
         unsel_indices: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Pool orthogonal background tokens into n_slots summary vectors.
 
         Args:
@@ -149,7 +149,10 @@ class UnselectedPooler(nn.Module):
             unsel_indices: Flat grid indices of unselected positions [B, N-k]
 
         Returns:
-            summary: [B, n_slots, D]
+            summary: Post-LayerNorm slot outputs [B, n_slots, D]
+            summary_prenorm: Pre-LayerNorm slot outputs [B, n_slots, D]
+                (used by slot_orthogonality_loss — raw cross-attn output
+                 before normalization distorts cosine geometry)
         """
         B = v_unsel_orth.shape[0]
         D = v_unsel_orth.shape[-1]
@@ -158,7 +161,7 @@ class UnselectedPooler(nn.Module):
         kv = v_unsel_orth + pe                              # [B, N-k, D]
         q = self.slots.expand(B, -1, -1)                   # [B, n_slots, D]
         out, _ = self.cross_attn(q, kv, kv)
-        return self.norm(out)                               # [B, n_slots, D]
+        return self.norm(out), out                          # normed, pre-norm
 
 
 class StubLLM(nn.Module):
@@ -507,7 +510,7 @@ class TCViTokModel(nn.Module):
             )                                                      # [B, N-k, D]
 
             # Pool orthogonal background into 4 summary tokens
-            v_summary = self.unsel_pooler(v_unsel_orth, unsel_idx)  # [B, 4, D]
+            v_summary, v_summary_prenorm = self.unsel_pooler(v_unsel_orth, unsel_idx)  # [B, 4, D] each
 
             # LLM prefix: [4 summary | k selected] — total k+4 tokens
             v_input = torch.cat([v_summary, v_selected], dim=1)   # [B, k+4, D]
@@ -542,6 +545,11 @@ class TCViTokModel(nn.Module):
             outputs["mask_ste"] = mask_ste
         if q_embed is not None:
             outputs["q_embed"] = q_embed.detach()  # frozen CLIP encoder, no gradient needed
+
+        # Pre-LayerNorm pooler outputs for slot orthogonality loss (v4).
+        # Only available during training when UnselectedPooler is active.
+        if self.training and not self.use_stub_llm and self.unsel_pooler is not None:
+            outputs["v_summary_prenorm"] = v_summary_prenorm  # [B, 4, D]
 
         return outputs
 
