@@ -292,6 +292,74 @@ def slot_orthogonality_loss(v_summary_prenorm: torch.Tensor) -> torch.Tensor:
     return gram[:, mask].pow(2).mean()
 
 
+def residual_pooler_distill_loss(
+    pooler_attn: torch.Tensor,
+    teacher_importance: torch.Tensor,
+    unsel_idx: torch.Tensor,
+    teacher_scale: float = 10.0,
+) -> torch.Tensor:
+    """KL divergence between pooler's aggregate attention and teacher's residual.
+
+    Supervises the UnselectedPooler to attend to the background tokens that the
+    teacher (full-token LLaVA) found most important. These are the contextually
+    relevant tokens TPN was forced to leave behind — supervising the pooler
+    ensures the 4 summary slots actually recover what matters.
+
+    Three-step construction:
+      1. Convert teacher cosine similarities → valid probability distribution
+         (same teacher_scale=10.0 fix as BUG-41: maps std≈0.1 → std≈1.0)
+      2. Extract teacher's distribution over the N-k UNSELECTED tokens only,
+         then renormalize (teacher ranked all 576 tokens; we want just the 432)
+      3. Aggregate pooler attention across n_slots (each slot sums to 1 via softmax;
+         sum → renormalize → single distribution over N-k tokens)
+      4. KL(pooler_aggregate || teacher_residual)
+
+    Gradient flows through pooler_attn → MHA softmax → Q,K projections → slot params.
+    This gives the pooler a direct supervisory signal: attend to the background
+    tokens the teacher valued most, not just whatever minimizes VQA CE indirectly.
+
+    Paper note (honest limitation): teacher ranks token_i among 576 full tokens;
+    pooler attends to token_i among 432 deflated tokens. The renormalization
+    handles the size mismatch but not the context shift. Frame as "approximate
+    residual supervision — a soft prior, not a hard label."
+
+    Args:
+        pooler_attn: Head-averaged cross-attention weights [B, n_slots, N-k]
+            (from UnselectedPooler with need_weights=True, average_attn_weights=True)
+        teacher_importance: Teacher cosine similarity scores [B, N], raw ∈ [-1, 1]
+        unsel_idx: Indices of unselected tokens [B, N-k] (from complement_gather)
+        teacher_scale: Sharpening factor before softmax (matches BUG-41 fix)
+
+    Returns:
+        loss: KL(pooler_aggregate || teacher_residual) scalar, bounded ≥ 0
+    """
+    # Step 1: teacher cosine sims → valid probability distribution over all N tokens
+    # teacher_scale=10.0 maps std≈0.1 to std≈1.0, giving ~19× concentration at top token
+    teacher_dist = F.softmax(
+        teacher_importance.float() * teacher_scale, dim=-1
+    )  # [B, N]
+
+    # Step 2: extract teacher's distribution over the N-k unselected tokens only
+    teacher_residual = teacher_dist.gather(1, unsel_idx)         # [B, N-k]
+    # Renormalize: teacher_dist summed to 1 over N; we want it to sum to 1 over N-k
+    teacher_residual = teacher_residual / (
+        teacher_residual.sum(dim=-1, keepdim=True) + 1e-8
+    )                                                             # [B, N-k], sums to 1
+
+    # Step 3: aggregate pooler attention across slots → single distribution over N-k
+    # Each slot's attn_weights sums to 1 (cross-attn softmax). Sum across n_slots
+    # → values in [0, n_slots]. Renormalize to sum=1.
+    total_pooler_attn = pooler_attn.float().sum(dim=1)           # [B, N-k]
+    total_pooler_attn = total_pooler_attn / (
+        total_pooler_attn.sum(dim=-1, keepdim=True) + 1e-8
+    )                                                             # [B, N-k], sums to 1
+
+    # Step 4: KL(pooler_aggregate || teacher_residual)
+    # F.kl_div expects log-probabilities on the left, probabilities on the right
+    log_pooler = torch.log(total_pooler_attn + 1e-8)             # [B, N-k]
+    return F.kl_div(log_pooler, teacher_residual, reduction="batchmean")
+
+
 def compute_total_loss(
     logits: Optional[torch.Tensor],
     labels: Optional[torch.Tensor],
@@ -306,23 +374,27 @@ def compute_total_loss(
     lambda_distill: float = 0.0,
     lambda_boundary: float = 0.0,
     lambda_slot_orth: float = 0.0,
+    lambda_residual_distill: float = 0.0,
     boundary_margin: float = 0.1,
     mask_ste: Optional[torch.Tensor] = None,
     mask_soft: Optional[torch.Tensor] = None,
     q_embed: Optional[torch.Tensor] = None,
     teacher_importance: Optional[torch.Tensor] = None,
     v_summary_prenorm: Optional[torch.Tensor] = None,
+    pooler_attn: Optional[torch.Tensor] = None,
+    unsel_idx: Optional[torch.Tensor] = None,
     gamma: float = 0.5,
 ) -> dict[str, torch.Tensor]:
     """Compute total training loss with Phase 1.5 v4 regularization terms.
 
-    Total loss (v4):
+    Total loss (v5):
         L = L_VQA + λ_ent * L_ent + λ_div * L_div
               + λ_boundary * L_boundary + λ_slot_orth * L_slot_orth
-              + λ_spread * L_spread + λ_distill * L_distill  (both 0 in v4)
+              + λ_residual * L_residual
+              + λ_spread * L_spread + λ_distill * L_distill  (both 0 in v5)
 
     All terms are non-negative or bounded:
-        VQA ≥ 0, boundary ≥ 0, slot_orth ∈ [0,1], entropy ∈ [-6.36, 0]
+        VQA ≥ 0, boundary ≥ 0, slot_orth ∈ [0,1], residual ≥ 0, entropy ∈ [-6.36, 0]
     No unbounded negative terms → VQA dominates the gradient budget.
 
     Args:
@@ -337,19 +409,22 @@ def compute_total_loss(
         lambda_diversity: Within-batch diversity weight (0.1)
         lambda_spread: Spatial spread weight (0.0 in v4 — removed)
         lambda_distill: KL distillation weight (0.0 in v4 — replaced by boundary)
-        lambda_boundary: Boundary margin loss weight (0.05 in v4)
-        lambda_slot_orth: Slot orthogonality penalty weight (0.01 in v4)
+        lambda_boundary: Boundary margin loss weight (0.05 in v4/v5)
+        lambda_slot_orth: Slot orthogonality penalty weight (0.01 in v4/v5)
+        lambda_residual_distill: Residual pooler distillation weight (0.02 in v5)
         boundary_margin: Hinge margin for boundary loss (0.1)
         mask_ste: STE selection mask [B, N] (optional)
-        mask_soft: sigmoid(s_N / tau) [B, N] (optional, unused in v4)
+        mask_soft: sigmoid(s_N / tau) [B, N] (optional, unused in v5)
         q_embed: CLIP text embeddings [B, d_q] for diversity loss (optional)
         teacher_importance: Teacher cosine sim scores [B, N] (optional)
         v_summary_prenorm: Pre-LayerNorm pooler outputs [B, n_slots, D] (optional)
+        pooler_attn: Head-averaged cross-attn weights [B, n_slots, N-k] (optional)
+        unsel_idx: Unselected token indices [B, N-k] for residual distill (optional)
         gamma: Mask similarity threshold for diversity loss (default 0.5)
 
     Returns:
         loss_dict: {total, vqa, sparsity, entropy, diversity, spread, distill,
-                    boundary, slot_orth}
+                    boundary, slot_orth, residual_distill}
     """
     from ..models.masking import compute_spatial_entropy, compute_diversity_loss
 
@@ -406,6 +481,21 @@ def compute_total_loss(
     if v_summary_prenorm is not None and lambda_slot_orth > 0:
         loss_slot_orth = slot_orthogonality_loss(v_summary_prenorm)
 
+    # Residual pooler distillation (v5): KL(pooler attention || teacher's residual dist).
+    # Teaches the pooler to attend to the background tokens the teacher valued most.
+    # Requires: pooler_attn [B, n_slots, N-k], teacher_importance [B, N], unsel_idx [B, N-k].
+    # Typical contribution: 0.02 × 0.5 = 0.01 (KL ≈ 0.5 at random initialization).
+    loss_residual_distill = scores.new_zeros(())
+    if (
+        pooler_attn is not None
+        and teacher_importance is not None
+        and unsel_idx is not None
+        and lambda_residual_distill > 0
+    ):
+        loss_residual_distill = residual_pooler_distill_loss(
+            pooler_attn, teacher_importance, unsel_idx
+        )
+
     loss_total = (
         loss_vqa
         + lambda_sparsity * loss_sparsity
@@ -415,6 +505,7 @@ def compute_total_loss(
         + lambda_distill * loss_distill
         + lambda_boundary * loss_boundary
         + lambda_slot_orth * loss_slot_orth
+        + lambda_residual_distill * loss_residual_distill
     )
 
     return {
@@ -427,4 +518,5 @@ def compute_total_loss(
         "distill": loss_distill.detach() if isinstance(loss_distill, torch.Tensor) else torch.tensor(0.0),
         "boundary": loss_boundary.detach() if isinstance(loss_boundary, torch.Tensor) else torch.tensor(0.0),
         "slot_orth": loss_slot_orth.detach() if isinstance(loss_slot_orth, torch.Tensor) else torch.tensor(0.0),
+        "residual_distill": loss_residual_distill.detach() if isinstance(loss_residual_distill, torch.Tensor) else torch.tensor(0.0),
     }

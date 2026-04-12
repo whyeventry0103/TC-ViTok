@@ -1,0 +1,104 @@
+# Phase 1.5 v5: Complete architecture — all four paper claims implemented
+#
+# v4 completed (step 5k analysis):
+#   val_vqa = 0.4476 at step 5k — only 0.0065 gap to Phase 1 v3 (0.4411)
+#   slot_orth: 0.9999 → 0.0075 — recovered but wasted first 1500 steps
+#   boundary: oscillating 0.04-1.17 → stabilized 0.17-0.34 by step 5k
+#   Structural liability: randn * 0.02 slot init caused uniform attention collapse
+#
+# v5 fixes and additions:
+#
+#   FIX 1 — Orthogonal slot initialization (in tc_vitok_model.py):
+#     UnselectedPooler.slots: nn.init.orthogonal_() instead of randn * 0.02
+#     Effect: slot_orth starts near 0.001 (expected for D=1024 orthogonal vectors)
+#     instead of 0.9999. Zero wasted steps. Pooler produces diverse summaries from
+#     step 1.
+#
+#   NEW — Residual Pooler Distillation (lambda_residual_distill = 0.02):
+#     KL(pooler_aggregate_attention || teacher_residual_distribution)
+#     Teacher's importance distribution over the 432 unselected tokens is the
+#     supervisory target. Pooler is told: "attend to these background tokens in
+#     this priority order." Direct gradient to slot parameters without waiting for
+#     VQA CE to backpropagate through the full LLM.
+#     Bounded ≥ 0 (KL divergence). Typical contribution: 0.02 × 0.5 = 0.01.
+#
+# All four paper claims now have dedicated loss terms:
+#   1. TPN selection guidance:  lambda_boundary = 0.05 (boundary hinge loss)
+#   2. Pooler input diversity:  orthogonal deflation (architecture, no loss)
+#   3. Pooler output diversity: lambda_slot_orth = 0.01 (soft cosine² penalty)
+#   4. Pooler supervision:      lambda_residual_distill = 0.02 (KL residual)
+#
+# Expected trajectory vs v4:
+#   Step 0:   slot_orth starts at ~0.001 instead of 0.9999 (immediate diversity)
+#   Step 5k:  val_vqa target < 0.43 (gap to Phase 1 v3 < 0.02)
+#   Step 15k: val_vqa target < 0.40
+#   Step 50k: val_vqa target < 0.31 (beat Phase 1 v3 baseline of 0.3334)
+#
+# Load from: Phase 0 v4 checkpoint (same as all prior runs)
+
+defaults:
+  - base
+
+phase: 1
+description: "Phase 1.5 v5: orthogonal slot init + residual pooler distillation"
+
+model:
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 100000
+  batch_size: 4
+  grad_accum_steps: 16    # effective batch = 4 × 16 × 2 GPUs = 128
+
+  lambda_max: 0.0
+  T_warmup: 5000
+  lambda_entropy: 0.02
+  lambda_diversity: 0.1
+
+  # Disabled (reward hacking in v3; KL fights instance norm)
+  lambda_spread: 0.0
+  lambda_distill: 0.0
+
+  # TPN boundary supervision: hinge at teacher's k / k+1 boundary
+  # Bounded ≥ 0. Typical contribution: 0.05 × 0.10 = 0.005
+  lambda_boundary: 0.05
+  boundary_margin: 0.1
+
+  # Slot diversity: soft cosine² penalty between pooler output slots
+  # Bounded [0, 1]. Near-zero from step 1 due to orthogonal init.
+  lambda_slot_orth: 0.01
+
+  # NEW v5: Residual pooler distillation
+  # KL(pooler_attn || teacher's residual importance over unselected tokens)
+  # Typical contribution: 0.02 × 0.5 = 0.01
+  lambda_residual_distill: 0.02
+
+  # End-to-end co-adaptation from step 0 (validated in v3 pre-failure, retained v4)
+  pooler_warmup_steps: 0
+
+  # LoRA freeze: 3000 steps (Phase 1 v3 validated value)
+  lora_warmfreeze_steps: 3000
+
+  lr_tpn: 3e-3
+  lr_lora: 2e-4
+  lr_mlp: 5e-4
+
+  # Tau: 1.0→0.1 over 100k steps
+  tau_max: 1.0
+  tau_min: 0.1
+
+data:
+  datasets: ["vqav2", "gqa"]
+
+logging:
+  wandb_run_name: "phase1p5_v5_complete"
+  eval_interval: 5000
+  max_val_batches: 100
+
+checkpoint:
+  load_from: "runs/phase0_v4/phase0/best.ckpt"
+  strict: false

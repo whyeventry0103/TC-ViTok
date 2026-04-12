@@ -88,6 +88,8 @@ class TCViTokTrainer:
         self.lambda_boundary = config["training"].get("lambda_boundary", 0.0)
         self.lambda_slot_orth = config["training"].get("lambda_slot_orth", 0.0)
         self.boundary_margin = config["training"].get("boundary_margin", 0.1)
+        # Phase 1.5 v5: residual pooler distillation
+        self.lambda_residual_distill = config["training"].get("lambda_residual_distill", 0.0)
 
         # LoRA warm-freeze: keep LoRA gradients zeroed for the first N steps so TPN
         # has time to learn query-conditioned routing before LoRA compensates.
@@ -262,9 +264,11 @@ class TCViTokTrainer:
         # Run frozen base LLaVA with all 576 tokens BEFORE student forward.
         # Sequential execution: teacher activations freed before student allocates.
         # Skipped when: stub mode, no teacher-dependent loss, or no answer_strings.
+        # Fires for: KL distill, boundary margin, or residual pooler distillation.
         teacher_importance = None
         if (
-            (self.lambda_distill > 0 or self.lambda_boundary > 0)
+            (self.lambda_distill > 0 or self.lambda_boundary > 0
+             or self.lambda_residual_distill > 0)
             and not raw_model.use_stub_llm
             and answer_strings is not None
             and "images_coarse" in batch    # full pipeline only (not cached path)
@@ -323,12 +327,15 @@ class TCViTokTrainer:
             lambda_distill=self.lambda_distill,
             lambda_boundary=self.lambda_boundary,
             lambda_slot_orth=self.lambda_slot_orth,
+            lambda_residual_distill=self.lambda_residual_distill,
             boundary_margin=self.boundary_margin,
             mask_ste=outputs.get("mask_ste"),
             mask_soft=mask_soft,
             q_embed=outputs.get("q_embed"),
             teacher_importance=teacher_importance,
             v_summary_prenorm=outputs.get("v_summary_prenorm"),
+            pooler_attn=outputs.get("pooler_attn"),
+            unsel_idx=outputs.get("unsel_idx"),
         )
 
         # NaN/Inf guard: skip backward entirely to prevent weight corruption.

@@ -133,7 +133,15 @@ class UnselectedPooler(nn.Module):
     def __init__(self, d_model: int = 1024, n_slots: int = 4, n_heads: int = 4):
         super().__init__()
         self.n_slots = n_slots
-        self.slots = nn.Parameter(torch.randn(1, n_slots, d_model) * 0.02)
+        # Orthogonal init: guarantees 4 slot query vectors are maximally diverse at
+        # step 0 — avoids the uniform-attention collapse seen with randn * 0.02.
+        # With tiny queries (0.02 scale), all projected Q vectors are near-zero →
+        # softmax(QK^T/sqrt(d_head)) ≈ uniform for ALL slots → identical outputs.
+        # Unit-norm orthogonal queries produce distinct attention distributions
+        # immediately, so slot_orth loss fires near zero from the first step.
+        slots_data = torch.empty(n_slots, d_model)
+        nn.init.orthogonal_(slots_data)
+        self.slots = nn.Parameter(slots_data.unsqueeze(0))  # [1, n_slots, d_model]
         self.cross_attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
         self.norm = nn.LayerNorm(d_model)
 
@@ -141,7 +149,7 @@ class UnselectedPooler(nn.Module):
         self,
         v_unsel_orth: torch.Tensor,
         unsel_indices: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Pool orthogonal background tokens into n_slots summary vectors.
 
         Args:
@@ -153,6 +161,9 @@ class UnselectedPooler(nn.Module):
             summary_prenorm: Pre-LayerNorm slot outputs [B, n_slots, D]
                 (used by slot_orthogonality_loss — raw cross-attn output
                  before normalization distorts cosine geometry)
+            attn_weights: Head-averaged cross-attention weights [B, n_slots, N-k]
+                (used by residual_pooler_distill_loss — supervise pooler to
+                 attend to tokens the teacher found most important)
         """
         B = v_unsel_orth.shape[0]
         D = v_unsel_orth.shape[-1]
@@ -160,8 +171,15 @@ class UnselectedPooler(nn.Module):
         pe = sinusoidal_2d_pe(unsel_indices, D).to(dtype=v_unsel_orth.dtype)
         kv = v_unsel_orth + pe                              # [B, N-k, D]
         q = self.slots.expand(B, -1, -1)                   # [B, n_slots, D]
-        out, _ = self.cross_attn(q, kv, kv)
-        return self.norm(out), out                          # normed, pre-norm
+        # need_weights=True + average_attn_weights=True → [B, n_slots, N-k]
+        # average_attn_weights averages over H heads for a cleaner distillation target.
+        # VRAM cost: B × n_slots × (N-k) × 2 bytes ≈ 14KB at batch=4 — negligible.
+        out, attn_weights = self.cross_attn(
+            q, kv, kv,
+            need_weights=True,
+            average_attn_weights=True,
+        )
+        return self.norm(out), out, attn_weights            # normed, pre-norm, attn
 
 
 class StubLLM(nn.Module):
@@ -510,7 +528,10 @@ class TCViTokModel(nn.Module):
             )                                                      # [B, N-k, D]
 
             # Pool orthogonal background into 4 summary tokens
-            v_summary, v_summary_prenorm = self.unsel_pooler(v_unsel_orth, unsel_idx)  # [B, 4, D] each
+            # attn_weights [B, n_slots, N-k]: used by residual_pooler_distill_loss
+            v_summary, v_summary_prenorm, pooler_attn = self.unsel_pooler(
+                v_unsel_orth, unsel_idx
+            )  # [B, 4, D], [B, 4, D], [B, 4, N-k]
 
             # LLM prefix: [4 summary | k selected] — total k+4 tokens
             v_input = torch.cat([v_summary, v_selected], dim=1)   # [B, k+4, D]
@@ -546,10 +567,13 @@ class TCViTokModel(nn.Module):
         if q_embed is not None:
             outputs["q_embed"] = q_embed.detach()  # frozen CLIP encoder, no gradient needed
 
-        # Pre-LayerNorm pooler outputs for slot orthogonality loss (v4).
-        # Only available during training when UnselectedPooler is active.
+        # Pooler supervision tensors (v4+): only available during training.
+        # v_summary_prenorm → slot_orthogonality_loss (slot diversity)
+        # pooler_attn + unsel_idx → residual_pooler_distill_loss (attend to teacher residual)
         if self.training and not self.use_stub_llm and self.unsel_pooler is not None:
             outputs["v_summary_prenorm"] = v_summary_prenorm  # [B, 4, D]
+            outputs["pooler_attn"] = pooler_attn              # [B, 4, N-k]
+            outputs["unsel_idx"] = unsel_idx                  # [B, N-k]
 
         return outputs
 
