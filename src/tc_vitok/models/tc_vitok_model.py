@@ -139,9 +139,10 @@ class UnselectedPooler(nn.Module):
         # softmax(QK^T/sqrt(d_head)) ≈ uniform for ALL slots → identical outputs.
         # Unit-norm orthogonal queries produce distinct attention distributions
         # immediately, so slot_orth loss fires near zero from the first step.
-        slots_data = torch.empty(n_slots, d_model)
-        nn.init.orthogonal_(slots_data)
-        self.slots = nn.Parameter(slots_data.unsqueeze(0))  # [1, n_slots, d_model]
+        # slots_data = torch.empty(n_slots, d_model)
+        # nn.init.orthogonal_(slots_data)
+        # self.slots = nn.Parameter(slots_data.unsqueeze(0))  # [1, n_slots, d_model]
+        self.slots = nn.Parameter(torch.randn(1, n_slots, d_model))
         self.cross_attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
         self.norm = nn.LayerNorm(d_model)
 
