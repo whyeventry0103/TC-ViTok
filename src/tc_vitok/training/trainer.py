@@ -127,6 +127,7 @@ class TCViTokTrainer:
             lr_tpn=config["training"]["lr_tpn"],
             lr_lora=config["training"]["lr_lora"],
             lr_mlp=config["training"]["lr_mlp"],
+            lr_pooler=config["training"].get("lr_pooler"),
             weight_decay=config["training"]["weight_decay"],
             phase=self.phase,
         )

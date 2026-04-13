@@ -1,0 +1,106 @@
+# Phase 1.5 v8: Glacial pooler LR (fixes v6/v7 mid-training regression)
+#
+# v6/v7 failure diagnosis (step 5k→10k regression):
+#   val_vqa is consistently good at step 5k (0.43-0.44), matching Phase 1 v3.
+#   Between step 5k and 10k, val_vqa regresses by 0.03-0.06 in EVERY run.
+#   Root cause: fast-slow co-adaptation instability.
+#   - UnselectedPooler at lr_mlp=5e-4 adapts its 4-slot prefix rapidly
+#   - LoRA at lr=2e-4 adapts to the OLD pooler output → mismatch → regression
+#   - Same failure mode as GAN discriminator-generator LR mismatch
+#   Evidence: residual_distill stuck at 0.25-0.32 in v7 (pooler thrashing,
+#   never converging). In v6 it dropped to 0.09 but val_vqa still regressed
+#   because LoRA couldn't track the fast-changing prefix.
+#
+# v8 fix — Glacial Pooler LR:
+#   lr_pooler = 2e-5 (25× slower than lr_mlp=5e-4, 10× slower than lr_lora)
+#   Effect: Pooler changes slowly → LoRA sees near-static prefix → stable
+#   adaptation → no mid-training regression.
+#   Pooler still learns (2e-5 is not zero) — it tracks LoRA's improving
+#   representations instead of racing ahead.
+#
+# Kept from v6/v7 (all working correctly):
+#   - Rank-banded residual distillation (per-slot gradient, no collapse)
+#   - Boundary margin loss (compatible with instance norm)
+#   - Slot orthogonality loss (slot_orth stays 0.001-0.015)
+#   - Orthogonal slot initialization
+#   - Reduced aux lambdas from v7 (entropy=0.01, diversity=0.04)
+#
+# Expected trajectory:
+#   Step 0:   slot_orth < 0.01 (orthogonal init)
+#   Step 5k:  val_vqa ~ 0.43 (same as v6/v7 — architecture unchanged)
+#   Step 10k: val_vqa < 0.42 (NO REGRESSION — pooler is stable anchor)
+#   Step 25k: val_vqa < 0.37
+#   Step 50k: val_vqa < 0.33 (beat Phase 1 v3 baseline of 0.3334)
+#   Step 100k: val_vqa < 0.30 (target for paper)
+#
+# Load from: Phase 0 v4 checkpoint
+
+defaults:
+  - base
+
+phase: 1
+description: "Phase 1.5 v8: glacial pooler LR, stable co-adaptation"
+
+model:
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 100000
+  batch_size: 4
+  grad_accum_steps: 16    # effective batch = 4 × 16 × 2 GPUs = 128
+
+  lambda_max: 0.0
+  T_warmup: 5000
+
+  # Reduced from v6 defaults (v7 fix for negative total loss)
+  lambda_entropy: 0.01
+  lambda_diversity: 0.04
+
+  # Disabled (v1-v3 legacy failures)
+  lambda_spread: 0.0
+  lambda_distill: 0.0
+
+  # TPN boundary supervision: hinge at teacher's k / k+1 boundary
+  lambda_boundary: 0.05
+  boundary_margin: 0.1
+
+  # Slot diversity: soft cosine² penalty
+  lambda_slot_orth: 0.02
+
+  # Rank-banded residual pooler distillation
+  lambda_residual_distill: 0.02
+
+  # End-to-end co-adaptation from step 0
+  pooler_warmup_steps: 0
+
+  # LoRA freeze: 3000 steps (Phase 1 v3 validated)
+  lora_warmfreeze_steps: 3000
+
+  lr_tpn: 3e-3
+  lr_lora: 2e-4
+  lr_mlp: 5e-4
+
+  # v8 KEY CHANGE: Glacial pooler LR
+  # 25× slower than lr_mlp, 10× slower than lr_lora
+  # Prevents fast-slow co-adaptation instability between pooler and LoRA
+  lr_pooler: 2e-5
+
+  # Tau: 1.0→0.1 over 100k steps
+  tau_max: 1.0
+  tau_min: 0.1
+
+data:
+  datasets: ["vqav2", "gqa"]
+
+logging:
+  wandb_run_name: "phase1p5_v8_glacial_pooler"
+  eval_interval: 5000
+  max_val_batches: 100
+
+checkpoint:
+  load_from: "runs/phase0_v4/phase0/best.ckpt"
+  strict: false

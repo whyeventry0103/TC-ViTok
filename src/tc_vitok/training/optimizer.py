@@ -20,6 +20,7 @@ def create_optimizer(
     lr_tpn: float = 1e-3,
     lr_lora: float = 2e-4,
     lr_mlp: float = 5e-4,
+    lr_pooler: float | None = None,
     weight_decay: float = 0.01,
     phase: int = 1,
 ) -> Optimizer:
@@ -111,8 +112,10 @@ def create_optimizer(
                 })
 
             # UnselectedPooler (Phase 1.5) — 4-slot cross-attention for soft recycling
-            # Trained at lr_mlp: same scale as mm_projector, learns in parallel
+            # v8+: Glacial LR (lr_pooler << lr_mlp) prevents co-adaptation instability
+            # with LoRA. Pooler changes slowly → LoRA sees stable prefix → no regression.
             if hasattr(model, "unsel_pooler") and model.unsel_pooler is not None:
+                pooler_lr = lr_pooler if lr_pooler is not None else lr_mlp
                 pooler_params = [
                     p for p in model.unsel_pooler.parameters()
                     if p.requires_grad
@@ -120,7 +123,7 @@ def create_optimizer(
                 if pooler_params:
                     param_groups.append({
                         "params": pooler_params,
-                        "lr": lr_mlp,
+                        "lr": pooler_lr,
                         "weight_decay": weight_decay,
                     })
 
