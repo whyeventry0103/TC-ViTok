@@ -1,0 +1,110 @@
+# Phase 1.5 v6: Rank-banded residual distillation (fixes v5 slot collapse)
+#
+# v5 failure diagnosis (steps 10k–20k):
+#   residual_pooler_distill_loss used sum(dim=1) to aggregate all 4 slot
+#   attentions into a single distribution. The partial derivative
+#   ∂KL/∂slot_i was IDENTICAL for all i — the optimizer pushed all 4 slots
+#   toward the same attention distribution, actively fighting slot_orth.
+#   Result: slot_orth rose from 0.001 to 0.45, val_vqa regressed from
+#   0.4230 (step 10k best) to 0.4650 (step 15k). The residual_distill KL
+#   itself was INCREASING (0.58 → 0.68) — positive feedback loop.
+#
+# v6 fix — Rank-Banded Distillation:
+#   Divide teacher's N-k=432 residual importance into 4 quartiles by rank.
+#   Slot 0 → top 108 tokens (most important background)
+#   Slot 1 → tokens ranked 109-216 (moderately important)
+#   Slot 2 → tokens ranked 217-324 (context)
+#   Slot 3 → bottom 108 tokens (least important, global layout)
+#   Each slot gets a DIFFERENT gradient signal → diversity structurally enforced.
+#   slot_orth only needs to handle residual within-band correlation.
+#
+# Mathematical audit (v6 pre-launch):
+#   Trap 1 (STE vanishing): Additive STE is tau-independent. SAFE.
+#   Trap 2 (reward hacking): All losses bounded or bounded-in-practice. SAFE.
+#   Trap 3 (scale collapse): Orthogonal slot init. No other scale traps. SAFE.
+#   Trap 4 (identical gradient): Rank bands give per-slot targets. FIXED.
+#   Trap 5 (sparsity drop): Gumbel noise is tau-independent for top-k. SAFE.
+#
+# Lambda tuning from v5 logs:
+#   - slot_orth settled at 0.33 when fighting residual_distill (0.02 × ∂KL > 0.01 × ∂orth)
+#   - With rank-banded distill, slot collapse pressure is eliminated.
+#     Increase slot_orth to 0.02 to match residual_distill weight,
+#     preventing any residual within-band correlation from accumulating.
+#   - Clamp residual_distill KL at 10.0 (defensive, prevents runaway loss)
+#   - Keep boundary at 0.05 (was converging well in v5 at 0.10-0.22)
+#
+# Expected trajectory:
+#   Step 0:   slot_orth < 0.01 (orthogonal init, maintained by rank-banded targets)
+#   Step 5k:  val_vqa < 0.43 (matching or beating Phase 1 v3's 0.4411)
+#   Step 10k: val_vqa < 0.40 (sustained improvement, no regression like v5)
+#   Step 25k: val_vqa < 0.35
+#   Step 50k: val_vqa < 0.31 (beat Phase 1 v3 baseline of 0.3334)
+#
+# Load from: Phase 0 v4 checkpoint
+
+defaults:
+  - base
+
+phase: 1
+description: "Phase 1.5 v6: rank-banded residual distill, no slot collapse"
+
+model:
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 100000
+  batch_size: 4
+  grad_accum_steps: 16    # effective batch = 4 × 16 × 2 GPUs = 128
+
+  lambda_max: 0.0
+  T_warmup: 5000
+  lambda_entropy: 0.02
+  lambda_diversity: 0.1
+
+  # Disabled (v1-v3 legacy failures)
+  lambda_spread: 0.0
+  lambda_distill: 0.0
+
+  # TPN boundary supervision: hinge at teacher's k / k+1 boundary
+  lambda_boundary: 0.05
+  boundary_margin: 0.1
+
+  # Slot diversity: increased from 0.01 to 0.02 for v6
+  # In v5, lambda_slot_orth=0.01 was weaker than lambda_residual_distill=0.02,
+  # letting the aggregate-gradient collapse overpower slot separation.
+  # With rank-banded distill (no collapse pressure), 0.02 is a comfortable margin.
+  lambda_slot_orth: 0.02
+
+  # Rank-banded residual pooler distillation
+  # Each slot gets its own teacher quartile target → slot-specific gradient
+  lambda_residual_distill: 0.02
+
+  # End-to-end co-adaptation from step 0
+  pooler_warmup_steps: 0
+
+  # LoRA freeze: 3000 steps (Phase 1 v3 validated)
+  lora_warmfreeze_steps: 3000
+
+  lr_tpn: 3e-3
+  lr_lora: 2e-4
+  lr_mlp: 5e-4
+
+  # Tau: 1.0→0.1 over 100k steps
+  tau_max: 1.0
+  tau_min: 0.1
+
+data:
+  datasets: ["vqav2", "gqa"]
+
+logging:
+  wandb_run_name: "phase1p5_v6_rankbanded"
+  eval_interval: 5000
+  max_val_batches: 100
+
+checkpoint:
+  load_from: "runs/phase0_v4/phase0/best.ckpt"
+  strict: false

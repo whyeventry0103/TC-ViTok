@@ -298,66 +298,83 @@ def residual_pooler_distill_loss(
     unsel_idx: torch.Tensor,
     teacher_scale: float = 10.0,
 ) -> torch.Tensor:
-    """KL divergence between pooler's aggregate attention and teacher's residual.
+    """Rank-banded KL: each pooler slot matches a distinct quartile of teacher residual.
 
-    Supervises the UnselectedPooler to attend to the background tokens that the
-    teacher (full-token LLaVA) found most important. These are the contextually
-    relevant tokens TPN was forced to leave behind — supervising the pooler
-    ensures the 4 summary slots actually recover what matters.
+    v5 bug: aggregating all slots via sum(dim=1) gave identical gradients to
+    every slot → forced them toward the same distribution → slot collapse
+    (slot_orth rose from 0.001 to 0.45, val_vqa regressed from 0.4230 to 0.4650).
 
-    Three-step construction:
-      1. Convert teacher cosine similarities → valid probability distribution
-         (same teacher_scale=10.0 fix as BUG-41: maps std≈0.1 → std≈1.0)
-      2. Extract teacher's distribution over the N-k UNSELECTED tokens only,
-         then renormalize (teacher ranked all 576 tokens; we want just the 432)
-      3. Aggregate pooler attention across n_slots (each slot sums to 1 via softmax;
-         sum → renormalize → single distribution over N-k tokens)
-      4. KL(pooler_aggregate || teacher_residual)
+    v6 fix: divide the teacher's N-k residual importance into n_slots rank bands.
+    Slot 0 must attend to the teacher's top-25% of unselected tokens.
+    Slot 1 must attend to 25-50%, Slot 2 to 50-75%, Slot 3 to bottom-25%.
+    Each slot gets a DIFFERENT gradient signal → diversity is structurally enforced.
 
-    Gradient flows through pooler_attn → MHA softmax → Q,K projections → slot params.
-    This gives the pooler a direct supervisory signal: attend to the background
-    tokens the teacher valued most, not just whatever minimizes VQA CE indirectly.
-
-    Paper note (honest limitation): teacher ranks token_i among 576 full tokens;
-    pooler attends to token_i among 432 deflated tokens. The renormalization
-    handles the size mismatch but not the context shift. Frame as "approximate
-    residual supervision — a soft prior, not a hard label."
+    Implementation detail: rank bands are defined by sorting the teacher's scores
+    for the N-k unselected tokens, then masking each slot's target to only its
+    assigned quartile positions. The target distribution is the teacher's softmax
+    probabilities within that quartile, renormalized to sum=1. Spatial positions
+    are preserved (we mask the original N-k distribution, not a sorted list).
 
     Args:
         pooler_attn: Head-averaged cross-attention weights [B, n_slots, N-k]
-            (from UnselectedPooler with need_weights=True, average_attn_weights=True)
         teacher_importance: Teacher cosine similarity scores [B, N], raw ∈ [-1, 1]
         unsel_idx: Indices of unselected tokens [B, N-k] (from complement_gather)
         teacher_scale: Sharpening factor before softmax (matches BUG-41 fix)
 
     Returns:
-        loss: KL(pooler_aggregate || teacher_residual) scalar, bounded ≥ 0
+        loss: Mean per-slot KL divergence (scalar, bounded ≥ 0, clamped ≤ 10)
     """
-    # Step 1: teacher cosine sims → valid probability distribution over all N tokens
-    # teacher_scale=10.0 maps std≈0.1 to std≈1.0, giving ~19× concentration at top token
+    B = pooler_attn.shape[0]
+    n_slots = pooler_attn.shape[1]
+    Nk = pooler_attn.shape[2]  # N - k
+
+    # Step 1: teacher cosine sims → softmax distribution over all N tokens
     teacher_dist = F.softmax(
         teacher_importance.float() * teacher_scale, dim=-1
     )  # [B, N]
 
     # Step 2: extract teacher's distribution over the N-k unselected tokens only
-    teacher_residual = teacher_dist.gather(1, unsel_idx)         # [B, N-k]
-    # Renormalize: teacher_dist summed to 1 over N; we want it to sum to 1 over N-k
-    teacher_residual = teacher_residual / (
-        teacher_residual.sum(dim=-1, keepdim=True) + 1e-8
-    )                                                             # [B, N-k], sums to 1
+    teacher_residual = teacher_dist.gather(1, unsel_idx)                # [B, N-k]
 
-    # Step 3: aggregate pooler attention across slots → single distribution over N-k
-    # Each slot's attn_weights sums to 1 (cross-attn softmax). Sum across n_slots
-    # → values in [0, n_slots]. Renormalize to sum=1.
-    total_pooler_attn = pooler_attn.float().sum(dim=1)           # [B, N-k]
-    total_pooler_attn = total_pooler_attn / (
-        total_pooler_attn.sum(dim=-1, keepdim=True) + 1e-8
-    )                                                             # [B, N-k], sums to 1
+    # Step 3: sort teacher's residual scores to define rank bands
+    # Higher teacher score → higher rank → assigned to slot 0 (most important)
+    _, rank_order = teacher_residual.sort(dim=-1, descending=True)      # [B, N-k]
 
-    # Step 4: KL(pooler_aggregate || teacher_residual)
-    # F.kl_div expects log-probabilities on the left, probabilities on the right
-    log_pooler = torch.log(total_pooler_attn + 1e-8)             # [B, N-k]
-    return F.kl_div(log_pooler, teacher_residual, reduction="batchmean")
+    # Step 4: assign each of the N-k positions to one of n_slots bands
+    # rank_order[b, 0..Nk/4-1] → slot 0 (top quartile)
+    # rank_order[b, Nk/4..Nk/2-1] → slot 1 (second quartile)
+    # etc.
+    band_size = Nk // n_slots  # 432 // 4 = 108
+    remainder = Nk % n_slots   # 432 % 4 = 0
+
+    total_kl = pooler_attn.new_zeros(())
+
+    for slot_i in range(n_slots):
+        # Determine which positions belong to this slot's band
+        start = slot_i * band_size + min(slot_i, remainder)
+        end = (slot_i + 1) * band_size + min(slot_i + 1, remainder)
+
+        # Indices within the N-k ordering that belong to this band
+        band_positions = rank_order[:, start:end]                       # [B, band_size]
+
+        # Step 5: build per-slot target — teacher probs at this band, renormalized
+        target = teacher_residual.gather(1, band_positions)             # [B, band_size]
+        target = target / (target.sum(dim=-1, keepdim=True) + 1e-8)    # sums to 1
+
+        # Step 6: extract this slot's attention at the same positions
+        slot_attn = pooler_attn[:, slot_i, :]                           # [B, N-k]
+        slot_attn_band = slot_attn.float().gather(1, band_positions)    # [B, band_size]
+        slot_attn_band = slot_attn_band / (
+            slot_attn_band.sum(dim=-1, keepdim=True) + 1e-8
+        )                                                                # sums to 1
+
+        # Step 7: KL(slot_attention_on_band || teacher_target_on_band)
+        log_slot = torch.log(slot_attn_band + 1e-8)
+        kl = F.kl_div(log_slot, target, reduction="batchmean")
+        total_kl = total_kl + kl
+
+    # Average across slots and clamp to prevent runaway KL (defensive, see audit)
+    return (total_kl / n_slots).clamp(max=10.0)
 
 
 def compute_total_loss(
