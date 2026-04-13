@@ -1,0 +1,90 @@
+# Phase 1.5 v7: Mitigating negative total loss via auxiliary loss downscaling
+#
+# v6 failure diagnosis (steps 10k–17k):
+#   The rank-banded distillation and orthogonal slot initialization were mathematically
+#   perfect. `slot_orth` converged to < 0.005 and `residual_distill` stabilized at ~0.08.
+#   However, `val_vqa` spiked from 0.4353 (5k) to 0.4931 (10k) and plateaued at ~0.47.
+#   
+#   The root cause: Negative Total Loss.
+#   As the network learned to answer easy questions (VQA loss < 0.17), the combined
+#   negative rewards from `entropy` (-0.117) and `diversity` (-0.04) became the 
+#   dominant gradients in the network. The optimizer began prioritizing spatial 
+#   spreading and query-divergence over actually answering the VQA questions.
+#   The TPN was being disproportionately trained on auxiliary tasks.
+#
+# v7 fix — Re-anchoring VQA as the primary gradient:
+#   To prevent the auxiliary rewards from producing a negative total loss on easy 
+#   batches, we are drastically downscaling their weights.
+#   - lambda_diversity: 0.10 → 0.04
+#   - lambda_entropy: 0.02 → 0.01
+#   
+#   Combined maximum negative contribution drops from -0.16 to -0.07.
+#   This threshold is safely below the typical VQA loss, ensuring VQA remains
+#   the absolute driver of the network's parameters.
+#
+# Load from: Phase 0 v4 checkpoint
+
+defaults:
+  - base
+
+phase: 1
+description: "Phase 1.5 v7: downscaled auxiliary losses to prevent negative total loss"
+
+model:
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 100000
+  batch_size: 4
+  grad_accum_steps: 16    # effective batch = 4 × 16 × 2 GPUs = 128
+
+  lambda_max: 0.0
+  T_warmup: 5000
+  
+  # v7 FIX: Downscaled to prevent negative total loss hijacking
+  lambda_entropy: 0.01    # (was 0.02)
+  lambda_diversity: 0.04  # (was 0.10)
+
+  # Disabled (v1-v3 legacy failures)
+  lambda_spread: 0.0
+  lambda_distill: 0.0
+
+  # TPN boundary supervision: hinge at teacher's k / k+1 boundary
+  lambda_boundary: 0.05
+  boundary_margin: 0.1
+
+  # Slot diversity: kept at 0.02 (v6 proven value)
+  lambda_slot_orth: 0.02
+
+  # Rank-banded residual pooler distillation (v6 proven value)
+  lambda_residual_distill: 0.02
+
+  # End-to-end co-adaptation from step 0
+  pooler_warmup_steps: 0
+
+  # LoRA freeze: 3000 steps (Phase 1 v3 validated)
+  lora_warmfreeze_steps: 3000
+
+  lr_tpn: 3e-3
+  lr_lora: 2e-4
+  lr_mlp: 5e-4
+
+  # Tau: 1.0→0.1 over 100k steps
+  tau_max: 1.0
+  tau_min: 0.1
+
+data:
+  datasets: ["vqav2", "gqa"]
+
+logging:
+  wandb_run_name: "phase1p5_v7_vqa_anchored"
+  eval_interval: 5000
+  max_val_batches: 100
+
+checkpoint:
+  load_from: "runs/phase0_v4/phase0/best.ckpt"
+  strict: false
