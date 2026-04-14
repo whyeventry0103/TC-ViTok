@@ -1,0 +1,103 @@
+# Phase 1.5 v8b: Frozen pooler — eliminate slow co-adaptation oscillation
+#
+# v8 failure analysis (steps 30k–60k):
+#   val_vqa oscillated in two complete cycles with amplitude ~0.06:
+#     30k: 0.3791 → 35k: 0.4121 (spike) → 45k: 0.3663 (best) →
+#     55k: 0.4265 (spike) → 60k: 0.3795 (cycle 3 start, worse than cycle 2)
+#   The oscillation envelope STOPPED IMPROVING after step 45k.
+#   Root cause: glacial lr_pooler=2e-5 solved fast co-adaptation (v6/v7 5k
+#   regressions) but created slow co-adaptation at 10-15k cycle timescales.
+#   At step 50k, the pooler accumulated 2000 equivalent normal-LR steps —
+#   enough to meaningfully shift its output representations. Each shift
+#   causes LoRA to temporarily lose coherence → spike → recovery → repeat.
+#   Any non-zero lr_pooler eventually causes this. The only fix is full freeze.
+#
+# v8b fix — Frozen Pooler:
+#   lr_pooler = 0.0: pooler weights locked at their step-45k state.
+#   The pooler still contributes its learned representation to the LLM prefix.
+#   It just stops changing. LoRA + TPN converge to their optimal state for
+#   this fixed pooler prefix — no moving target, no oscillation.
+#   lambda_residual_distill = 0.0: no point distilling into a frozen pooler.
+#   lambda_slot_orth = 0.0: no point penalizing frozen slot parameters.
+#
+# Tau continuation:
+#   v8 left off at step 45k. tau at step 45k = 1.0 - 0.9 × (45/100) = 0.595.
+#   v8b starts a fresh step counter (step 0) but tau_max=0.595 so the schedule
+#   continues approximately from where v8 stopped. max_steps=55000 so tau
+#   anneals from 0.595 to 0.1 over 55k steps — a slightly faster anneal than
+#   the original, which is fine (sharpens selection sooner).
+#
+# Expected trajectory from v8 best (val_vqa=0.3663 at step 45k):
+#   v8b step 5k  (≡ total 50k): val_vqa ~0.354
+#   v8b step 15k (≡ total 60k): val_vqa ~0.330 ← beats Phase 1 v3 (0.3334)
+#   v8b step 30k (≡ total 75k): val_vqa ~0.295
+#   v8b step 55k (≡ total 100k): val_vqa ~0.260
+#
+# Load from: Phase 1.5 v8 best checkpoint (step 45k, val_vqa=0.3663)
+
+defaults:
+  - base
+
+phase: 1
+description: "Phase 1.5 v8b: frozen pooler, eliminate slow co-adaptation oscillation"
+
+model:
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 55000
+  batch_size: 4
+  grad_accum_steps: 16    # effective batch = 4 × 16 × 2 GPUs = 128
+
+  lambda_max: 0.0
+  T_warmup: 5000
+  lambda_entropy: 0.01
+  lambda_diversity: 0.04
+
+  # Disabled (legacy failures)
+  lambda_spread: 0.0
+  lambda_distill: 0.0
+
+  # TPN boundary supervision
+  lambda_boundary: 0.05
+  boundary_margin: 0.1
+
+  # Frozen pooler: no regularization needed on frozen params
+  lambda_slot_orth: 0.0
+
+  # No distillation into frozen pooler
+  lambda_residual_distill: 0.0
+
+  pooler_warmup_steps: 0
+
+  # LoRA was already unfrozen by step 45k — don't re-freeze
+  lora_warmfreeze_steps: 0
+
+  lr_tpn: 3e-3
+  lr_lora: 2e-4
+  lr_mlp: 5e-4
+
+  # FREEZE pooler completely — eliminate slow co-adaptation oscillation
+  # Pooler retains its step-45k learned representation but stops changing.
+  lr_pooler: 0.0
+
+  # Tau continuation: v8 reached tau=0.595 at step 45k.
+  # v8b starts from tau_max=0.595, annealing to 0.1 over 55k steps.
+  tau_max: 0.595
+  tau_min: 0.1
+
+data:
+  datasets: ["vqav2", "gqa"]
+
+logging:
+  wandb_run_name: "phase1p5_v8b_frozen_pooler"
+  eval_interval: 5000
+  max_val_batches: 100
+
+checkpoint:
+  load_from: "runs/phase1p5_v8/phase1/best.ckpt"
+  strict: false
