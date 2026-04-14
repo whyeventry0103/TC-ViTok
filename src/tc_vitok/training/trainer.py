@@ -91,6 +91,13 @@ class TCViTokTrainer:
         # Phase 1.5 v5: residual pooler distillation
         self.lambda_residual_distill = config["training"].get("lambda_residual_distill", 0.0)
 
+        # Adaptive budget: budget penalty weight
+        self.lambda_budget = config["training"].get("lambda_budget", 0.0)
+
+        # Budget predictor warmup: freeze budget predictor for the first N steps
+        # so TPN/LoRA stabilize before the budget predictor starts learning.
+        self.budget_warmup_steps = config["training"].get("budget_warmup_steps", 0)
+
         # LoRA warm-freeze: keep LoRA gradients zeroed for the first N steps so TPN
         # has time to learn query-conditioned routing before LoRA compensates.
         self.lora_warmfreeze_steps = config["training"].get("lora_warmfreeze_steps", 0)
@@ -128,6 +135,7 @@ class TCViTokTrainer:
             lr_lora=config["training"]["lr_lora"],
             lr_mlp=config["training"]["lr_mlp"],
             lr_pooler=config["training"].get("lr_pooler"),
+            lr_budget=config["training"].get("lr_budget"),
             weight_decay=config["training"]["weight_decay"],
             phase=self.phase,
         )
@@ -329,6 +337,7 @@ class TCViTokTrainer:
             lambda_boundary=self.lambda_boundary,
             lambda_slot_orth=self.lambda_slot_orth,
             lambda_residual_distill=self.lambda_residual_distill,
+            lambda_budget=self.lambda_budget,
             boundary_margin=self.boundary_margin,
             mask_ste=outputs.get("mask_ste"),
             mask_soft=mask_soft,
@@ -337,6 +346,7 @@ class TCViTokTrainer:
             v_summary_prenorm=outputs.get("v_summary_prenorm"),
             pooler_attn=outputs.get("pooler_attn"),
             unsel_idx=outputs.get("unsel_idx"),
+            k_effective=outputs.get("k_effective"),
         )
 
         # NaN/Inf guard: skip backward entirely to prevent weight corruption.
@@ -370,6 +380,19 @@ class TCViTokTrainer:
                 for name, param in raw_model.named_parameters():
                     if "lora_" in name:
                         param.grad = None  # None → AdamW skips entirely (no weight decay); zero_() doesn't
+
+            # Budget predictor warmup: freeze budget predictor for the first N steps
+            # so existing TPN/LoRA weights stabilize with the new code path.
+            # BudgetPredictor still participates in forward (its output determines k),
+            # but its weights don't update — it outputs ~mid-range k throughout warmup.
+            if (
+                self.budget_warmup_steps > 0
+                and self.global_step < self.budget_warmup_steps
+                and hasattr(raw_model, "budget_predictor")
+                and raw_model.budget_predictor is not None
+            ):
+                for param in raw_model.budget_predictor.parameters():
+                    param.grad = None
 
             # Pooler warm-up: zero TPN gradients so UnselectedPooler stabilizes
             # before TPN routing competes. TPN still participates in forward
@@ -419,6 +442,8 @@ class TCViTokTrainer:
         total_vqa = 0.0
         total_sparsity = 0.0
         total_entropy = 0.0
+        total_budget = 0.0
+        total_k_eff = 0.0
         num_batches = 0
 
         # Current curriculum parameters
@@ -468,6 +493,7 @@ class TCViTokTrainer:
 
             # No mask_ste at eval time (training=False → TPN returns None).
             # Entropy falls back to entropy_from_idx; diversity/spread/distill = 0.
+            # Budget metrics ARE included so val logs show k_effective_mean.
             loss_dict = compute_total_loss(
                 logits=outputs.get("logits"),
                 labels=outputs.get("seq_labels"),
@@ -479,16 +505,20 @@ class TCViTokTrainer:
                 lambda_diversity=0.0,
                 lambda_spread=0.0,
                 lambda_distill=0.0,
+                lambda_budget=self.lambda_budget,
                 mask_ste=None,
                 mask_soft=None,
                 q_embed=None,
                 teacher_importance=None,
+                k_effective=outputs.get("k_effective"),
             )
 
             total_loss += loss_dict["total"].item()
             total_vqa += loss_dict["vqa"].item()
             total_sparsity += loss_dict["sparsity"].item()
             total_entropy += loss_dict["entropy"].item()
+            total_budget += loss_dict["budget"].item()
+            total_k_eff += loss_dict["k_effective_mean"].item()
             num_batches += 1
 
         raw_model.train()
@@ -501,6 +531,9 @@ class TCViTokTrainer:
             "sparsity": total_sparsity / n,
             "entropy": total_entropy / n,
         }
+        if self.lambda_budget > 0:
+            metrics["budget"] = total_budget / n
+            metrics["k_effective_mean"] = total_k_eff / n
 
         # Track best validation loss
         if val_loss < self.best_val_loss:
@@ -552,7 +585,8 @@ class TCViTokTrainer:
             if k.startswith("tpn.")
             or "lora_" in k
             or "multi_modal_projector." in k
-            or k.startswith("unsel_pooler.")   # Phase 1.5: 4-slot cross-attention pooler
+            or k.startswith("unsel_pooler.")      # Phase 1.5: 4-slot cross-attention pooler
+            or k.startswith("budget_predictor.")   # Adaptive budget: per-sample token budget
         }
 
         checkpoint = {

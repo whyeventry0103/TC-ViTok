@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .tpn import TokenizationPolicyNetwork
+from .tpn import TokenizationPolicyNetwork, BudgetPredictor
 from .encoders import CoarseVisualEncoder, TextEncoder, FullVisualEncoder
 
 
@@ -352,6 +352,9 @@ class TCViTokModel(nn.Module):
         load_encoders: bool = True,
         merge_beta: Optional[float] = None,
         merge_tau: Optional[float] = None,
+        adaptive_budget: bool = False,
+        k_min: int = 36,
+        k_max: int = 288,
     ):
         super().__init__()
 
@@ -359,6 +362,9 @@ class TCViTokModel(nn.Module):
         self.use_stub_llm = use_stub_llm
         self.merge_beta = merge_beta if merge_beta is not None else 0.0
         self.merge_tau = merge_tau if merge_tau is not None else 0.1
+        self.adaptive_budget = adaptive_budget
+        self.k_min = k_min
+        self.k_max = k_max
 
         # 1. Coarse visual encoder (DINOv2-S, frozen)
         # When load_encoders=False (e.g., testing with stub), use None and
@@ -375,6 +381,18 @@ class TCViTokModel(nn.Module):
         # 3. Tokenization Policy Network (TPN, trainable)
         tpn_config = tpn_config or {}
         self.tpn = TokenizationPolicyNetwork(**tpn_config)
+
+        # 3b. Budget Predictor (adaptive budget mode)
+        # Predicts per-sample token fraction from TPN's cross-attention context.
+        # ~25K params. Only active when adaptive_budget=True.
+        if adaptive_budget:
+            d_model = tpn_config.get("d_model", 384)
+            N = tpn_config.get("N", 576)
+            self.budget_predictor = BudgetPredictor(
+                d_model=d_model, k_min=k_min, k_max=k_max, N=N,
+            )
+        else:
+            self.budget_predictor = None
 
         # 4. Unselected token pooler (Phase 1.5: orthogonal soft recycling)
         # Compresses N-k background tokens into 4 summary vectors injected as
@@ -525,13 +543,19 @@ class TCViTokModel(nn.Module):
 
         # Step 1: TPN produces top-k gather indices
         # During training, TPN also returns mask_ste for STE gradient routing.
-        idx, s_N, mask_ste = self.tpn(
+        # In adaptive mode, also returns k_effective (differentiable expected count).
+        idx, s_N, mask_ste, k_effective = self.tpn(
             v_coarse=v_coarse,
             q_embed=q_embed,
             k=self.k,
             tau=tau,
             training=self.training,
-        )  # idx: [B, k], s_N: [B, N], mask_ste: [B, N] or None
+            adaptive_budget=self.adaptive_budget,
+            budget_predictor=self.budget_predictor,
+            k_min=self.k_min,
+            k_max=self.k_max,
+        )  # idx: [B, k] or [B, k_max_batch], s_N: [B, N], mask_ste: [B, N] or None
+           # k_effective: [B] (adaptive) or None (fixed)
 
         # Step 2: Extract full visual features (frozen CLIP ViT-L/14)
         if v_full is None:
@@ -543,20 +567,23 @@ class TCViTokModel(nn.Module):
             v_full = self.full_encoder(images_full)  # [B, 576, 1024]
 
         # Step 3: GATHER selected tokens (real compression!)
-        # Output: [B, k, 1024] — LLM sees k tokens, not N
-        v_selected = gather_tokens(v_full, idx)
+        if self.adaptive_budget:
+            # Adaptive: per-sample variable k. idx may contain -1 padding.
+            # Run gather and merge per-sample to handle variable lengths.
+            v_selected = self._gather_adaptive(v_full, idx, s_N)
+        else:
+            # Fixed-k: all samples have same k tokens
+            v_selected = gather_tokens(v_full, idx)  # [B, k, 1024]
 
-        # Step 3c: Informative token merge (replaces Phase 1.5 UnselectedPooler)
-        # Merge unselected token information INTO selected tokens.
-        # Zero new parameters. Same k tokens in/out. No co-adaptation.
-        if not self.use_stub_llm and self.merge_beta > 0:
-            v_selected = informative_token_merge(
-                v_fine=v_full,
-                idx=idx,
-                s_N=s_N,
-                beta=self.merge_beta,
-                tau_merge=self.merge_tau,
-            )  # [B, k, D] — same shape, enriched content
+            # Step 3c: Informative token merge (replaces Phase 1.5 UnselectedPooler)
+            if not self.use_stub_llm and self.merge_beta > 0:
+                v_selected = informative_token_merge(
+                    v_fine=v_full,
+                    idx=idx,
+                    s_N=s_N,
+                    beta=self.merge_beta,
+                    tau_merge=self.merge_tau,
+                )  # [B, k, D] — same shape, enriched content
 
         # Step 3d: STE gradient routing — connect VQA loss to TPN parameters.
         # Applied AFTER merge so gradient flows through the final v_selected
@@ -566,17 +593,32 @@ class TCViTokModel(nn.Module):
         #   gradient: d(loss)/d(s_N_i) = Sigma_d g_v[b,j,d] * v_selected[b,j,d]
         #   This is tau-independent and remains active throughout training.
         if self.training and not self.use_stub_llm:
-            scores_at_selected = torch.gather(s_N, dim=1, index=idx)      # [B, k]
-            correction = scores_at_selected - scores_at_selected.detach() # [B, k], = 0 fwd
-            v_selected = v_selected * (1.0 + correction.unsqueeze(-1))    # [B, k, D], identity fwd
+            # For adaptive mode, idx may have -1 padding — clamp for gather.
+            # Mask correction at padding positions to prevent spurious gradient
+            # flow to s_N[:, 0] from clamped -1 indices.
+            safe_idx = idx.clamp(min=0)
+            scores_at_selected = torch.gather(s_N, dim=1, index=safe_idx)  # [B, k]
+            correction = scores_at_selected - scores_at_selected.detach()  # [B, k], = 0 fwd
+            if self.adaptive_budget:
+                valid_mask = (idx >= 0).float().unsqueeze(-1)  # [B, k, 1]
+                v_selected = v_selected * (1.0 + correction.unsqueeze(-1) * valid_mask)
+            else:
+                v_selected = v_selected * (1.0 + correction.unsqueeze(-1))     # [B, k, D], identity fwd
 
-        v_input = v_selected  # ALWAYS [B, k, D] — no extra tokens, no mismatch
+        v_input = v_selected
 
         # Step 4: Forward through LLM backbone
         if self.use_stub_llm:
             llm_outputs = self.llm(visual_tokens=v_selected)
         else:
-            llm_outputs = self._llava_forward(v_input, questions, answer_strings)
+            # Compute per-sample valid token count for adaptive mode
+            k_per_sample = None
+            if self.adaptive_budget:
+                # idx has -1 padding for shorter samples
+                k_per_sample = (idx >= 0).sum(dim=1)  # [B]
+            llm_outputs = self._llava_forward(
+                v_input, questions, answer_strings, k_per_sample=k_per_sample,
+            )
 
         # Build output dict
         outputs = {
@@ -591,6 +633,10 @@ class TCViTokModel(nn.Module):
         if return_idx:
             outputs["idx"] = idx
 
+        # Adaptive budget: pass k_effective for budget loss computation
+        if k_effective is not None:
+            outputs["k_effective"] = k_effective
+
         # Return mask_ste and q_embed for entropy + diversity loss gradient routing.
         # mask_ste (binary forward, m_soft backward) provides gradient to ALL N tokens,
         # not just the k selected ones — this is the escape route from static crop.
@@ -601,6 +647,63 @@ class TCViTokModel(nn.Module):
             outputs["q_embed"] = q_embed.detach()  # frozen CLIP encoder, no gradient needed
 
         return outputs
+
+    def _gather_adaptive(
+        self,
+        v_full: torch.Tensor,
+        idx: torch.Tensor,
+        s_N: torch.Tensor,
+    ) -> torch.Tensor:
+        """Gather and merge tokens with per-sample variable k.
+
+        For adaptive budget mode, idx has shape [B, k_max_batch] where
+        some entries are -1 (padding). Each sample has a different number
+        of valid tokens. We process per-sample to handle variable lengths,
+        then pad visual tokens to max_k with zeros (attention mask handles
+        the rest in _llava_forward).
+
+        Args:
+            v_full: Full CLIP features [B, N, D]
+            idx: Padded indices [B, k_max_batch], -1 for padding
+            s_N: TPN scores [B, N]
+
+        Returns:
+            v_selected: Padded selected tokens [B, k_max_batch, D]
+        """
+        B, k_max_batch = idx.shape
+        D = v_full.shape[-1]
+        device = v_full.device
+
+        v_selected = torch.zeros(B, k_max_batch, D, device=device, dtype=v_full.dtype)
+
+        for b in range(B):
+            # Find valid (non-padding) indices for this sample
+            valid = idx[b] >= 0
+            valid_idx = idx[b][valid]  # [k_b]
+            k_b = valid_idx.shape[0]
+
+            if k_b == 0:
+                continue
+
+            # Gather valid tokens
+            v_b = gather_tokens(
+                v_full[b:b+1], valid_idx.unsqueeze(0)
+            ).squeeze(0)  # [k_b, D]
+
+            # Per-sample merge if enabled
+            if not self.use_stub_llm and self.merge_beta > 0:
+                v_b = informative_token_merge(
+                    v_fine=v_full[b:b+1],
+                    idx=valid_idx.unsqueeze(0),
+                    s_N=s_N[b:b+1],
+                    beta=self.merge_beta,
+                    tau_merge=self.merge_tau,
+                ).squeeze(0)  # [k_b, D]
+
+            # Place into padded output
+            v_selected[b, :k_b] = v_b
+
+        return v_selected
 
     def forward_cached(
         self,
@@ -648,6 +751,7 @@ class TCViTokModel(nn.Module):
         v_selected: torch.Tensor,
         questions: Optional[list] = None,
         answer_strings: Optional[list] = None,
+        k_per_sample: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Forward pass through real LLaVA with next-token prediction training.
 
@@ -668,6 +772,8 @@ class TCViTokModel(nn.Module):
             v_selected: Selected visual tokens, Shape: [B, k, 1024]
             questions: List of question strings, length B (optional)
             answer_strings: List of raw answer strings for next-token prediction, length B
+            k_per_sample: Per-sample valid token count [B] (adaptive budget mode).
+                          If None, all k tokens per sample are valid.
 
         Returns:
             outputs: Dict with:
@@ -710,6 +816,9 @@ class TCViTokModel(nn.Module):
                 all_labels = []
 
                 for i in range(B):
+                    # Per-sample visual prefix length
+                    k_i = k_per_sample[i].item() if k_per_sample is not None else k
+
                     # Question prompt (no answer yet)
                     q_text = f"USER: {questions[i]}\nASSISTANT:"
                     q_ids = tokenizer(
@@ -738,16 +847,18 @@ class TCViTokModel(nn.Module):
                     a_embeds = embed_fn(a_ids)             # [T_a+1, H]
 
                     # Full sequence: [visual_prefix | question | answer]
-                    seq_embeds = torch.cat([v_projected[i], q_embeds, a_embeds], dim=0)
+                    # In adaptive mode, only use the first k_i valid visual tokens
+                    v_prefix = v_projected[i, :k_i]       # [k_i, H]
+                    seq_embeds = torch.cat([v_prefix, q_embeds, a_embeds], dim=0)
 
                     # Labels: -100 (ignore) for visual + all-but-last-question positions.
                     # logits[i] predicts the token AFTER position i (causal LM), so:
-                    #   logits[k+T_q-1] = f([visual, full_question]) → should predict a_ids[0]
+                    #   logits[k_i+T_q-1] = f([visual, full_question]) → should predict a_ids[0]
                     # We shift answer labels one position LEFT vs the naive placement:
-                    #   ignore length = k + T_q - 1  (NOT k + T_q)
+                    #   ignore length = k_i + T_q - 1  (NOT k_i + T_q)
                     #   trailing -100 pads to match seq_embeds length
                     ignore = torch.full(
-                        (k + len(q_ids) - 1,), -100, device=device, dtype=torch.long
+                        (k_i + len(q_ids) - 1,), -100, device=device, dtype=torch.long
                     )
                     trailing = torch.tensor([-100], device=device, dtype=torch.long)
                     seq_labels = torch.cat([ignore, a_ids, trailing])  # same length as seq_embeds
@@ -793,6 +904,15 @@ class TCViTokModel(nn.Module):
 
             else:
                 # ── Inference mode: [visual | question] only ──
+                # Build per-sample visual attention mask: mask out padding
+                # positions when adaptive budget produces variable-length tokens.
+                if k_per_sample is not None:
+                    vis_attn = torch.zeros(B, k, device=device, dtype=torch.long)
+                    for i in range(B):
+                        vis_attn[i, :k_per_sample[i]] = 1
+                else:
+                    vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
+
                 if questions is not None:
                     q_texts = [f"USER: {q}\nASSISTANT:" for q in questions]
                     text_inputs = tokenizer(
@@ -808,11 +928,10 @@ class TCViTokModel(nn.Module):
                     text_embeds = embed_fn(input_ids)
 
                     combined_embeds = torch.cat([v_projected, text_embeds], dim=1)
-                    vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
                     combined_mask = torch.cat([vis_attn, text_attn], dim=1)
                 else:
                     combined_embeds = v_projected
-                    combined_mask = torch.ones(B, k, device=device, dtype=torch.long)
+                    combined_mask = vis_attn
 
                 with _lm_ctx:
                     lm_outputs = lm(
@@ -833,6 +952,7 @@ class TCViTokModel(nn.Module):
         v_selected: torch.Tensor,
         questions: list,
         max_new_tokens: int = 20,
+        k_per_sample: Optional[torch.Tensor] = None,
     ) -> list:
         """Generative answer decoding using LLaVA backbone.
 
@@ -840,10 +960,15 @@ class TCViTokModel(nn.Module):
         prefix with question embeddings, and calls lm.generate. Used during
         evaluation to produce natural language answers for VQA scoring.
 
+        For adaptive budget mode, builds per-sample sequences with variable
+        visual prefix length, then pads to batch max for batched generation.
+
         Args:
             v_selected: Selected visual tokens, Shape: [B, k, 1024]
             questions: List of question strings, length B
             max_new_tokens: Maximum tokens to generate per sample
+            k_per_sample: Per-sample valid token count [B] (adaptive mode).
+                          If None, all k tokens are valid.
 
         Returns:
             answers: List of decoded answer strings, length B
@@ -866,36 +991,61 @@ class TCViTokModel(nn.Module):
         with amp_ctx:
             # Project visual tokens
             v_projected = self._mm_proj(v_selected)  # [B, k, H]
-
-            # Build LLaVA-1.5 conversation template (without <image> token —
-            # we inject visual tokens directly as embeddings)
-            prompts = [f"USER: {q}\nASSISTANT:" for q in questions]
-            text_inputs = tokenizer(
-                prompts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=128,
-                add_special_tokens=True,
-            )
-            input_ids = text_inputs.input_ids.to(device)
-            text_attn = text_inputs.attention_mask.to(device)
-
-            # Embed prompt tokens
             embed_fn = lm.get_input_embeddings()
-            text_embeds = embed_fn(input_ids)  # [B, T, H]
 
-            # Concatenate: visual prefix + conversation prompt
-            combined_embeds = torch.cat([v_projected, text_embeds], dim=1)  # [B, k+T, H]
-            vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
-            combined_mask = torch.cat([vis_attn, text_attn], dim=1)        # [B, k+T]
+            if k_per_sample is not None:
+                # ── Adaptive mode: per-sample variable visual prefix ──
+                # Build sequences per-sample, pad to batch max
+                prompts = [f"USER: {q}\nASSISTANT:" for q in questions]
+                all_embeds = []
+                all_masks = []
+                for i in range(B):
+                    k_i = k_per_sample[i].item()
+                    v_prefix = v_projected[i, :k_i]  # [k_i, H]
+
+                    t_ids = tokenizer(
+                        prompts[i],
+                        return_tensors="pt",
+                        padding=False,
+                        truncation=True,
+                        max_length=128,
+                        add_special_tokens=True,
+                    ).input_ids[0].to(device)
+                    t_embeds = embed_fn(t_ids)
+
+                    seq = torch.cat([v_prefix, t_embeds], dim=0)
+                    mask = torch.ones(seq.shape[0], device=device, dtype=torch.long)
+                    all_embeds.append(seq)
+                    all_masks.append(mask)
+
+                max_len = max(e.shape[0] for e in all_embeds)
+                H = all_embeds[0].shape[-1]
+                combined_embeds = torch.zeros(B, max_len, H, device=device, dtype=all_embeds[0].dtype)
+                combined_mask = torch.zeros(B, max_len, device=device, dtype=torch.long)
+                for i in range(B):
+                    L = all_embeds[i].shape[0]
+                    combined_embeds[i, :L] = all_embeds[i]
+                    combined_mask[i, :L] = all_masks[i]
+            else:
+                # ── Fixed-k mode: batched visual prefix ──
+                prompts = [f"USER: {q}\nASSISTANT:" for q in questions]
+                text_inputs = tokenizer(
+                    prompts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=128,
+                    add_special_tokens=True,
+                )
+                input_ids = text_inputs.input_ids.to(device)
+                text_attn = text_inputs.attention_mask.to(device)
+                text_embeds = embed_fn(input_ids)  # [B, T, H]
+
+                combined_embeds = torch.cat([v_projected, text_embeds], dim=1)  # [B, k+T, H]
+                vis_attn = torch.ones(B, k, device=device, dtype=torch.long)
+                combined_mask = torch.cat([vis_attn, text_attn], dim=1)        # [B, k+T]
 
             # Determine which object can truly call generate().
-            # PEFT PeftModel inherits generate() from PreTrainedModel but at runtime
-            # delegates to self.get_base_model().generate() — which fails when the
-            # base model is LlamaModel (new arch, no lm_head, no generate()).
-            # LlamaForCausalLM (old arch) has lm_head → can generate.
-            # LlavaForConditionalGeneration always has generate() via GenerationMixin.
             base = lm.get_base_model() if hasattr(lm, "get_base_model") else lm
             gen_fn = lm if hasattr(base, "lm_head") else self.llava
             generated_ids = gen_fn.generate(
@@ -922,28 +1072,39 @@ class TCViTokModel(nn.Module):
         images_coarse: torch.Tensor,
         images_full: torch.Tensor,
         questions: list,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Select visual tokens via TPN. Override in subclasses for ablations.
 
         Applies token merge at eval too — exact same path as training.
 
         Returns:
-            v_selected: Gathered (and optionally merged) visual tokens, Shape: [B, k, 1024]
+            v_selected: Gathered (and optionally merged) visual tokens,
+                        Shape: [B, k, 1024] (fixed) or [B, k_max_batch, 1024] (adaptive)
+            k_per_sample: Per-sample valid token count [B] (adaptive) or None (fixed)
         """
         v_coarse = self.coarse_encoder(images_coarse)
         q_embed = self.text_encoder(questions)
-        idx, s_N, _ = self.tpn(
+        idx, s_N, _, k_effective = self.tpn(
             v_coarse=v_coarse, q_embed=q_embed, k=self.k, tau=0.1, training=False,
+            adaptive_budget=self.adaptive_budget,
+            budget_predictor=self.budget_predictor,
+            k_min=self.k_min, k_max=self.k_max,
         )
         v_full = self.full_encoder(images_full)
 
-        # Apply token merge at eval too — matches training path exactly
+        if self.adaptive_budget:
+            # Per-sample variable k — use _gather_adaptive
+            v_selected = self._gather_adaptive(v_full, idx, s_N)
+            k_per_sample = (idx >= 0).sum(dim=1)
+            return v_selected, k_per_sample
+
+        # Fixed-k path
         if self.merge_beta > 0:
             return informative_token_merge(
                 v_fine=v_full, idx=idx, s_N=s_N,
                 beta=self.merge_beta, tau_merge=self.merge_tau,
-            )
-        return gather_tokens(v_full, idx)
+            ), None
+        return gather_tokens(v_full, idx), None
 
     @torch.no_grad()
     def generate(
@@ -955,14 +1116,16 @@ class TCViTokModel(nn.Module):
     ) -> list[str]:
         """Generative answer decoding. Use this for all VQA benchmark evaluation."""
         self.eval()
-        v_selected = self._select_tokens(images_coarse, images_full, questions)
+        v_selected, k_per_sample = self._select_tokens(images_coarse, images_full, questions)
         if self.use_stub_llm:
             llm_outputs = self.llm(visual_tokens=v_selected)
             logits = llm_outputs["logits"]
             preds = logits[:, 0, :].argmax(dim=-1)
             return [str(p.item()) for p in preds]
         else:
-            return self._llava_generate(v_selected, questions, max_new_tokens)
+            return self._llava_generate(
+                v_selected, questions, max_new_tokens, k_per_sample=k_per_sample,
+            )
 
     def get_selection_info(
         self,
@@ -982,17 +1145,26 @@ class TCViTokModel(nn.Module):
         with torch.no_grad():
             v_coarse = self.coarse_encoder(images_coarse)
             q_embed = self.text_encoder(questions)
-            idx, s_N, _ = self.tpn(
+            idx, s_N, _, __ = self.tpn(
                 v_coarse=v_coarse,
                 q_embed=q_embed,
                 k=self.k,
                 tau=0.1,
                 training=False,
+                adaptive_budget=self.adaptive_budget,
+                budget_predictor=getattr(self, 'budget_predictor', None),
+                k_min=getattr(self, 'k_min', 36),
+                k_max=getattr(self, 'k_max', 288),
             )
 
-        # Reconstruct binary mask from indices for visualization
+        # Reconstruct binary mask from indices for visualization.
+        # Handle -1 padding from adaptive budget mode: only scatter valid indices
+        # to avoid overwriting token 0 with 0.0 from clamped padding entries.
         mask = torch.zeros(s_N.shape, device=s_N.device)
-        mask.scatter_(-1, idx, 1.0)
+        for b in range(idx.shape[0]):
+            valid = idx[b] >= 0
+            if valid.any():
+                mask[b].scatter_(0, idx[b][valid], 1.0)
 
         return {"idx": idx, "scores": s_N, "mask": mask}
 
@@ -1198,6 +1370,10 @@ class TCViTokModel(nn.Module):
             # Train TPN only — freeze all LLM components and unsel_pooler
             for param in self.tpn.parameters():
                 param.requires_grad = True
+            # Budget predictor frozen in phase 0 (TPN warmup only)
+            if self.budget_predictor is not None:
+                for param in self.budget_predictor.parameters():
+                    param.requires_grad = False
             if self.unsel_pooler is not None:
                 for param in self.unsel_pooler.parameters():
                     param.requires_grad = False
@@ -1210,9 +1386,13 @@ class TCViTokModel(nn.Module):
                     param.requires_grad = False
 
         elif phase in [1, 2]:
-            # Train TPN + LoRA + mm_projector
+            # Train TPN + LoRA + mm_projector + budget_predictor
             for param in self.tpn.parameters():
                 param.requires_grad = True
+            # Budget predictor: trainable in phase 1+ (after warmup, controlled by trainer)
+            if self.budget_predictor is not None:
+                for param in self.budget_predictor.parameters():
+                    param.requires_grad = True
             # UnselectedPooler: freeze when merge is active (pooler is not called).
             # Keeps it in state_dict for backward compat with old checkpoints.
             if self.unsel_pooler is not None:

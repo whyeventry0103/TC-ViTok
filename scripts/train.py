@@ -360,6 +360,9 @@ def main():
 
     merge_beta = config_dict.get("model", {}).get("merge_beta", None)
     merge_tau = config_dict.get("model", {}).get("merge_tau", None)
+    adaptive_budget = config_dict.get("model", {}).get("adaptive_budget", False)
+    k_min = config_dict.get("model", {}).get("k_min", 36)
+    k_max = config_dict.get("model", {}).get("k_max", 288)
 
     model = TCViTokModel(
         k=k,
@@ -369,6 +372,9 @@ def main():
         load_encoders=not args.stub,
         merge_beta=merge_beta,
         merge_tau=merge_tau,
+        adaptive_budget=adaptive_budget,
+        k_min=k_min,
+        k_max=k_max,
     )
 
     # Log param count on ALL ranks for DDP debugging
@@ -465,9 +471,16 @@ def main():
 
     train_loader, val_loader = build_loaders(data_config, batch_size, num_workers, args, is_ddp=is_ddp)
 
+    # Resolve resume checkpoint: CLI --resume takes priority, then config checkpoint.load_from
+    resume_path = args.resume
+    if resume_path is None:
+        resume_path = config_dict.get("checkpoint", {}).get("load_from", None)
+    if resume_path and is_main:
+        print(f"Resuming from checkpoint: {resume_path}")
+
     phase_metrics, phase_dir = run_phase(
         model, config_dict, train_loader, val_loader, device,
-        resume=args.resume, local_rank=local_rank,
+        resume=resume_path, local_rank=local_rank,
     )
     if is_main:
         print(f"Phase {phase} complete. Metrics: {phase_metrics}")
