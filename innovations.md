@@ -571,11 +571,10 @@ Key gap (TC vs image-only, GQA spatial): _______  → routing verdict: WORKS / W
 
 ---
 
-## Phase 1.5 Implementation Status (as of 2026-04-12)
+## Phase 1.5 Implementation Status (as of 2026-04-14)
 
-All components from the "Phase 1.5 Architecture: Complete Forward Pass" section above
-are **fully implemented and running**. Smoke test passed (3 steps, 4 optimizer groups,
-no OOM, no crash). Full training running at `runs/phase1p5_v1`.
+All Phase 1.5 components are **fully implemented**. 8 versions have been trained.
+Current run: **v8b** (frozen pooler, tmux: phase1p5_v8b).
 
 ### What Was Built (Session 5: 2026-04-11)
 
@@ -583,68 +582,78 @@ no OOM, no crash). Full training running at `runs/phase1p5_v1`.
 |---|---|---|
 | `complement_gather(V, idx)` | `tc_vitok_model.py` | ✅ |
 | `sinusoidal_2d_pe(flat_indices, D)` | `tc_vitok_model.py` | ✅ |
-| `UnselectedPooler(d_model=1024, n_slots=4, n_heads=4)` | `tc_vitok_model.py` | ✅ |
+| `UnselectedPooler` — orthogonal init, cross-attn, 4 slots | `tc_vitok_model.py` | ✅ |
 | Orthogonal deflation in `forward()` | `tc_vitok_model.py` | ✅ |
-| `_get_teacher_importance()` — full prompt + hidden state cosine sim | `tc_vitok_model.py` | ✅ |
-| `spatial_spread_loss(mask_soft, N, grid)` | `losses.py` | ✅ |
-| `attention_distillation_loss(s_N, teacher_imp, T=1.0, teacher_scale=10.0)` | `losses.py` | ✅ |
-| `compute_total_loss` extended with spread/distill params | `losses.py` | ✅ |
-| `get_lambda_spread(step, max_val, decay_start, decay_end)` | `curriculum.py` | ✅ |
-| `unsel_pooler` param group in optimizer | `optimizer.py` | ✅ |
-| Teacher pass in `train_step` | `trainer.py` | ✅ |
-| `datasets: ["vqav2", "gqa"]` via ConcatDataset | `scripts/train.py` | ✅ |
-| `configs/phase1p5.yaml` | configs/ | ✅ |
-| `tests/test_phase1p5.py` — 52 tests | tests/ | ✅ |
+| `_get_teacher_importance()` — hidden state cosine sim | `tc_vitok_model.py` | ✅ |
+| `residual_pooler_distill_loss()` — rank-banded version | `losses.py` | ✅ |
+| `boundary_margin_loss()` | `losses.py` | ✅ |
+| `slot_orthogonality_loss()` | `losses.py` | ✅ |
+| `compute_total_loss` with all Phase 1.5 params | `losses.py` | ✅ |
+| `lr_pooler` separate param group | `optimizer.py` | ✅ |
+| Teacher pass gated on lambda flags | `trainer.py` | ✅ |
+| `configs/phase1p5_v8b.yaml` | configs/ | ✅ |
 
 ### Bugs Fixed During Phase 1.5 Implementation
 
 | ID | Issue | Fix |
 |---|---|---|
-| BUG-38 | Padding corruption in teacher importance — h[i, ans_start:] averages padding zeros | Store seq_lens before padding; slice h[i, ans_start:seq_lens[i]] |
-| BUG-39 | Wrong LLaVA prompt structure — visual tokens prepended before BOS | Split: prefix_embeds ("USER: ") + v_proj_full + suffix_embeds ("\nQ\nASSISTANT:"); track visual_starts |
-| BUG-40 | VRAM spikes — lm_out (~19GB) held alive during student forward | Explicit del chain: all_embeds → padded_embeds/masks → lm_out → h |
-| BUG-41 | Teacher distribution flat — T=2.0, cosine_sim std≈0.1 → p_top only 1.16× uniform | teacher_scale=10.0, T=1.0; maps cosine_sim std 0.1→1.0; ~19× concentration verified |
-| BUG-42 | configs/phase1p5.yaml wrong checkpoint path | Fixed: runs/phase0_v4/best.ckpt → runs/phase0_v4/phase0/best.ckpt |
-| BUG-43 | diagnose_routing.py used nonexistent from_pretrained(); wrong image sizes | Fixed to constructor + load_state_dict; dual preprocessors (98px DINOv2, 336px CLIP) |
+| BUG-38 | Padding corruption in teacher importance | Store seq_lens before padding |
+| BUG-39 | Wrong LLaVA prompt structure | Split prefix/visual/suffix embeds; track visual_starts |
+| BUG-40 | VRAM spikes from lm_out held alive | Explicit del chain at earliest possible points |
+| BUG-41 | Teacher distribution flat (cosine_sim std≈0.1) | teacher_scale=10.0, T=1.0 → 19× concentration |
+| BUG-42 | configs/phase1p5.yaml wrong checkpoint path | Fixed to runs/phase0_v4/phase0/best.ckpt |
+| BUG-43 | diagnose_routing.py: nonexistent from_pretrained() | Use constructor + load_state_dict |
 
 ---
 
-## Phase 1.5 Training Analysis (live — step ~21k of 50k)
+## Phase 1.5 Training Analysis (complete — as of 2026-04-14)
 
-### Val Metrics vs Phase 1 v3 Baseline
+### The Co-Adaptation Problem (Root Cause of v1–v8 Failures)
 
-| Step | p1.5 val_vqa | p1v3 val_vqa | Gap | Interpretation |
-|------|-------------|-------------|-----|----------------|
-| 5k   | 0.5129      | 0.4411      | +0.072 | UnselectedPooler injecting noise |
-| 10k  | 0.4951      | 0.4053      | +0.090 | Gap widening — distill too strong |
-| 15k  | 0.5001      | 0.4032      | +0.097 | Regression (pooler warmup plateau) |
-| 20k  | 0.4610      | 0.3617      | +0.099 | Recovery; distill declining |
+Every Phase 1.5 failure stems from a single structural issue: **pooler and LoRA cannot be trained simultaneously without oscillation**. The circular dependency:
+1. Pooler output changes → LLM input distribution changes → LoRA must re-adapt
+2. LoRA changes → its gradient to pooler changes → pooler must re-adapt
 
-**Phase 1.5 converges 35% slower** than Phase 1 v3 (0.052 vs 0.079 VQA CE improvement
-over steps 5k→20k). Root causes:
-1. UnselectedPooler randomly initialized — adds noise prefix tokens for first ~15k steps
-2. lambda_distill=0.2 contributes 43% of VQA gradient magnitude, pulling TPN toward
-   teacher's full-token routing preferences rather than 144-token VQA-optimal routing
-3. GQA training data harder distribution
+| Pooler LR | Oscillation period | Evidence |
+|-----------|-------------------|---------|
+| lr_mlp=5e-4 | 5k steps | v6: 0.4353→0.4931 between step 5k and 10k |
+| lr_pooler=2e-5 | 10-15k steps | v8: 0.3791→0.4121 at step 30→35k, 0.3663→0.4265 at step 45→55k |
+| lr_pooler=0.0 | none (frozen) | v8b: being tested — catapult at step 5k (0.4540) from fresh optimizer |
 
-**Positive signs:**
-- Distill IS declining: 1.2-1.4 (step 11k) → 0.7-1.1 (step 21k)
-- Spread IS increasing: -107 → -113 (more spatial diversity, above uniform -95.8)
-- No collapse, no NaN, entropy stable at -5.83 train
+### Val Checkpoint History — v8 (best run, now killed)
 
-### Plan of Action
+| Step | val_loss | val_vqa | Notable |
+|------|----------|---------|---------|
+| 5k  | 0.3880 | 0.4395 | Good start |
+| 10k | 0.3835 | 0.4349 | No regression! Glacial LR working |
+| 15k | 0.3585 | 0.4097 | |
+| 25k | 0.3484 | 0.3997 | |
+| 30k | 0.3276 | 0.3791 | Best loss |
+| 35k | 0.3606 | 0.4121 | ← first oscillation spike |
+| 40k | 0.3363 | 0.3879 | Recovery |
+| 45k | 0.3149 | **0.3663** | ← BEST CHECKPOINT (best.ckpt) |
+| 50k | 0.3205 | 0.3719 | |
+| 55k | 0.3753 | 0.4265 | ← catastrophic spike |
+| 60k | 0.3280 | 0.3795 | Cycle reset |
 
-**Step 25k is the decision point.** Monitor these specific numbers:
+**v8 was killed at step 63k. Best checkpoint preserved at `runs/phase1p5_v8/phase1/best.ckpt`.**
 
-| Metric | Green: add distill decay, extend 100k | Yellow: extend, watch 30k | Red: restart |
-|--------|---------------------------------------|--------------------------|--------------|
-| val_vqa | < 0.42 | 0.42–0.45 | > 0.45 |
-| Gap vs p1v3 | < 0.085 (narrowing) | 0.085–0.095 | > 0.095 (widening) |
-| distill train | < 0.70 | 0.70–0.85 | > 0.85 (plateau) |
+### Current: v8b (frozen pooler, step ~5k/55k)
+- Step 5k val_vqa = 0.4540 — catapult from fresh optimizer (expected)
+- Model recovering rapidly; decision point at step 15k
+- If val_vqa < 0.40 at step 15k: frozen pooler approach working → continue
+- If val_vqa > 0.42 at step 15k: frozen pooler hurting → consider no-pooler ablation
 
-**If Green or Yellow:** Add distill annealing in trainer.py:
-```python
-# After step 20k, decay lambda_distill from 0.2 to 0.02 over next 30k steps
+### Decision at v8b step 15k
+
+| val_vqa | Action |
+|---------|--------|
+| < 0.40 | Continue — frozen pooler + rank 64/128 LoRA working |
+| 0.40–0.42 | Continue but lower expectations — might match Phase 1 v3 only |
+| > 0.42 | Kill v8b; start Phase 1 v4 with no pooler (rank 64/128 LoRA only) |
+
+A Phase 1 with no pooler but rank 64/128 LoRA (vs Phase 1 v3's rank 32/64) should
+still meaningfully beat 0.3334 based on increased LoRA capacity alone.
 lambda_distill = max(0.02, 0.2 * (1.0 - (step - 20000) / 30000))
 ```
 Extend max_steps to 100k. Tau stays at 0.1 floor from step 50k onward (fine).

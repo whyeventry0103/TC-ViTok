@@ -384,54 +384,48 @@ bash scripts/download_assets.sh --gqa-only
 
 ## Part 3 — Training Status
 
-### Current Status (as of 2026-04-12)
+### Current Status (as of 2026-04-14)
 
-| Run | Steps | Final val_vqa | Final val_loss | Status |
+| Run | Steps | Best val_vqa | val_loss | Status |
 |---|---|---|---|---|
-| phase0_v4 | 10,000 | — | — | ✅ COMPLETE — checkpoint used for Phase 1.5 |
-| phase1_v3 | 50,000 | 0.3334 | 0.2309 | ✅ COMPLETE — best baseline |
-| phase1p5_v1 | ~21k/50k | 0.4610 (step 20k) | 0.3608 | 🔄 RUNNING |
+| phase0_v4 | 10,000 | — | — | ✅ COMPLETE |
+| phase1_v3 | 50,000 | **0.3334** | 0.2309 | ✅ COMPLETE — BASELINE |
+| phase1p5_v1 | ~21k | 0.4610 | 0.3608 | ❌ KILLED — distill dominated |
+| phase1p5_v2 | ~10k | — | — | ❌ KILLED — pooler_warmup shock |
+| phase1p5_v3 | ~15k | — | — | ❌ KILLED — spread hacking |
+| phase1p5_v4 | ~5k | 0.4476 | — | ❌ KILLED — slot init collapse |
+| phase1p5_v5 | ~23.6k | 0.4230 | — | ❌ KILLED — aggregate KL collapse |
+| phase1p5_v6 | ~12k | 0.4353 | — | ❌ KILLED — negative total loss + moving target |
+| phase1p5_v7 | ~13k | 0.4432 | — | ❌ KILLED — regression persisted |
+| phase1p5_v8 | 63k | **0.3663** (step 45k) | 0.3276 | ❌ KILLED — oscillation 30k→60k |
+| **phase1p5_v8b** | ~5k/55k | 0.4540 | 0.4022 | 🔄 **RUNNING** — frozen pooler |
 
-### Phase 1 v3 — Final Metrics (COMPLETE)
-- val loss: 0.2309, val VQA: 0.3334, val entropy: -5.1252
-- Eval: run_eval.sh completed [OK] for TC-ViTok, [FAIL] for random baseline
+### Phase 1.5 v8b — Live Training
+- Running: `runs/phase1p5_v8b/phase1/`, tmux session `phase1p5_v8b`
+- Config: `configs/phase1p5_v8b.yaml`
+- Started from: `runs/phase1p5_v8/phase1/best.ckpt` (v8 step 45k, val_vqa=0.3663)
+- Key change: **lr_pooler=0.0** (pooler completely frozen), lambda_residual_distill=0, lambda_slot_orth=0
+- tau_max=0.595 (continuation from v8 step 45k), max_steps=55000
+- Step 5k val_vqa=0.4540 — catapult from fresh optimizer (expected, recovering rapidly)
+- **Decision point: step 15k val** — if val_vqa < 0.40 then frozen pooler is helping
+
+### Phase 1 v3 — Final Metrics (COMPLETE — BASELINE)
+- val loss: 0.2309, val VQA: **0.3334**, val entropy: -5.1252
 - Checkpoint: `runs/phase1_v3/phase1/best.ckpt`
 
-### Phase 1.5 v1 — Live Training
-- Running: `runs/phase1p5_v1/phase1/`, tmux session `phase1p5` (~1.03 it/s)
-- Config: `configs/phase1p5.yaml` (LoRA rank 64, lambda_distill=0.2, lambda_spread=0.005, datasets=vqav2+gqa)
-- Started from: `runs/phase0_v4/phase0/best.ckpt`
-- Components active: UnselectedPooler, orthogonal deflation, teacher distillation, spatial spread loss
-- Step 25k is the decision point (see innovations.md Plan of Action)
-
-### Historical attempts (pre-generative rewrite, Apr 8-10)
-- **First–Eighth training attempts**: CRASHED (SIGABRT, DDP mismatch, NCCL timeout, etc.) — all fixed BUG-11 through BUG-21
-- **Phase 1 gen1–gen4, v2, v3**: Various restarts fixing label shift (BUG-28), gumbel topk (BUG-29), mask_ste (BUG-30), lambda_max (BUG-31), tau-independent STE (BUG-32)
-
-### Before restarting — pull fixes first
+### Key checkpoints on server
 ```bash
-git -c credential.helper= pull origin main
+runs/phase0_v4/phase0/best.ckpt          # Phase 0 — start of all Phase 1 runs
+runs/phase1_v3/phase1/best.ckpt          # Phase 1 v3 — baseline (0.3334)
+runs/phase1p5_v8/phase1/best.ckpt        # Phase 1.5 v8 step 45k — best ever (0.3663)
+runs/phase1p5_v8b/phase1/best.ckpt       # Phase 1.5 v8b — current (updating live)
 ```
 
-### Start training (after pulling fixes)
+### Restart v8b (if tmux session lost)
 ```bash
-tmux new -s training
-export DATA_ROOT=~/tc-vitok-data
-bash scripts/launch_multigpu.sh \
-    --config configs/phase0.yaml \
-    --output runs/ \
-    --run-both-phases \
-    --no-wandb
+tmux new -s phase1p5_v8b
+bash scripts/launch_multigpu.sh --config configs/phase1p5_v8b.yaml --output runs/phase1p5_v8b
 ```
-Detach: `Ctrl+B` then `D`
-
-### Expected completion (after restart)
-| Phase | Steps | GPUs | Est. duration | Est. done |
-|---|---|---|---|---|
-| Phase 0 (TPN only, 887k params) | 10,000 | 1 GPU (DDP skipped) | ~90 min | ~Apr 8 night |
-| Phase 1 (TPN + LoRA + MLP) | 50,000 | 2 GPU DDP | ~55-70 hours | ~Apr 10-11 |
-
-Phase 0 runs single-GPU (~1.85 it/s) because DDP overhead on 7.6B model with only 887K trainable params makes 2-GPU 34% slower.
 
 ### Verified correct parameter counts
 - **Before `set_training_phase()`**: 324,012,493 trainable (LoRA + mm_proj + VQA head + TPN)
