@@ -358,12 +358,17 @@ def main():
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
+    merge_beta = config_dict.get("model", {}).get("merge_beta", None)
+    merge_tau = config_dict.get("model", {}).get("merge_tau", None)
+
     model = TCViTokModel(
         k=k,
         tpn_config=tpn_config,
         use_stub_llm=args.stub,
         lora_config=lora_config,
         load_encoders=not args.stub,
+        merge_beta=merge_beta,
+        merge_tau=merge_tau,
     )
 
     # Log param count on ALL ranks for DDP debugging

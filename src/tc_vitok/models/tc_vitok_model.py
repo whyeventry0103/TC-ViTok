@@ -78,6 +78,63 @@ def complement_gather(
     return v_unsel, unsel_idx
 
 
+def informative_token_merge(
+    v_fine: torch.Tensor,
+    idx: torch.Tensor,
+    s_N: torch.Tensor,
+    beta: float = 0.3,
+    tau_merge: float = 0.1,
+) -> torch.Tensor:
+    """Merge unselected token information into selected tokens.
+
+    Each unselected token is soft-assigned to its nearest selected token
+    (by cosine similarity), weighted by TPN importance scores. This is
+    QUERY-CONDITIONED merging: near-threshold tokens (high TPN score,
+    almost selected) contribute more than low-scored background tokens.
+
+    Zero new parameters. Same k tokens in/out. Fully differentiable.
+
+    Args:
+        v_fine: Full CLIP visual features [B, N, D]
+        idx: Top-k indices from TPN [B, k]
+        s_N: Instance-normalized TPN scores [B, N]
+        beta: Merge strength (0 = no merge, 1 = full replace)
+        tau_merge: Softmax temperature for assignment (lower = sharper)
+
+    Returns:
+        v_merged: Enriched selected tokens [B, k, D]
+    """
+    v_selected = gather_tokens(v_fine, idx)                    # [B, k, D]
+    v_unsel, unsel_idx = complement_gather(v_fine, idx)        # [B, N-k, D], [B, N-k]
+
+    # Cosine similarity: each unselected → each selected
+    v_sel_norm = F.normalize(v_selected, dim=-1)               # [B, k, D]
+    v_unsel_norm = F.normalize(v_unsel, dim=-1)                # [B, N-k, D]
+    sim = torch.bmm(v_unsel_norm, v_sel_norm.transpose(1, 2))  # [B, N-k, k]
+
+    # Soft assignment (nearly hard at tau_merge=0.1)
+    assignment = F.softmax(sim / tau_merge, dim=-1)            # [B, N-k, k]
+
+    # TPN-score weighting: near-threshold unselected tokens matter more
+    unsel_scores = s_N.gather(1, unsel_idx)                    # [B, N-k]
+    score_weights = F.softmax(unsel_scores, dim=-1)            # [B, N-k]
+
+    # Weight assignments by TPN importance
+    weighted_assignment = assignment * score_weights.unsqueeze(-1)  # [B, N-k, k]
+    weighted_assignment = weighted_assignment / (
+        weighted_assignment.sum(dim=1, keepdim=True) + 1e-8
+    )                                                          # [B, N-k, k]
+
+    # Aggregate: each selected token collects from its assigned unselected tokens
+    contributions = torch.bmm(
+        weighted_assignment.transpose(1, 2), v_unsel
+    )                                                          # [B, k, D]
+
+    # Residual merge: original token dominates, contributions enrich
+    v_merged = v_selected + beta * contributions               # [B, k, D]
+    return v_merged
+
+
 def sinusoidal_2d_pe(
     flat_indices: torch.Tensor,
     D: int,
@@ -293,11 +350,15 @@ class TCViTokModel(nn.Module):
         llava_model_name: str = "llava-hf/llava-1.5-7b-hf",
         lora_config: Optional[Dict[str, Any]] = None,
         load_encoders: bool = True,
+        merge_beta: Optional[float] = None,
+        merge_tau: Optional[float] = None,
     ):
         super().__init__()
 
         self.k = k
         self.use_stub_llm = use_stub_llm
+        self.merge_beta = merge_beta if merge_beta is not None else 0.0
+        self.merge_tau = merge_tau if merge_tau is not None else 0.1
 
         # 1. Coarse visual encoder (DINOv2-S, frozen)
         # When load_encoders=False (e.g., testing with stub), use None and
@@ -485,62 +546,33 @@ class TCViTokModel(nn.Module):
         # Output: [B, k, 1024] — LLM sees k tokens, not N
         v_selected = gather_tokens(v_full, idx)
 
-        # Step 3b: STE gradient routing — connect VQA loss to TPN parameters.
-        # torch.gather is NOT differentiable w.r.t. idx, so VQA loss gradient
-        # cannot reach TPN through the gather operation alone.
-        #
-        # PREVIOUS APPROACH (broken): multiply by mask_ste = m_hard + (m_soft - m_soft.detach())
-        #   gradient ∝ d(m_soft)/d(score) = m_soft*(1-m_soft)/tau
-        #   → as tau anneals 1.0→0.1, m_soft saturates to 0/1, gradient → 0 (VANISHES!)
-        #   This killed TPN learning by step ~15k.
-        #
-        # CURRENT APPROACH (tau-independent additive STE):
+        # Step 3c: Informative token merge (replaces Phase 1.5 UnselectedPooler)
+        # Merge unselected token information INTO selected tokens.
+        # Zero new parameters. Same k tokens in/out. No co-adaptation.
+        if not self.use_stub_llm and self.merge_beta > 0:
+            v_selected = informative_token_merge(
+                v_fine=v_full,
+                idx=idx,
+                s_N=s_N,
+                beta=self.merge_beta,
+                tau_merge=self.merge_tau,
+            )  # [B, k, D] — same shape, enriched content
+
+        # Step 3d: STE gradient routing — connect VQA loss to TPN parameters.
+        # Applied AFTER merge so gradient flows through the final v_selected
+        # that actually enters the LLM, regardless of whether merge is active.
         #   correction = s_N_at_selected - s_N_at_selected.detach()  [= 0 in forward]
         #   v_selected_out = v_selected * (1 + correction)           [= v_selected in forward]
-        #   gradient: d(loss)/d(s_N_i) = Σ_d g_v[b,j,d] * v_selected[b,j,d]  [dot product]
+        #   gradient: d(loss)/d(s_N_i) = Sigma_d g_v[b,j,d] * v_selected[b,j,d]
         #   This is tau-independent and remains active throughout training.
         if self.training and not self.use_stub_llm:
             scores_at_selected = torch.gather(s_N, dim=1, index=idx)      # [B, k]
             correction = scores_at_selected - scores_at_selected.detach() # [B, k], = 0 fwd
             v_selected = v_selected * (1.0 + correction.unsqueeze(-1))    # [B, k, D], identity fwd
 
-        # Step 3c: Orthogonal soft recycling (Phase 1.5)
-        # Compress N-k unselected background tokens into 4 summary vectors and
-        # prepend them to the LLM prefix. This recovers information hard-dropped
-        # in Phase 1, expected to close the 3.5% gap to 76% VQAv2.
-        #
-        # Orthogonal deflation: project out mean(v_selected) from unselected tokens
-        # before pooling, so summary slots carry COMPLEMENTARY information (not
-        # redundant near-threshold tokens). See Efficient3D / innovations.md Concept 3.
-        if not self.use_stub_llm and self.unsel_pooler is not None:
-            v_unsel, unsel_idx = complement_gather(v_full, idx)   # [B, N-k, D], [B, N-k]
-
-            # Orthogonal deflation: remove the selected-token subspace
-            v_sel_mean = v_selected.mean(dim=1)                   # [B, D]
-            v_sel_norm_sq = (
-                (v_sel_mean * v_sel_mean).sum(-1, keepdim=True) + 1e-8
-            )                                                      # [B, 1]
-            dot = (v_unsel * v_sel_mean.unsqueeze(1)).sum(
-                -1, keepdim=True
-            )                                                      # [B, N-k, 1]
-            proj_coeff = dot / v_sel_norm_sq.unsqueeze(1)         # [B, N-k, 1]
-            v_unsel_orth = (
-                v_unsel - proj_coeff * v_sel_mean.unsqueeze(1)
-            )                                                      # [B, N-k, D]
-
-            # Pool orthogonal background into 4 summary tokens
-            # attn_weights [B, n_slots, N-k]: used by residual_pooler_distill_loss
-            v_summary, v_summary_prenorm, pooler_attn = self.unsel_pooler(
-                v_unsel_orth, unsel_idx
-            )  # [B, 4, D], [B, 4, D], [B, 4, N-k]
-
-            # LLM prefix: [4 summary | k selected] — total k+4 tokens
-            v_input = torch.cat([v_summary, v_selected], dim=1)   # [B, k+4, D]
-        else:
-            v_input = v_selected                                   # [B, k, D]
+        v_input = v_selected  # ALWAYS [B, k, D] — no extra tokens, no mismatch
 
         # Step 4: Forward through LLM backbone
-        # _llava_forward uses B, seq_len, _ = v_input.shape so k here = k+4 (or k in stub mode)
         if self.use_stub_llm:
             llm_outputs = self.llm(visual_tokens=v_selected)
         else:
@@ -567,14 +599,6 @@ class TCViTokModel(nn.Module):
             outputs["mask_ste"] = mask_ste
         if q_embed is not None:
             outputs["q_embed"] = q_embed.detach()  # frozen CLIP encoder, no gradient needed
-
-        # Pooler supervision tensors (v4+): only available during training.
-        # v_summary_prenorm → slot_orthogonality_loss (slot diversity)
-        # pooler_attn + unsel_idx → residual_pooler_distill_loss (attend to teacher residual)
-        if self.training and not self.use_stub_llm and self.unsel_pooler is not None:
-            outputs["v_summary_prenorm"] = v_summary_prenorm  # [B, 4, D]
-            outputs["pooler_attn"] = pooler_attn              # [B, 4, N-k]
-            outputs["unsel_idx"] = unsel_idx                  # [B, N-k]
 
         return outputs
 
@@ -901,15 +925,24 @@ class TCViTokModel(nn.Module):
     ) -> torch.Tensor:
         """Select visual tokens via TPN. Override in subclasses for ablations.
 
+        Applies token merge at eval too — exact same path as training.
+
         Returns:
-            v_selected: Gathered visual tokens, Shape: [B, k, 1024]
+            v_selected: Gathered (and optionally merged) visual tokens, Shape: [B, k, 1024]
         """
         v_coarse = self.coarse_encoder(images_coarse)
         q_embed = self.text_encoder(questions)
-        idx, _, __ = self.tpn(
+        idx, s_N, _ = self.tpn(
             v_coarse=v_coarse, q_embed=q_embed, k=self.k, tau=0.1, training=False,
         )
         v_full = self.full_encoder(images_full)
+
+        # Apply token merge at eval too — matches training path exactly
+        if self.merge_beta > 0:
+            return informative_token_merge(
+                v_fine=v_full, idx=idx, s_N=s_N,
+                beta=self.merge_beta, tau_merge=self.merge_tau,
+            )
         return gather_tokens(v_full, idx)
 
     @torch.no_grad()
@@ -1177,13 +1210,15 @@ class TCViTokModel(nn.Module):
                     param.requires_grad = False
 
         elif phase in [1, 2]:
-            # Train TPN + LoRA + mm_projector + unsel_pooler (Phase 1.5)
+            # Train TPN + LoRA + mm_projector
             for param in self.tpn.parameters():
                 param.requires_grad = True
-            # UnselectedPooler: new module, always trainable in Phase 1+
+            # UnselectedPooler: freeze when merge is active (pooler is not called).
+            # Keeps it in state_dict for backward compat with old checkpoints.
             if self.unsel_pooler is not None:
+                freeze_pooler = self.merge_beta > 0
                 for param in self.unsel_pooler.parameters():
-                    param.requires_grad = True
+                    param.requires_grad = not freeze_pooler
             if self.use_stub_llm:
                 for param in self.llm.parameters():
                     param.requires_grad = True

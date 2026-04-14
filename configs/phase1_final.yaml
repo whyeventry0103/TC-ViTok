@@ -1,0 +1,70 @@
+# Phase 1 Final: TPN selection + parameter-free token merge + strong LoRA
+# Replaces the failed Phase 1.5 UnselectedPooler with informative_token_merge.
+# Zero new trainable params from merge. Same k=144 tokens at train AND eval.
+
+defaults:
+  - base
+
+phase: 1
+description: "Final architecture: TPN selection + parameter-free token merge + strong LoRA"
+
+model:
+  k: 144
+  merge_beta: 0.3          # merge strength (0 = no merge, 1 = full replace)
+  merge_tau: 0.1            # assignment sharpness (0.1 = nearly hard)
+
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 80000
+  batch_size: 4
+  grad_accum_steps: 16     # effective batch = 4 x 16 x 2 GPUs = 128
+
+  # === ONLY 3 LOSS TERMS ===
+  lambda_max: 0.0           # L1 useless with instance norm
+  lambda_entropy: 0.02      # spatial diversity (proven in Phase 1 v3)
+  lambda_diversity: 0.1     # query diversity (proven in Phase 1 v3)
+
+  # === ALL PHASE 1.5 LOSSES DISABLED ===
+  lambda_spread: 0.0
+  lambda_distill: 0.0
+  lambda_boundary: 0.0
+  lambda_slot_orth: 0.0
+  lambda_residual_distill: 0.0
+
+  # LoRA warm-freeze: 3000 steps (validated in Phase 1 v3)
+  lora_warmfreeze_steps: 3000
+
+  # Learning rates
+  lr_tpn: 3e-3              # TPN learns quickly
+  lr_lora: 1e-4             # slightly lower for rank 64 (prevents overshoot)
+  lr_mlp: 5e-4              # mm_projector
+
+  # Tau annealing: 1.0 -> 0.3 (NOT 0.1 -- prevent STE gradient starvation)
+  tau_max: 1.0
+  tau_min: 0.3
+
+  # Standard
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  warmup_steps: 1000
+  T_warmup: 5000
+
+data:
+  datasets: ["vqav2", "gqa"]   # BOTH datasets
+  train_samples: null
+
+logging:
+  wandb_run_name: "phase1_final_merge"
+  eval_interval: 5000
+  max_val_batches: 100
+  log_interval: 50
+  save_interval: 5000
+
+checkpoint:
+  load_from: "runs/phase0_v4/phase0/best.ckpt"
+  strict: false
