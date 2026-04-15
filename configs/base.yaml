@@ -17,6 +17,11 @@ model:
     M: 49             # Coarse spatial tokens (7×7)
     N: 576            # Full resolution tokens (24×24)
 
+  # Adaptive budget: variable per-sample token count
+  adaptive_budget: false   # enable adaptive budget mode
+  k_min: 36                # minimum tokens per sample (6.25%)
+  k_max: 288               # maximum tokens per sample (50%)
+
   # LoRA configuration for LLaVA backbone
   lora:
     rank: 32
@@ -55,7 +60,12 @@ training:
   lr_tpn: 1e-3
   lr_lora: 2e-4
   lr_mlp: 5e-4
+  lr_budget: null     # BudgetPredictor LR (null → defaults to lr_tpn)
   weight_decay: 0.01
+
+  # Adaptive budget training
+  lambda_budget: 0.0          # budget penalty weight (0 = disabled)
+  budget_warmup_steps: 0      # freeze BudgetPredictor for first N steps
 
   # Gradient clipping
   max_grad_norm: 1.0

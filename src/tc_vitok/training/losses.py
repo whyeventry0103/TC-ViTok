@@ -136,10 +136,15 @@ def entropy_from_idx(idx: torch.Tensor, N: int = 576) -> torch.Tensor:
     eps = 1e-10
     B = idx.shape[0]
 
-    # Reconstruct batch-mean selection frequency from indices
+    # Reconstruct batch-mean selection frequency from indices.
+    # Filter out -1 padding from adaptive budget mode.
+    flat_idx = idx.flatten()
+    valid = flat_idx >= 0
+    flat_idx = flat_idx[valid]
+
     m_bar = torch.zeros(N, device=idx.device)
-    m_bar.scatter_add_(0, idx.flatten(),
-                       torch.ones_like(idx.flatten(), dtype=torch.float))
+    m_bar.scatter_add_(0, flat_idx,
+                       torch.ones_like(flat_idx, dtype=torch.float))
     m_bar = m_bar / B  # normalize by batch size
 
     # Normalize to probability distribution
@@ -377,6 +382,31 @@ def residual_pooler_distill_loss(
     return (total_kl / n_slots).clamp(max=10.0)
 
 
+def budget_loss(
+    k_effective: torch.Tensor,
+    N: int = 576,
+) -> torch.Tensor:
+    """Budget penalty: encourages the model to use fewer tokens.
+
+    Penalizes the fraction of tokens selected, averaged over the batch.
+    Fully differentiable through k_effective (sigmoid sum from adaptive STE).
+
+    The budget loss provides direct gradient to the BudgetPredictor:
+        L_budget = mean(k_effective / N)  ∈ [k_min/N, k_max/N]
+
+    Higher λ_budget pushes toward fewer tokens (more compression).
+    Lower λ_budget allows more tokens (higher accuracy).
+
+    Args:
+        k_effective: Differentiable expected token count per sample [B]
+        N: Total token positions (576)
+
+    Returns:
+        loss: Scalar mean fraction of tokens used
+    """
+    return (k_effective / N).mean()
+
+
 def compute_total_loss(
     logits: Optional[torch.Tensor],
     labels: Optional[torch.Tensor],
@@ -392,6 +422,7 @@ def compute_total_loss(
     lambda_boundary: float = 0.0,
     lambda_slot_orth: float = 0.0,
     lambda_residual_distill: float = 0.0,
+    lambda_budget: float = 0.0,
     boundary_margin: float = 0.1,
     mask_ste: Optional[torch.Tensor] = None,
     mask_soft: Optional[torch.Tensor] = None,
@@ -400,18 +431,20 @@ def compute_total_loss(
     v_summary_prenorm: Optional[torch.Tensor] = None,
     pooler_attn: Optional[torch.Tensor] = None,
     unsel_idx: Optional[torch.Tensor] = None,
+    k_effective: Optional[torch.Tensor] = None,
     gamma: float = 0.5,
 ) -> dict[str, torch.Tensor]:
-    """Compute total training loss with Phase 1.5 v4 regularization terms.
+    """Compute total training loss with all regularization terms.
 
-    Total loss (v5):
-        L = L_VQA + λ_ent * L_ent + λ_div * L_div
+    Total loss:
+        L = L_VQA + λ_ent * L_ent + λ_div * L_div + λ_budget * L_budget
               + λ_boundary * L_boundary + λ_slot_orth * L_slot_orth
               + λ_residual * L_residual
-              + λ_spread * L_spread + λ_distill * L_distill  (both 0 in v5)
+              + λ_spread * L_spread + λ_distill * L_distill
 
     All terms are non-negative or bounded:
-        VQA ≥ 0, boundary ≥ 0, slot_orth ∈ [0,1], residual ≥ 0, entropy ∈ [-6.36, 0]
+        VQA ≥ 0, budget ∈ [k_min/N, k_max/N], boundary ≥ 0, slot_orth ∈ [0,1],
+        residual ≥ 0, entropy ∈ [-6.36, 0]
     No unbounded negative terms → VQA dominates the gradient budget.
 
     Args:
@@ -424,24 +457,26 @@ def compute_total_loss(
         lambda_sparsity: L1 sparsity weight (0.0 = disabled)
         lambda_entropy: Entropy weight — 0.02 to encourage diverse selection
         lambda_diversity: Within-batch diversity weight (0.1)
-        lambda_spread: Spatial spread weight (0.0 in v4 — removed)
-        lambda_distill: KL distillation weight (0.0 in v4 — replaced by boundary)
-        lambda_boundary: Boundary margin loss weight (0.05 in v4/v5)
-        lambda_slot_orth: Slot orthogonality penalty weight (0.01 in v4/v5)
-        lambda_residual_distill: Residual pooler distillation weight (0.02 in v5)
+        lambda_spread: Spatial spread weight (0.0 = disabled)
+        lambda_distill: KL distillation weight (0.0 = disabled)
+        lambda_boundary: Boundary margin loss weight
+        lambda_slot_orth: Slot orthogonality penalty weight
+        lambda_residual_distill: Residual pooler distillation weight
+        lambda_budget: Budget penalty weight for adaptive budget mode
         boundary_margin: Hinge margin for boundary loss (0.1)
         mask_ste: STE selection mask [B, N] (optional)
-        mask_soft: sigmoid(s_N / tau) [B, N] (optional, unused in v5)
+        mask_soft: sigmoid(s_N / tau) [B, N] (optional)
         q_embed: CLIP text embeddings [B, d_q] for diversity loss (optional)
         teacher_importance: Teacher cosine sim scores [B, N] (optional)
         v_summary_prenorm: Pre-LayerNorm pooler outputs [B, n_slots, D] (optional)
         pooler_attn: Head-averaged cross-attn weights [B, n_slots, N-k] (optional)
         unsel_idx: Unselected token indices [B, N-k] for residual distill (optional)
+        k_effective: Differentiable expected token count [B] (adaptive budget)
         gamma: Mask similarity threshold for diversity loss (default 0.5)
 
     Returns:
         loss_dict: {total, vqa, sparsity, entropy, diversity, spread, distill,
-                    boundary, slot_orth, residual_distill}
+                    boundary, slot_orth, residual_distill, budget, k_effective_mean}
     """
     from ..models.masking import compute_spatial_entropy, compute_diversity_loss
 
@@ -513,6 +548,15 @@ def compute_total_loss(
             pooler_attn, teacher_importance, unsel_idx
         )
 
+    # Budget penalty (adaptive budget mode): penalizes fraction of tokens used.
+    # Provides direct gradient to BudgetPredictor to reduce token count.
+    # Typical contribution: 0.1 × 0.25 = 0.025 (at k=144, k/N=0.25).
+    loss_budget_val = scores.new_zeros(())
+    k_eff_mean = scores.new_zeros(())
+    if k_effective is not None and lambda_budget > 0:
+        loss_budget_val = budget_loss(k_effective, N=N)
+        k_eff_mean = k_effective.detach().mean()
+
     loss_total = (
         loss_vqa
         + lambda_sparsity * loss_sparsity
@@ -523,6 +567,7 @@ def compute_total_loss(
         + lambda_boundary * loss_boundary
         + lambda_slot_orth * loss_slot_orth
         + lambda_residual_distill * loss_residual_distill
+        + lambda_budget * loss_budget_val
     )
 
     return {
@@ -536,4 +581,6 @@ def compute_total_loss(
         "boundary": loss_boundary.detach() if isinstance(loss_boundary, torch.Tensor) else torch.tensor(0.0),
         "slot_orth": loss_slot_orth.detach() if isinstance(loss_slot_orth, torch.Tensor) else torch.tensor(0.0),
         "residual_distill": loss_residual_distill.detach() if isinstance(loss_residual_distill, torch.Tensor) else torch.tensor(0.0),
+        "budget": loss_budget_val.detach() if isinstance(loss_budget_val, torch.Tensor) else torch.tensor(0.0),
+        "k_effective_mean": k_eff_mean if isinstance(k_eff_mean, torch.Tensor) else torch.tensor(0.0),
     }

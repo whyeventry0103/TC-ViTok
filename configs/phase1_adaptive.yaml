@@ -1,0 +1,80 @@
+# Phase 1 Adaptive: Variable per-sample token budget
+# Builds on Phase 1 Final architecture (TPN + token merge + strong LoRA).
+# Adds BudgetPredictor (~25K params) that predicts how many tokens each
+# sample needs. Trained from Phase 1 Final checkpoint.
+#
+# Key hyperparameter: lambda_budget controls the compression-accuracy tradeoff.
+# Sweep lambda_budget in {0.05, 0.1, 0.2, 0.4} to trace the Pareto curve.
+
+defaults:
+  - base
+
+phase: 1
+description: "Adaptive budget: per-sample variable token count with budget penalty"
+
+model:
+  k: 144                    # default budget (used as midpoint for budget predictor init)
+  adaptive_budget: true      # enable adaptive selection
+  k_min: 36                 # minimum tokens (6.25% of 576)
+  k_max: 288                # maximum tokens (50% of 576)
+  merge_beta: 0.3           # merge strength (same as phase1_final)
+  merge_tau: 0.1            # assignment sharpness
+
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 40000
+  batch_size: 4
+  grad_accum_steps: 16      # effective batch = 4 x 16 x 2 GPUs = 128
+
+  # === LOSS TERMS ===
+  lambda_max: 0.0            # L1 useless with instance norm
+  lambda_entropy: 0.02       # spatial diversity
+  lambda_diversity: 0.1      # query diversity
+  lambda_budget: 0.1         # budget penalty (SWEEP: 0.05, 0.1, 0.2, 0.4)
+
+  # === ALL LEGACY LOSSES DISABLED ===
+  lambda_spread: 0.0
+  lambda_distill: 0.0
+  lambda_boundary: 0.0
+  lambda_slot_orth: 0.0
+  lambda_residual_distill: 0.0
+
+  # Warmup schedules
+  lora_warmfreeze_steps: 1000  # shorter than phase1_final (TPN already trained)
+  budget_warmup_steps: 2000    # freeze budget predictor for first 2K steps
+
+  # Learning rates
+  lr_tpn: 1e-3               # TPN (continuing from trained checkpoint)
+  lr_lora: 1e-4              # LoRA (rank 64)
+  lr_mlp: 5e-4               # mm_projector
+  lr_budget: 1e-3             # budget predictor (same as TPN — lightweight head)
+
+  # Tau annealing: 1.0 -> 0.3 (same as phase1_final)
+  tau_max: 1.0
+  tau_min: 0.3
+
+  # Standard
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  warmup_steps: 500
+  T_warmup: 2000
+
+data:
+  datasets: ["vqav2", "gqa"]
+  train_samples: null
+
+logging:
+  wandb_run_name: "phase1_adaptive_budget"
+  eval_interval: 2000
+  max_val_batches: 100
+  log_interval: 50
+  save_interval: 2000
+
+checkpoint:
+  load_from: "runs/phase1_final/best.ckpt"
+  strict: false

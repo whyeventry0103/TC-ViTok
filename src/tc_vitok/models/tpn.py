@@ -23,6 +23,75 @@ import torch.nn.functional as F
 from einops import rearrange
 
 
+class BudgetPredictor(nn.Module):
+    """Predicts per-sample token budget fraction for adaptive selection.
+
+    Takes the TPN's cross-attention context vector (which encodes how the
+    query relates to the image) and predicts what fraction of tokens should
+    be selected. The output is a continuous fraction in [k_min/N, k_max/N],
+    which is fully differentiable — gradient flows from VQA loss through
+    the selected tokens back to this predictor, and the budget loss
+    λ * mean(k/N) provides direct gradient pressure to reduce k.
+
+    Architecture: 2-layer MLP, ~25K params (384*64 + 64 + 64*1 + 1 = 24,705).
+
+    Args:
+        d_model: Input dimension from TPN context (384)
+        k_min: Minimum tokens to select (36 = 6.25%)
+        k_max: Maximum tokens to select (288 = 50%)
+        N: Total number of visual tokens (576)
+    """
+
+    def __init__(
+        self,
+        d_model: int = 384,
+        k_min: int = 36,
+        k_max: int = 288,
+        N: int = 576,
+    ):
+        super().__init__()
+        assert k_min < k_max, (
+            f"k_min ({k_min}) must be strictly less than k_max ({k_max}). "
+            f"Equal values make BudgetPredictor a dead weight (zero output range)."
+        )
+        self.k_min = k_min
+        self.k_max = k_max
+        self.N = N
+
+        self.head = nn.Sequential(
+            nn.Linear(d_model, 64),
+            nn.GELU(),
+            nn.Linear(64, 1),
+        )
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize to predict mid-range budget (~144 tokens) at step 0."""
+        for module in self.head.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+    def forward(self, context: torch.Tensor) -> torch.Tensor:
+        """Predict per-sample token fraction.
+
+        Args:
+            context: TPN cross-attention context vector [B, d_model]
+
+        Returns:
+            k_frac: Target fraction of tokens to keep [B], in [k_min/N, k_max/N]
+        """
+        raw = self.head(context)              # [B, 1]
+        fraction = torch.sigmoid(raw)         # [B, 1] in (0, 1)
+        # Map (0,1) → [k_min/N, k_max/N]
+        k_frac = self.k_min / self.N + fraction * (self.k_max - self.k_min) / self.N
+        return k_frac.squeeze(-1)             # [B]
+
+    def get_num_params(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
 class TokenizationPolicyNetwork(nn.Module):
     """Lightweight policy network for learned visual token selection.
 
@@ -114,6 +183,10 @@ class TokenizationPolicyNetwork(nn.Module):
         k: int,
         tau: float = 1.0,
         training: bool = True,
+        adaptive_budget: bool = False,
+        budget_predictor: 'BudgetPredictor | None' = None,
+        k_min: int = 36,
+        k_max: int = 288,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass of the Tokenization Policy Network.
 
@@ -125,19 +198,30 @@ class TokenizationPolicyNetwork(nn.Module):
         5. Bilinear upsample 7×7 → 24×24
         6. Gumbel-Sigmoid STE for differentiable top-k
 
+        When adaptive_budget=True, uses BudgetPredictor to determine per-sample
+        variable k instead of fixed k. The budget predictor sees the same
+        cross-attention context used for scoring, and predicts a threshold that
+        controls how many tokens pass selection.
+
         Args:
             v_coarse: Coarse visual features from DINOv2-S
                       Shape: [B, 49, d_coarse]
             q_embed: Text embeddings from CLIP [EOS]
                      Shape: [B, d_text]
-            k: Number of tokens to select (token budget)
+            k: Number of tokens to select (token budget, used when adaptive_budget=False)
             tau: Gumbel-Sigmoid temperature parameter
             training: Whether in training mode (affects STE behavior)
+            adaptive_budget: If True, use BudgetPredictor for variable k
+            budget_predictor: BudgetPredictor module (required when adaptive_budget=True)
+            k_min: Minimum tokens for adaptive mode (default 36)
+            k_max: Maximum tokens for adaptive mode (default 288)
 
         Returns:
-            idx: Top-k gather indices, Shape: [B, k]
+            idx: Top-k gather indices, Shape: [B, k] (fixed) or [B, k_max_batch] (adaptive)
             s_N: Raw importance scores, Shape: [B, N]
                  (for loss computation — gradients flow through STE)
+            mask_ste: STE mask [B, N] (training) or None (eval)
+            k_effective: Differentiable expected token count [B] (adaptive) or None (fixed)
         """
         B = v_coarse.size(0)
 
@@ -197,23 +281,42 @@ class TokenizationPolicyNetwork(nn.Module):
         s_N_std = s_N.std(dim=-1, keepdim=True).clamp(min=1e-8)
         s_N = (s_N - s_N_mean) / s_N_std
 
-        # Step 8: Gumbel-Sigmoid STE for differentiable top-k
-        from .masking import gumbel_sigmoid_ste
+        # Step 8: Token selection — fixed-k or adaptive budget
+        if adaptive_budget and budget_predictor is not None:
+            from .masking import adaptive_gumbel_sigmoid_ste
 
-        if training:
-            mask_ste, idx = gumbel_sigmoid_ste(s_N, k=k, tau=tau, training=True)
-            # Verify gradient flow (critical diagnostic)
-            assert mask_ste.grad_fn is not None, (
-                "Mask has no gradient! STE is broken. "
-                "Check gumbel_sigmoid_ste implementation."
-            )
-            # Return mask_ste so tc_vitok_model can route VQA gradient back to TPN.
-            # Without this, gather_tokens(v_full, idx) is NOT differentiable w.r.t. idx,
-            # so TPN would only receive gradient from sparsity loss (→ scores ≈ 0 forever).
-            return idx, s_N, mask_ste
+            # BudgetPredictor uses the same cross-attention context as scoring
+            k_frac = budget_predictor(ctx)  # [B] — fraction in [k_min/N, k_max/N]
+
+            if training:
+                mask_ste, idx, k_effective = adaptive_gumbel_sigmoid_ste(
+                    s_N, k_frac=k_frac, tau=tau, training=True,
+                    k_min=k_min, k_max=k_max, N=self.N,
+                )
+                assert mask_ste.grad_fn is not None, (
+                    "Adaptive mask has no gradient! STE is broken."
+                )
+                return idx, s_N, mask_ste, k_effective
+            else:
+                _, idx, k_effective = adaptive_gumbel_sigmoid_ste(
+                    s_N, k_frac=k_frac, tau=tau, training=False,
+                    k_min=k_min, k_max=k_max, N=self.N,
+                )
+                return idx, s_N, None, k_effective
         else:
-            _, idx = gumbel_sigmoid_ste(s_N, k=k, tau=tau, training=False)
-            return idx, s_N, None
+            # Original fixed-k path
+            from .masking import gumbel_sigmoid_ste
+
+            if training:
+                mask_ste, idx = gumbel_sigmoid_ste(s_N, k=k, tau=tau, training=True)
+                assert mask_ste.grad_fn is not None, (
+                    "Mask has no gradient! STE is broken. "
+                    "Check gumbel_sigmoid_ste implementation."
+                )
+                return idx, s_N, mask_ste, None
+            else:
+                _, idx = gumbel_sigmoid_ste(s_N, k=k, tau=tau, training=False)
+                return idx, s_N, None, None
 
     def get_num_params(self) -> int:
         """Return the number of trainable parameters."""

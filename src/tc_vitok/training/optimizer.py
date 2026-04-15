@@ -21,6 +21,7 @@ def create_optimizer(
     lr_lora: float = 2e-4,
     lr_mlp: float = 5e-4,
     lr_pooler: float | None = None,
+    lr_budget: float | None = None,
     weight_decay: float = 0.01,
     phase: int = 1,
 ) -> Optimizer:
@@ -126,6 +127,23 @@ def create_optimizer(
                         "lr": pooler_lr,
                         "weight_decay": weight_decay,
                     })
+
+
+        # BudgetPredictor (adaptive budget) — predicts per-sample token fraction.
+        # Outside the stub/llava branch: applies to BOTH stub and real LLaVA.
+        # Uses TPN-level LR by default (~1e-3) since it's also a lightweight head.
+        if hasattr(model, "budget_predictor") and model.budget_predictor is not None:
+            budget_lr = lr_budget if lr_budget is not None else lr_tpn
+            budget_params = [
+                p for p in model.budget_predictor.parameters()
+                if p.requires_grad
+            ]
+            if budget_params:
+                param_groups.append({
+                    "params": budget_params,
+                    "lr": budget_lr,
+                    "weight_decay": weight_decay,
+                })
 
     # Create AdamW optimizer
     optimizer = AdamW(param_groups)
