@@ -16,7 +16,7 @@ model:
   lora:
     rank: 64
     alpha: 128
-    targets: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"]
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
     dropout: 0.05
 
 training:
@@ -41,7 +41,7 @@ training:
 
   # Learning rates
   lr_tpn: 3e-3              # TPN learns quickly
-  lr_lora: 1e-4             # slightly lower for rank 64 (prevents overshoot)
+  lr_lora: 2e-4             # proven rate from Phase 1 v3
   lr_mlp: 5e-4              # mm_projector
 
   # Tau annealing: 1.0 -> 0.3 (NOT 0.1 -- prevent STE gradient starvation)

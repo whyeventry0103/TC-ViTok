@@ -588,22 +588,30 @@ class TCViTokModel(nn.Module):
         # Step 3d: STE gradient routing — connect VQA loss to TPN parameters.
         # Applied AFTER merge so gradient flows through the final v_selected
         # that actually enters the LLM, regardless of whether merge is active.
-        #   correction = s_N_at_selected - s_N_at_selected.detach()  [= 0 in forward]
-        #   v_selected_out = v_selected * (1 + correction)           [= v_selected in forward]
-        #   gradient: d(loss)/d(s_N_i) = Sigma_d g_v[b,j,d] * v_selected[b,j,d]
-        #   This is tau-independent and remains active throughout training.
+        #
+        # Two correction paths (both zero in forward, provide gradient in backward):
+        #   correction_tpn = s_N_at_selected - s_N_at_selected.detach()
+        #       → routes VQA gradient to TPN score parameters
+        #   correction_budget = mask_ste_at_selected - mask_ste_at_selected.detach()
+        #       → routes VQA gradient to BudgetPredictor via m_soft → threshold → k_frac
+        #
+        # Without correction_budget, BudgetPredictor only receives gradient from
+        # L_budget = λ * mean(k_eff/N), which always pushes toward k_min (fewer tokens).
+        # The dual correction lets VQA loss push BudgetPredictor toward MORE tokens
+        # when accuracy benefits, creating the desired compression-accuracy tradeoff.
         if self.training and not self.use_stub_llm:
-            # For adaptive mode, idx may have -1 padding — clamp for gather.
-            # Mask correction at padding positions to prevent spurious gradient
-            # flow to s_N[:, 0] from clamped -1 indices.
             safe_idx = idx.clamp(min=0)
             scores_at_selected = torch.gather(s_N, dim=1, index=safe_idx)  # [B, k]
-            correction = scores_at_selected - scores_at_selected.detach()  # [B, k], = 0 fwd
-            if self.adaptive_budget:
+            correction_tpn = scores_at_selected - scores_at_selected.detach()  # [B, k], = 0 fwd
+
+            if self.adaptive_budget and mask_ste is not None:
+                mask_at_selected = torch.gather(mask_ste, dim=1, index=safe_idx)  # [B, k]
+                correction_budget = mask_at_selected - mask_at_selected.detach()  # [B, k], = 0 fwd
+                correction = correction_tpn + correction_budget
                 valid_mask = (idx >= 0).float().unsqueeze(-1)  # [B, k, 1]
                 v_selected = v_selected * (1.0 + correction.unsqueeze(-1) * valid_mask)
             else:
-                v_selected = v_selected * (1.0 + correction.unsqueeze(-1))     # [B, k, D], identity fwd
+                v_selected = v_selected * (1.0 + correction_tpn.unsqueeze(-1))  # [B, k, D], identity fwd
 
         v_input = v_selected
 
@@ -656,42 +664,35 @@ class TCViTokModel(nn.Module):
     ) -> torch.Tensor:
         """Gather and merge tokens with per-sample variable k.
 
-        For adaptive budget mode, idx has shape [B, k_max_batch] where
-        some entries are -1 (padding). Each sample has a different number
-        of valid tokens. We process per-sample to handle variable lengths,
-        then pad visual tokens to max_k with zeros (attention mask handles
-        the rest in _llava_forward).
+        Gather is vectorized (clamp + mask). Merge must be per-sample because
+        complement_gather assumes k unique indices, but clamped padding creates
+        duplicates that would crash the reshape.
 
         Args:
             v_full: Full CLIP features [B, N, D]
-            idx: Padded indices [B, k_max_batch], -1 for padding
+            idx: Padded indices [B, k_max], -1 for padding
             s_N: TPN scores [B, N]
 
         Returns:
-            v_selected: Padded selected tokens [B, k_max_batch, D]
+            v_selected: Padded selected tokens [B, k_max, D]
         """
         B, k_max_batch = idx.shape
         D = v_full.shape[-1]
-        device = v_full.device
+        valid_mask = (idx >= 0)  # [B, k_max]
+        safe_idx = idx.clamp(min=0)  # [B, k_max]
 
-        v_selected = torch.zeros(B, k_max_batch, D, device=device, dtype=v_full.dtype)
+        # Vectorized gather
+        v_selected = gather_tokens(v_full, safe_idx)  # [B, k_max, D]
+        # Zero out padding positions
+        v_selected = v_selected * valid_mask.unsqueeze(-1).to(v_selected.dtype)
 
-        for b in range(B):
-            # Find valid (non-padding) indices for this sample
-            valid = idx[b] >= 0
-            valid_idx = idx[b][valid]  # [k_b]
-            k_b = valid_idx.shape[0]
-
-            if k_b == 0:
-                continue
-
-            # Gather valid tokens
-            v_b = gather_tokens(
-                v_full[b:b+1], valid_idx.unsqueeze(0)
-            ).squeeze(0)  # [k_b, D]
-
-            # Per-sample merge if enabled
-            if not self.use_stub_llm and self.merge_beta > 0:
+        # Token merge: per-sample (complement_gather requires unique indices)
+        if not self.use_stub_llm and self.merge_beta > 0:
+            for b in range(B):
+                valid_idx = idx[b][valid_mask[b]]  # [k_b]
+                k_b = valid_idx.shape[0]
+                if k_b == 0:
+                    continue
                 v_b = informative_token_merge(
                     v_fine=v_full[b:b+1],
                     idx=valid_idx.unsqueeze(0),
@@ -699,9 +700,7 @@ class TCViTokModel(nn.Module):
                     beta=self.merge_beta,
                     tau_merge=self.merge_tau,
                 ).squeeze(0)  # [k_b, D]
-
-            # Place into padded output
-            v_selected[b, :k_b] = v_b
+                v_selected[b, :k_b] = v_b
 
         return v_selected
 
@@ -811,14 +810,20 @@ class TCViTokModel(nn.Module):
 
             if questions is not None and answer_strings is not None:
                 # ── Training mode: build [visual | question | answer] per sample ──
+                # CRITICAL: Always use FIXED visual prefix length (= k for fixed mode,
+                # = k_max for adaptive mode). Variable-length prefixes shift text token
+                # position IDs by up to 252 positions across the batch, which is
+                # out-of-distribution for the pretrained LLM and destroys accuracy.
+                # Padding positions get attention_mask=0 so the LLM ignores them.
+                vis_len = k  # fixed prefix length for all samples
+                if k_per_sample is not None:
+                    vis_len = v_projected.shape[1]  # k_max in adaptive mode
+
                 all_embeds = []
                 all_masks = []
                 all_labels = []
 
                 for i in range(B):
-                    # Per-sample visual prefix length
-                    k_i = k_per_sample[i].item() if k_per_sample is not None else k
-
                     # Question prompt (no answer yet)
                     q_text = f"USER: {questions[i]}\nASSISTANT:"
                     q_ids = tokenizer(
@@ -846,24 +851,27 @@ class TCViTokModel(nn.Module):
                     a_ids = torch.cat([a_ids, eos])       # [T_a + 1]
                     a_embeds = embed_fn(a_ids)             # [T_a+1, H]
 
-                    # Full sequence: [visual_prefix | question | answer]
-                    # In adaptive mode, only use the first k_i valid visual tokens
-                    v_prefix = v_projected[i, :k_i]       # [k_i, H]
+                    # Full sequence: [visual_prefix (fixed len) | question | answer]
+                    # Always use all vis_len positions — padding is zeroed in v_projected
+                    # and masked via attention_mask below.
+                    v_prefix = v_projected[i, :vis_len]   # [vis_len, H]
                     seq_embeds = torch.cat([v_prefix, q_embeds, a_embeds], dim=0)
 
                     # Labels: -100 (ignore) for visual + all-but-last-question positions.
-                    # logits[i] predicts the token AFTER position i (causal LM), so:
-                    #   logits[k_i+T_q-1] = f([visual, full_question]) → should predict a_ids[0]
-                    # We shift answer labels one position LEFT vs the naive placement:
-                    #   ignore length = k_i + T_q - 1  (NOT k_i + T_q)
-                    #   trailing -100 pads to match seq_embeds length
+                    # Use fixed vis_len for ignore length to keep position IDs consistent.
                     ignore = torch.full(
-                        (k_i + len(q_ids) - 1,), -100, device=device, dtype=torch.long
+                        (vis_len + len(q_ids) - 1,), -100, device=device, dtype=torch.long
                     )
                     trailing = torch.tensor([-100], device=device, dtype=torch.long)
                     seq_labels = torch.cat([ignore, a_ids, trailing])  # same length as seq_embeds
 
+                    # Attention mask: 1 for real tokens, 0 for visual padding
                     attn_mask = torch.ones(len(seq_embeds), device=device, dtype=torch.long)
+                    if k_per_sample is not None:
+                        k_i = k_per_sample[i].item()
+                        # Mask out visual padding positions (k_i to vis_len)
+                        if k_i < vis_len:
+                            attn_mask[k_i:vis_len] = 0
 
                     all_embeds.append(seq_embeds)
                     all_masks.append(attn_mask)
@@ -994,38 +1002,29 @@ class TCViTokModel(nn.Module):
             embed_fn = lm.get_input_embeddings()
 
             if k_per_sample is not None:
-                # ── Adaptive mode: per-sample variable visual prefix ──
-                # Build sequences per-sample, pad to batch max
+                # ── Adaptive mode: fixed-length visual prefix with attention masking ──
+                # Use all k positions, mask invalid ones via attention_mask=0.
+                vis_len = v_projected.shape[1]  # k_max
                 prompts = [f"USER: {q}\nASSISTANT:" for q in questions]
-                all_embeds = []
-                all_masks = []
+                text_inputs = tokenizer(
+                    prompts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=128,
+                    add_special_tokens=True,
+                )
+                input_ids = text_inputs.input_ids.to(device)
+                text_attn = text_inputs.attention_mask.to(device)
+                text_embeds = embed_fn(input_ids)  # [B, T, H]
+
+                combined_embeds = torch.cat([v_projected, text_embeds], dim=1)  # [B, vis_len+T, H]
+
+                # Visual attention mask: 1 for valid tokens, 0 for padding
+                vis_attn = torch.zeros(B, vis_len, device=device, dtype=torch.long)
                 for i in range(B):
-                    k_i = k_per_sample[i].item()
-                    v_prefix = v_projected[i, :k_i]  # [k_i, H]
-
-                    t_ids = tokenizer(
-                        prompts[i],
-                        return_tensors="pt",
-                        padding=False,
-                        truncation=True,
-                        max_length=128,
-                        add_special_tokens=True,
-                    ).input_ids[0].to(device)
-                    t_embeds = embed_fn(t_ids)
-
-                    seq = torch.cat([v_prefix, t_embeds], dim=0)
-                    mask = torch.ones(seq.shape[0], device=device, dtype=torch.long)
-                    all_embeds.append(seq)
-                    all_masks.append(mask)
-
-                max_len = max(e.shape[0] for e in all_embeds)
-                H = all_embeds[0].shape[-1]
-                combined_embeds = torch.zeros(B, max_len, H, device=device, dtype=all_embeds[0].dtype)
-                combined_mask = torch.zeros(B, max_len, device=device, dtype=torch.long)
-                for i in range(B):
-                    L = all_embeds[i].shape[0]
-                    combined_embeds[i, :L] = all_embeds[i]
-                    combined_mask[i, :L] = all_masks[i]
+                    vis_attn[i, :k_per_sample[i]] = 1
+                combined_mask = torch.cat([vis_attn, text_attn], dim=1)  # [B, vis_len+T]
             else:
                 # ── Fixed-k mode: batched visual prefix ──
                 prompts = [f"USER: {q}\nASSISTANT:" for q in questions]

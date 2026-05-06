@@ -23,7 +23,7 @@ model:
   lora:
     rank: 64
     alpha: 128
-    targets: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"]
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
     dropout: 0.05
 
 training:
@@ -50,7 +50,7 @@ training:
 
   # Learning rates
   lr_tpn: 1e-3               # TPN (continuing from trained checkpoint)
-  lr_lora: 1e-4              # LoRA (rank 64)
+  lr_lora: 2e-4              # LoRA (rank 64, proven rate from Phase 1 v3)
   lr_mlp: 5e-4               # mm_projector
   lr_budget: 1e-3             # budget predictor (same as TPN — lightweight head)
 

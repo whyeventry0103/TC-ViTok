@@ -33,7 +33,12 @@ class BudgetPredictor(nn.Module):
     the selected tokens back to this predictor, and the budget loss
     λ * mean(k/N) provides direct gradient pressure to reduce k.
 
-    Architecture: 2-layer MLP, ~25K params (384*64 + 64 + 64*1 + 1 = 24,705).
+    Architecture: 2-layer MLP with score-entropy side input.
+    The entropy of TPN scores serves as a query-free complexity proxy:
+    high entropy → uniform scores → complex image → need more tokens.
+    This gives BudgetPredictor a meaningful input signal beyond the
+    cross-attention context, which otherwise only provides gradient
+    from L_budget (pushing k toward k_min).
 
     Args:
         d_model: Input dimension from TPN context (384)
@@ -58,31 +63,50 @@ class BudgetPredictor(nn.Module):
         self.k_max = k_max
         self.N = N
 
-        self.head = nn.Sequential(
+        # Score entropy projection: scalar entropy → 64-dim, added to hidden layer
+        self.entropy_proj = nn.Linear(1, 64)
+
+        self.head_pre = nn.Sequential(
             nn.Linear(d_model, 64),
             nn.GELU(),
-            nn.Linear(64, 1),
         )
+        self.head_post = nn.Linear(64, 1)
         self._init_weights()
 
     def _init_weights(self):
         """Initialize to predict mid-range budget (~144 tokens) at step 0."""
-        for module in self.head.modules():
+        for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
-    def forward(self, context: torch.Tensor) -> torch.Tensor:
+    def forward(self, context: torch.Tensor, s_N: torch.Tensor | None = None) -> torch.Tensor:
         """Predict per-sample token fraction.
 
         Args:
             context: TPN cross-attention context vector [B, d_model]
+            s_N: Instance-normalized TPN scores [B, N] (stop-gradient).
+                 Used to compute score entropy as complexity proxy.
 
         Returns:
             k_frac: Target fraction of tokens to keep [B], in [k_min/N, k_max/N]
         """
-        raw = self.head(context)              # [B, 1]
+        h = self.head_pre(context)            # [B, 64]
+
+        if s_N is not None:
+            # Score entropy: convert scores to probability distribution, compute H.
+            # High entropy → uniform scores → complex/cluttered → need more tokens.
+            # Stop-gradient: entropy is an INPUT signal, not a training target.
+            with torch.no_grad():
+                p = torch.softmax(s_N, dim=-1)        # [B, N]
+                ent = -(p * torch.log(p + 1e-8)).sum(dim=-1, keepdim=True)  # [B, 1]
+                # Normalize to ~[0, 1] range (max entropy = log(N) ≈ 6.36)
+                ent = ent / 6.36
+            # Project and add (stop-grad on entropy, but entropy_proj IS trained)
+            h = h + self.entropy_proj(ent)    # [B, 64]
+
+        raw = self.head_post(h)               # [B, 1]
         fraction = torch.sigmoid(raw)         # [B, 1] in (0, 1)
         # Map (0,1) → [k_min/N, k_max/N]
         k_frac = self.k_min / self.N + fraction * (self.k_max - self.k_min) / self.N
@@ -285,8 +309,8 @@ class TokenizationPolicyNetwork(nn.Module):
         if adaptive_budget and budget_predictor is not None:
             from .masking import adaptive_gumbel_sigmoid_ste
 
-            # BudgetPredictor uses the same cross-attention context as scoring
-            k_frac = budget_predictor(ctx)  # [B] — fraction in [k_min/N, k_max/N]
+            # BudgetPredictor uses cross-attention context + score entropy
+            k_frac = budget_predictor(ctx, s_N=s_N)  # [B] — fraction in [k_min/N, k_max/N]
 
             if training:
                 mask_ste, idx, k_effective = adaptive_gumbel_sigmoid_ste(
