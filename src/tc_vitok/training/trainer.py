@@ -645,7 +645,18 @@ class TCViTokTrainer:
         raw_model = self.model.module if self.is_ddp else self.model
         # strict=False: Phase transitions change trainable params — Phase 0
         # checkpoint won't have LoRA/projector weights needed by Phase 1.
-        result = raw_model.load_state_dict(checkpoint["model_state_dict"], strict=False)
+        # Also filter size-mismatched keys (e.g., LoRA rank change across phases)
+        # so they are re-initialized fresh rather than causing a hard crash.
+        ckpt_sd = checkpoint["model_state_dict"]
+        current_sd = raw_model.state_dict()
+        filtered_sd = {
+            k: v for k, v in ckpt_sd.items()
+            if k not in current_sd or current_sd[k].shape == v.shape
+        }
+        n_skipped = len(ckpt_sd) - len(filtered_sd)
+        if n_skipped:
+            print(f"Skipping {n_skipped} checkpoint keys with shape mismatch (LoRA rank change)")
+        result = raw_model.load_state_dict(filtered_sd, strict=False)
         if result.missing_keys:
             print(f"Checkpoint missing keys (expected for phase change): {len(result.missing_keys)} keys")
         if result.unexpected_keys:
