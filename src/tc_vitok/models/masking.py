@@ -133,11 +133,10 @@ def adaptive_gumbel_sigmoid_ste(
         idx = idx_full.clone()
         idx[~valid_mask] = -1
 
-        # Build binary mask from valid indices only
+        # Build binary mask from valid indices only.
+        # idx_full is from topk() → always in [0, N-1], no clamping needed.
         mask = torch.zeros_like(scores)
-        safe = idx_full.clone()
-        safe[~valid_mask] = 0  # clamp for scatter (won't matter, overwritten below)
-        mask.scatter_(1, safe, valid_mask.float())
+        mask.scatter_(1, idx_full, valid_mask.float())
 
         k_effective = k_hard.float()
         return mask, idx, k_effective
@@ -176,11 +175,13 @@ def adaptive_gumbel_sigmoid_ste(
     positions = torch.arange(k_max, device=scores.device).unsqueeze(0)  # [1, k_max]
     valid_mask = positions < k_hard.unsqueeze(1)  # [B, k_max]
 
-    # Build m_hard: scatter 1.0 only at valid positions
+    # Build m_hard: scatter 1.0 for valid positions, 0.0 for invalid.
+    # idx_full comes from topk() → values always in [0, N-1], no clamping needed.
+    # Clamping to 0 was a bug: multiple invalid positions would overwrite m_hard[b,0]
+    # with 0.0, corrupting selection of the most-important token when it sits at index 0.
+    # Since topk returns unique indices, each position appears at most once → safe.
     m_hard = torch.zeros_like(scores)  # [B, N]
-    safe_idx = idx_full.clone()
-    safe_idx[~valid_mask] = 0  # clamp for scatter safety
-    m_hard.scatter_(1, safe_idx, valid_mask.float())
+    m_hard.scatter_(1, idx_full, valid_mask.float())
 
     # Build padded idx with -1 for invalid
     idx = idx_full.clone()
