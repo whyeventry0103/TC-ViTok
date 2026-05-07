@@ -1,22 +1,25 @@
 # TC-ViTok: Task-Conditioned Visual Tokenization with Adaptive Budget
 
-**Learning a Query-Conditioned Token Selection Policy for Efficient Vision-Language Reasoning**
+**Learning an Adaptive Token Selection Policy for Efficient Vision-Language Reasoning**
 
-![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)
-![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
-![Institution: LUMS](https://img.shields.io/badge/Institution-LUMS-red.svg)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://python.org)
+[![PyTorch 2.6+](https://img.shields.io/badge/PyTorch-2.6%2B-orange.svg)](https://pytorch.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Institution: LUMS](https://img.shields.io/badge/Institution-LUMS-red.svg)](https://lums.edu.pk)
 
-Vision-Language Models like LLaVA encode a fixed 576 visual tokens for every image, regardless of query complexity. TC-ViTok introduces a lightweight **Tokenization Policy Network** (TPN, ~887K params) that learns a query-conditioned selection policy, dynamically choosing only k << 576 relevant tokens per sample. The **Fixed-k** variant (k=144) reduces LLM-side prefill cost by 75% while preserving unselected-token information through a parameter-free **informative token merge**. The **Adaptive Budget** extension adds a **BudgetPredictor** (~25K params) that predicts a per-sample variable budget (36–288 tokens), allowing the model to allocate more capacity to hard questions (spatial reasoning, counting, OCR) and less to easy ones (yes/no, color). By sweeping the budget penalty weight `lambda_budget`, we trace a Pareto curve of compression vs. accuracy. Both modes use Gumbel-Sigmoid straight-through estimation for end-to-end differentiable discrete selection.
+Vision-Language Models like LLaVA-1.5 feed all **576 visual tokens** from every image into a 7B LLM regardless of what the question asks. **TC-ViTok** replaces this with a learned, query-conditioned token selection policy: a lightweight Tokenization Policy Network (TPN, ~887K params) that scores all 576 tokens and keeps only the ones relevant to the question. We build on this with two extensions: **(1)** parameter-free **Informative Token Merge** that recycles discarded tokens into the selected set at zero additional parameter cost, and **(2)** an **Adaptive Budget** that learns per-sample variable token counts from 36 to 288 — more tokens for hard spatial or counting questions, fewer for easy ones.
 
-> **Note on compression scope:** The full CLIP ViT-L/14 encoder still processes all 576 tokens. Savings accrue at the LLM prefill stage, where the LLM sees only k + L_text tokens instead of 576 + L_text.
+> **Efficiency note:** CLIP ViT-L/14 still processes all 576 tokens during encoding. The compression savings are on the LLM prefill side: 75% FLOPs reduction at k=144, 94% at k=36. End-to-end savings depend on what fraction of inference time is LLM prefill.
 
 ---
 
 ## Key Contributions
 
-- **Base TC-ViTok:** A query-conditioned TPN (~887K params) learns to select k of 576 CLIP ViT-L/14 tokens via Gumbel-Sigmoid STE. Per-sample instance normalization on TPN scores prevents score saturation and gradient vanishing throughout training.
-- **Fixed-k with Informative Token Merge:** Unselected tokens (N-k = 432) are not discarded but merged back into the k selected tokens using a parameter-free cosine-similarity assignment weighted by TPN importance scores (beta=0.3). This recovers background information at zero parameter cost.
-- **Adaptive Budget:** A 2-layer BudgetPredictor MLP takes the TPN cross-attention context vector and score entropy as input, predicts a per-sample token fraction k_frac ∈ [k_min/N, k_max/N], and uses a differentiable threshold-shift trick to propagate gradients from the budget penalty loss back to the predictor. LoRA targets are narrowed to q/k/v/o (4 modules) for stability.
+1. **Base TC-ViTok** — Query-conditioned token selection via TPN + Gumbel-Sigmoid STE. Frames visual tokenization as differentiable policy learning rather than static cropping or heuristic pruning.
+
+2. **Informative Token Merge** — Parameter-free cosine-similarity-based merging of the 432 discarded tokens back into the 144 selected tokens, weighted by TPN importance scores. Zero new parameters, zero co-adaptation risk, no train-eval mismatch. Inspired by PruMerge-style approaches but query-conditioned via TPN scores.
+
+3. **Adaptive Budget** — A BudgetPredictor MLP (~25K params) predicts per-sample token fraction from TPN context and score entropy. A differentiable threshold trick makes the discrete token count differentiable, allowing the predictor to learn compression-accuracy tradeoffs from the VQA signal. Sweeping `lambda_budget` traces a Pareto curve.
 
 ---
 
@@ -24,236 +27,338 @@ Vision-Language Models like LLaVA encode a fixed 576 visual tokens for every ima
 
 ### 1. Core Idea: Visual Tokenization as Policy Learning
 
-Standard VLMs pass all N=576 spatial tokens from CLIP ViT-L/14 to the LLM. TC-ViTok reframes this as a learned routing problem:
+Standard VLMs apply fixed tokenization: every image → 576 tokens, regardless of question complexity. We reframe this as a policy learning problem:
 
 ```
-π: (Query Q, Image I_coarse) → Token Selection Indices S ⊆ {0, ..., N-1}
+π: (Query Q, Image I_coarse) → Token Selection Indices S ⊆ {1, ..., 576}
 ```
 
-The TPN receives a low-resolution coarse image (DINOv2-S, 49 tokens) and the CLIP text embedding of the query. It produces per-token importance scores over the 576 spatial positions of the full CLIP encoder, then selects the top-k positions. This makes token selection conditioned on *what is being asked*, not just what is visually salient.
+The policy (TPN) observes the question and a low-resolution image summary (49×384 from DINOv2-S), then selects which spatial regions of the full high-resolution CLIP encoding to pass to the LLM. Selected tokens are gathered with `torch.gather` — the LLM sees exactly k tokens instead of 576.
 
-### 2. Token Selection: Gumbel-Sigmoid STE
+---
 
-Discrete top-k selection is non-differentiable. We use the Gumbel-Sigmoid straight-through estimator (STE):
+### 2. Tokenization Policy Network (TPN) — ~887K params
+
+**Internal architecture (step by step):**
 
 ```
-u ~ Uniform(0, 1),  eps = 1e-8
-g = -log(-log(clamp(u, eps, 1-eps)))          # Gumbel(0, 1)
-noisy = s_N + g                                # noisy scores [B, N]
-m_soft = sigmoid(noisy / tau)                  # soft mask [B, N]
-idx    = topk(noisy, k).indices                # hard selection on noisy scores
-m_hard = scatter(idx, 1.0)                     # binary mask [B, N]
-mask_ste = m_hard - m_soft.detach() + m_soft   # STE: forward=m_hard, grad via m_soft
+q_embed [B, 512]   ──► W_Q ──► Q [B, 1, 384]    (question as single query)
+v_coarse [B, 49, 384] ──► W_K, W_V ──► K, V [B, 49, 384]
+
+Multi-Head Cross-Attention (4 heads):
+  attn = softmax(QK^T / √d_k)    [B, 4, 1, 49]
+  ctx = attn @ V                 [B, 1, 384]     ← attended visual context
+  α_avg = mean(attn, heads)      [B, 49]          ← spatial attention weights
+
+Score MLP:
+  LayerNorm([ctx; α_avg])        [B, 433]
+  → MLP → s_M                   [B, 49]          ← coarse importance scores
+
+Bilinear upsample 7×7 → 24×24:  [B, 576]
+Instance normalization:          mean=0, std=1    ← s_N per sample
 ```
 
-- **Forward:** exact hard top-k selection (binary mask, real compression via `torch.gather`).
-- **Backward:** gradient flows through `m_soft`, reaching all N TPN scores.
-- **Temperature annealing:** tau decays linearly from `tau_max` to `tau_min` over training. High tau = soft exploration; low tau = sharp exploitation. Phase 1 Final uses tau_min=0.3 (not 0.1) to avoid STE gradient starvation.
-- **Instance normalization:** TPN scores are normalized to zero-mean, unit-std per sample before STE. This prevents Adam from pushing scores to O(100), which would overwhelm Gumbel noise and collapse selection to a static crop.
+**Why instance normalization?** Without it, Adam pushes scores to ±100 within ~1000 steps. At that magnitude, Gumbel noise (τ≈1.0) is negligible → deterministic top-144 → same tokens always selected → entropy collapse. Instance norm anchors scores to mean=0, std=1 permanently. Since only relative ordering matters for top-k, no information is lost. No learnable parameters means the optimizer cannot tune it away.
 
-### 3. Informative Token Merge (Fixed-k Extension)
+---
 
-After TPN selects k=144 tokens, the remaining N-k=432 unselected tokens are merged back rather than discarded:
+### 3. Gumbel-Sigmoid Straight-Through Estimator (STE)
+
+Token selection is discrete (hard top-k), but training requires gradients. We use:
+
+**Forward pass — hard top-k with Gumbel exploration:**
+```
+g ~ Gumbel(0, 1)                                     # exploration noise
+noisy = s_N + g                                       # perturbed scores
+m_soft = sigmoid(noisy / τ)                           # soft mask (has gradient)
+idx = topk(noisy, k).indices                          # hard selection (no gradient)
+m_hard = scatter(idx, 1.0)                            # binary mask
+mask_ste = m_hard − m_soft.detach() + m_soft          # STE: forward=m_hard, backward=∂m_soft
+```
+
+**Backward pass:** Gradient flows through `m_soft` (continuous). The `detach()` ensures the forward value is binary while the backward Jacobian is `∂(sigmoid)/∂(noisy/τ) × (1/τ)`.
+
+**Temperature τ annealing:** 1.0 → 0.3 over training. τ=1.0 = maximum exploration (diverse selections). τ=0.3 = sharper selections (near binary). Floor of 0.3 prevents STE gradient starvation at very low temperature.
+
+**Tau-independent STE correction:** At low τ, sigmoid saturates for |s|>1 → gradients vanish → TPN stops learning. Fix: multiply gathered visual tokens by an additive correction that is zero in the forward pass but non-zero in the backward:
+```python
+scores_at_selected = gather(s_N, idx)
+v_selected = v_selected * (1 + scores_at_selected − scores_at_selected.detach())
+# Forward: multiplies by 1. Backward: routes d(loss)/d(s_N[j]) = Σ_d g_v[j,d] × v_selected[j,d]
+```
+This gradient is tau-independent and remains non-zero throughout training.
+
+---
+
+### 4. Informative Token Merge
+
+After selecting k=144 tokens, the 432 unselected tokens are not discarded — their information is absorbed into the selected tokens via parameter-free cosine-similarity-based merging:
 
 ```python
-# v_fine: CLIP features [B, N, D]; idx: selected indices [B, k]; s_N: TPN scores [B, N]
-v_selected = gather(v_fine, idx)                      # [B, k, D]
-v_unsel, unsel_idx = complement_gather(v_fine, idx)   # [B, N-k, D]
+# 1. Separate selected and unselected
+v_selected = gather(v_fine, idx)                       # [B, 144, 1024]
+v_unsel, unsel_idx = complement_gather(v_fine, idx)   # [B, 432, 1024]
 
-sim = bmm(normalize(v_unsel), normalize(v_selected).T)   # [B, N-k, k] cosine sim
-assignment = softmax(sim / tau_merge, dim=-1)             # [B, N-k, k], tau_merge=0.1
+# 2. Soft assignment: each unselected token → nearest selected (by cosine sim)
+sim = bmm(normalize(v_unsel), normalize(v_selected).transpose(1, 2))  # [B, 432, 144]
+assignment = softmax(sim / τ_merge, dim=-1)            # τ_merge=0.1
 
-unsel_scores = s_N[unsel_idx]                            # [B, N-k]
-score_weights = softmax(unsel_scores, dim=-1)            # near-threshold tokens weight more
+# 3. TPN-score weighting: near-threshold unselected tokens contribute more
+score_weights = softmax(gather(s_N, unsel_idx), dim=-1)  # [B, 432]
+weighted = assignment * score_weights.unsqueeze(-1)
+weighted = weighted / (weighted.sum(dim=1, keepdim=True) + 1e-8)
 
-weighted_assignment = (assignment * score_weights.unsqueeze(-1))
-weighted_assignment /= weighted_assignment.sum(dim=1, keepdim=True)
-
-contributions = bmm(weighted_assignment.T, v_unsel)      # [B, k, D]
-v_merged = v_selected + beta * contributions             # beta=0.3
+# 4. Aggregate and merge (β=0.3)
+contributions = bmm(weighted.transpose(1, 2), v_unsel)  # [B, 144, 1024]
+v_merged = v_selected + β * contributions               # [B, 144, 1024]
 ```
 
-Key properties:
-- **Zero new parameters.** Merge is fully determined by cosine similarities and TPN scores.
-- **Query-conditioned weighting:** near-threshold unselected tokens (high TPN score) contribute more than low-scored background tokens, so the merge reflects the query's relevance signal.
-- **Residual form:** `v_merged = v_selected + beta * contributions` preserves the original token and adds enrichment, keeping the LLM's input distribution close to what it was trained on.
-- This replaced the failed UnselectedPooler (Phase 1.5, 8 versions) which suffered from co-adaptation oscillation between the pooler and LoRA.
+**Why this works better than alternatives:**
 
-### 4. Adaptive Budget (Major Extension)
+| Alternative | Problem |
+|-------------|---------|
+| Hard drop | Loses all information from 432 tokens. PruMerge-style merging recovers ~2% VQAv2 over pure pruning at the same budget. |
+| Learned pooler (Phase 1.5) | Creates co-adaptation oscillation with LoRA — we trained 8 versions, all failed (see Architecture Evolution). Token merge has zero new parameters, so nothing can oscillate. |
+| Random merge | Not query-conditioned. TPN scores weight the merge: for "what color is the car?", car-adjacent tokens get high scores → contribute strongly; distant background contributes weakly. |
 
-The fixed-k assumption treats all questions equally. The Adaptive Budget extension replaces the fixed k with a per-sample predicted budget.
+**No train-eval mismatch:** Both training and evaluation receive exactly k=144 tokens. This was a critical bug in the Phase 1.5 pooler approach that corrupted all evaluation metrics.
 
-**BudgetPredictor architecture:**
+---
+
+### 5. Adaptive Budget
+
+The fixed-k=144 model compresses every image equally. The Adaptive Budget extension learns *how many* tokens each sample needs.
+
+**BudgetPredictor (~25K params):** A 2-layer MLP predicting per-sample token fraction:
 ```
-ctx [B, 384]  →  Linear(384, 64) + GELU  →  h [B, 64]
-                                             + entropy_proj(score_entropy [B, 1])
-                                          →  Linear(64, 1) + sigmoid
-                                          →  k_frac = k_min/N + out * (k_max - k_min)/N
+ctx [B, 384] + normalize(entropy(s_N)) [B, 1]
+  → Linear(385, 64) → GELU → Linear(64, 1) → sigmoid
+  → k_frac ∈ [k_min/N, k_max/N] = [36/576, 288/576]
 ```
-- Input: TPN cross-attention context vector `ctx` [B, 384] + score entropy (stop-gradient complexity proxy).
-- Output: per-sample `k_frac` ∈ [k_min/N, k_max/N] = [36/576, 288/576].
-- Parameters: ~25K.
+`ctx` is the TPN's attended visual context (encodes image-question relevance). Entropy of `s_N` indicates how concentrated the importance distribution is — low entropy (clustered) means a small region is clearly relevant → fewer tokens needed.
 
-**Adaptive STE — differentiable threshold:**
+**Adaptive Gumbel-Sigmoid STE:** Extends fixed-k STE with a per-sample threshold:
 
-```python
-k_target = k_frac * N                              # continuous [B]
-k_hard   = round(k_target).clamp(k_min, k_max)    # integer [B]
+1. Compute threshold from sorted (detached) scores at position `k_target = k_frac × 576`
+2. **Differentiability trick:**
+   ```python
+   threshold = threshold_hard − (k_target − k_target.detach())
+   ```
+   - Forward: `threshold = threshold_hard` (zero effect)
+   - Backward: `∂threshold/∂k_frac = −N` (non-zero gradient to BudgetPredictor)
+3. Shifted soft mask: `m_soft = sigmoid((noisy − threshold) / τ)`
+4. Differentiable count: `k_effective = sum(m_soft)` — used in budget loss
+5. Hard selection: per-sample `topk(k_hard)`; shorter samples padded with `-1` in idx
 
-# Threshold from sorted scores (stop-grad)
-threshold_hard = (scores_sorted[b, k_hard-1] + scores_sorted[b, k_hard]) / 2  # [B]
-
-# Differentiable trick: zero forward effect, d(threshold)/d(k_frac) = -N
-threshold = threshold_hard - (k_target - k_target.detach())   # [B]
-
-shifted = noisy - threshold.unsqueeze(1)            # [B, N]
-m_soft  = sigmoid(shifted / tau)                    # [B, N]
-k_effective = m_soft.sum(dim=-1)                    # [B] — differentiable budget
-```
+**Budget loss:** `L_budget = λ_budget × mean(k_effective / N)` — penalizes using more tokens. Higher λ_budget → fewer average tokens → more compression.
 
 **Gradient paths in adaptive mode:**
 
-| Path | Direction | Mechanism |
-|------|-----------|-----------|
-| A (primary) | Budget loss → BudgetPredictor | `L_budget = mean(k_eff/N)` → threshold → k_frac → BP weights |
-| B | VQA loss → TPN scores | STE correction `v*(1 + s - s.detach())` routes grad to TPN |
-| C | VQA loss → BudgetPredictor | Blocked; BP adapts indirectly through evolving ctx |
-| D (minor leak) | Entropy loss → BudgetPredictor | Pushes k_frac up; dominated ~5x by path A |
-
-**Variable-length batching:** idx tensor is padded to `k_max` width, with -1 marking invalid positions. Attention masking in the LLM handles variable-length visual prefixes within a batch.
+| Path | Route | Status |
+|------|-------|--------|
+| A: Budget Loss → BudgetPredictor | `mean(k_eff/N)` → threshold → k_frac → BP weights | Active — primary training signal |
+| B: VQA Loss → TPN | STE additive correction | Active |
+| C: VQA Loss → BudgetPredictor | No direct path (discrete k blocks it) | Blocked |
+| D: Entropy Loss → BudgetPredictor | Entropy pushes k_frac up | Small leak (~5× dominated by Path A) |
 
 ---
 
 ## Architecture
 
-### Fixed-k Mode
+### Fixed-k Mode (Phase 1 Final)
 
-| Component | Parameters | Trainable | Input | Output |
-|-----------|-----------|-----------|-------|--------|
-| DINOv2-S (coarse encoder) | 22M | Frozen | 98×98×3 | [B, 49, 384] |
-| CLIP ViT-B/32 (text encoder) | 63M | Frozen | text tokens | [B, 512] |
-| **TPN** | **~887K** | **Yes** | [B,49,384] + [B,512] | idx [B,k], s_N [B,576], ctx [B,384] |
-| CLIP ViT-L/14 (full encoder) | 304M | Frozen | 336×336×3 | [B, 576, 1024] |
-| Informative Token Merge | 0 | — | [B,576,1024], idx, s_N | [B, k, 1024] |
-| LLaVA-1.5 backbone | 7B | Frozen | — | — |
-| LoRA (rank 64, alpha 128) | ~35M | **Yes** | — | text logits |
-| Vision projector (MLP) | ~4M | **Yes** | [B, k, 1024] | [B, k, 4096] |
-| **Total trainable** | **~36M** | — | — | — |
+| Component | Params | Trainable | Input → Output |
+|-----------|--------|-----------|----------------|
+| DINOv2-S (coarse encoder) | 22M | ✗ | 98×98 RGB → [B, 49, 384] |
+| CLIP ViT-B/32 (text encoder) | 63M | ✗ | question → [B, 512] |
+| **TPN** | **~887K** | **✓** | [B,49,384]+[B,512] → idx[B,144] + s_N[B,576] + ctx[B,384] |
+| CLIP ViT-L/14 (full encoder) | 304M | ✗ | 336×336 RGB → [B, 576, 1024] |
+| **Informative Token Merge** | **0** | — | v_fine + idx + s_N → v_merged [B, 144, 1024] |
+| MM Projector | ~7M | **✓** | [B, 144, 1024] → [B, 144, 4096] |
+| LLaVA-1.5-7B + LoRA (r=64) | ~129M | **✓ (LoRA only)** | [B, 144, 4096] + text → text |
+| **Total Trainable** | **~137M** | | |
 
-LoRA targets in Phase 1 Final: `q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj` (6 modules). The MLP target set (gate/up) was added to help the LLM adapt its FFN layers to the shifted visual distribution from token merge.
+LoRA: rank=64, alpha=128, targets: `q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj`.
+FFN targets (gate/up) are included because token merging shifts the visual feature distribution — the FFN layers must adapt to the merged representation, not just the attention layers.
 
-### Adaptive Budget Mode
+### Adaptive Budget Mode (Phase 1 Adaptive — additions only)
 
-Changes relative to Fixed-k:
+| Change | Detail |
+|--------|--------|
+| + BudgetPredictor | ~25K new params, added to TPN module |
+| Token count k | Fixed 144 → variable [36, 288] per sample |
+| idx tensor | [B, 144] → [B, k_max] with -1 padding for short samples |
+| Attention mask | Per-sample variable-length mask |
+| LoRA targets | 4 targets (q/k/v/o — gate/up removed for adaptive stability) |
 
-| Change | Details |
-|--------|---------|
-| **BudgetPredictor added** | ~25K params; takes ctx [B,384] + score entropy → k_frac [B] |
-| **k becomes per-sample variable** | k ∈ [36, 288] per sample (vs. fixed 144) |
-| **Adaptive STE** | threshold-shift trick makes k_effective differentiable |
-| **idx padded** | shape [B, k_max] with -1 for invalid positions |
-| **Attention masking** | LLM uses per-sample attention mask for variable-length visual prefixes |
-| **LoRA targets reduced** | q/k/v/o only (4 modules, no gate/up) for stability |
-| **lr_budget = 1e-3** | Separate learning rate for BudgetPredictor |
+### Full Forward Pass
+
+```
+images, questions → (3 frozen encoders) → v_coarse [B,49,384], q_embed [B,512], v_fine [B,576,1024]
+                                         ↓
+                               TPN → s_N [B,576], idx [B,k], ctx [B,384]
+                                         ↓
+     Fixed-k:  gather(v_fine, idx) → v_selected [B,k,1024]
+               + informative_merge(v_fine, idx, s_N, β=0.3) → v_merged [B,k,1024]
+                                         ↓
+     Adaptive: BudgetPredictor(ctx, entropy(s_N)) → k_frac → adaptive_gumbel_sigmoid_ste
+                                         ↓
+               mm_projector → [B,k,4096] → LLaVA-1.5-7B+LoRA → answer tokens
+```
 
 ---
 
-## Training
+## Training Phases
+
+Training uses a three-phase curriculum where each phase adds one component on top of the previous foundation.
 
 ### Phase 0: TPN Warmup
 
-| Item | Value |
-|------|-------|
-| What trains | TPN only |
-| Frozen | LLaVA backbone, LoRA, projector |
-| Data | VQAv2 (100K subsample) |
-| Steps | ~10,000 |
-| Loss | L_VQA + lambda_entropy * L_ent + lambda_diversity * L_div |
-| tau | 1.0 fixed (no annealing) |
-| lr_tpn | 1e-3 |
+| Setting | Value |
+|---------|-------|
+| What trains | TPN only — LoRA and MM projector frozen |
+| Dataset | VQAv2 |
+| Duration | ~10K steps |
+| Loss | L_VQA only |
+| Temperature | τ = 1.0 (fixed, maximum exploration) |
+| Purpose | Cold-start TPN with meaningful scores before LoRA co-training begins |
 
-Purpose: give TPN a head start at query-conditioned routing before LoRA is introduced, so LoRA does not compensate for poor token selection.
+**Why Phase 0 matters:** If LoRA trains alongside an untrained TPN, LoRA compensates for bad selections rather than forcing the TPN to improve. With LoRA frozen, the only way to reduce L_VQA is better selection quality. This gives TPN a foundation before joint training.
 
 ### Phase 1 Final: Joint Training with Token Merge
 
-| Item | Value |
-|------|-------|
-| What trains | TPN + LoRA (rank 64/alpha 128) + vision projector |
-| Frozen | LLaVA 7B weights, CLIP encoders, DINOv2 |
-| Data | VQAv2 + GQA (full training sets) |
-| Steps | 80,000 |
-| Loss | L_VQA + 0.02 * L_ent + 0.1 * L_div |
-| tau schedule | 1.0 → 0.3 (linear; tau_min=0.3 to avoid gradient starvation) |
-| LoRA warm-freeze | LoRA gradients zeroed for first 3,000 steps |
-| lr_tpn / lr_lora / lr_mlp | 3e-3 / 1e-4 / 5e-4 |
-| Effective batch | 128 (4 samples × 16 grad accum × 2 GPUs) |
-| Load from | Phase 0 best checkpoint |
+| Setting | Value |
+|---------|-------|
+| What trains | TPN + LoRA (r=64) + MM projector |
+| Dataset | VQAv2 + GQA |
+| Duration | 80K steps |
+| LoRA warmfreeze | LoRA frozen steps 0–3000 (TPN stabilizes first) |
+| Loss | L_VQA + 0.0×L_max + 0.02×(−H) + 0.1×L_div |
+| Temperature | τ: 1.0 → 0.3 (linear) |
+| Token merge | β=0.3, τ_merge=0.1 |
+| LR (TPN / LoRA / MLP) | 3e-3 / 1e-4 / 5e-4 |
+| Effective batch | 128 (4 × 16 grad steps × 2 GPUs) |
+| Loads from | Phase 0 checkpoint |
+| **Measured result** | **val_vqa loss = 0.3342 at step 80k** |
 
-Note: lambda_max=0.0 — L1 sparsity is disabled because instance normalization makes `mean(|s_N|) ≈ 0.798` constant, providing no useful gradient signal.
+**Why LoRA warm-freeze?** In the first 3000 steps, LoRA receives gradients frozen at 0. This forces the VQA loss to decrease purely through improved TPN selection quality. After step 3000, LoRA unfreezes and jointly optimizes with TPN. Without this, LoRA immediately learns to compensate for the TPN's early mistakes — the TPN never learns to be selective.
 
 ### Phase 1 Adaptive: Variable Budget Training
 
-| Item | Value |
-|------|-------|
-| What trains | TPN + LoRA (rank 64/alpha 128) + projector + BudgetPredictor |
-| Frozen | LLaVA 7B, CLIP encoders, DINOv2 |
-| Data | VQAv2 + GQA |
-| Steps | 40,000 |
-| Loss | L_VQA + 0.02 * L_ent + 0.1 * L_div + lambda_budget * L_budget |
-| lambda_budget | Sweep: {0.05, 0.1, 0.2, 0.4} to trace Pareto curve |
-| tau schedule | 1.0 → 0.3 (linear) |
-| Budget warmup | BudgetPredictor frozen for first 2,000 steps |
-| LoRA warm-freeze | LoRA frozen for first 1,000 steps (shorter than Phase 1 Final; TPN already trained) |
-| lr_tpn / lr_lora / lr_mlp / lr_budget | 1e-3 / 2e-4 / 5e-4 / 1e-3 |
-| Load from | Phase 1 Final best checkpoint |
-
-The budget warmup prevents the BudgetPredictor from learning a trivially low budget before TPN and LoRA have stabilized, which would cause premature accuracy collapse.
+| Setting | Value |
+|---------|-------|
+| What trains | BudgetPredictor (new) + TPN + LoRA + MM projector |
+| Dataset | VQAv2 + GQA |
+| Duration | 40K steps |
+| BudgetPredictor warmup | Frozen steps 0–2000 (TPN/LoRA stabilize first) |
+| LoRA warmfreeze | Frozen steps 0–1000 (shorter — TPN already trained) |
+| Loss | L_VQA + 0.02×(−H) + 0.1×L_div + λ_budget×mean(k_eff/N) |
+| Token range | k ∈ [36, 288] per sample |
+| LR (TPN / LoRA / BP / MLP) | 1e-3 / 2e-4 / 1e-3 / 5e-4 |
+| Loads from | Phase 1 Final checkpoint (`runs/phase1_final/phase1/best.ckpt`) |
+| λ_budget | Sweep {0.05, 0.1, 0.2, 0.4} to trace Pareto curve |
 
 ---
 
 ## Loss Function
 
-| Term | Active In | Weight | Purpose |
-|------|-----------|--------|---------|
-| `L_VQA` | All phases | 1.0 | Cross-entropy on generated answer tokens |
-| `L_ent = -H` | All phases | 0.02 (Ph1) / 0.01 (Ph0) | Maximize Shannon entropy of batch-mean spatial selection; prevents spatial collapse |
-| `L_div` | All phases | 0.1 (Ph1) / 0.02 (Ph0) | Hinge on mask similarity for pairs with dissimilar queries; prevents query-ignoring |
-| `L_budget` | Adaptive only | lambda_budget (sweep) | `mean(k_eff/N)` — penalizes token fraction; gradient to BudgetPredictor |
-| `L_sparsity` | Disabled (=0) | 0.0 | L1 on TPN scores; disabled because instance norm makes it constant |
+| Term | Weight | Purpose |
+|------|--------|---------|
+| L_VQA | 1.0 | Cross-entropy on answer tokens only (NTP on generative LLM) |
+| −H (spatial entropy) | 0.02 | Prevent TPN from always selecting the same spatial region. H = Shannon entropy of batch-mean selection frequency. |
+| L_div (query diversity) | 0.1 | Prevent TPN from ignoring the question. Penalizes similar selections for samples with dissimilar queries. |
+| λ_budget × mean(k_eff/N) | sweep 0.05–0.4 | Budget penalty — Phase 1 Adaptive only. Sweep λ to trace the Pareto frontier. |
+| L_max (sparsity) | 0.0 | L1 sparsity on scores — disabled; instance normalization makes L1 constant (mean=0 always). |
 
-Entropy is computed via the STE mask (`mask_ste`) during training so gradients reach all N=576 token positions, not just the selected k. At eval or when mask_ste is unavailable, entropy is computed from the idx tensor directly.
+**val_vqa metric:** The logged `val_vqa` is cross-entropy loss on VQAv2 validation set — lower is better. It is not the same as VQA-Score % (which is higher-is-better and requires beam search decoding + answer normalization).
 
 ---
 
 ## Results
 
-### Fixed-k Baseline (Phase 1 Final, k=144)
+### Measured Training Metrics
 
-| Metric | Value |
-|--------|-------|
-| Steps | 80,000 |
-| Val VQA loss (final) | **0.3342** |
-| Compression (LLM tokens) | 75% (144 of 576) |
-| Full VQA-Score eval | Pending |
-| Full GQA accuracy eval | Pending |
+| Run | val_vqa loss | Steps | Configuration |
+|-----|-------------|-------|---------------|
+| Phase 1 v3 (baseline) | 0.3334 | 50k | LoRA r=32, hard drop, no merge |
+| **Phase 1 Final** | **0.3342** | 80k | LoRA r=64 + informative token merge |
+| Phase 1 Adaptive | in progress | 40k | λ_budget=0.1 (running) |
 
-The val_vqa=0.3342 is the actual measured training-time validation metric (VQA cross-entropy loss on held-out samples). Full benchmark evaluation (VQA-Score %, GQA accuracy %) has not yet been run.
+Phase 1 Final essentially matches the Phase 1 v3 baseline. Token merge at β=0.3 did not clearly improve over hard drop at these compression ratios; it also did not hurt. The rank=64 LoRA upgrade provides capacity for the adaptive phase.
 
-### Adaptive Budget (Phase 1 Adaptive)
+> val_vqa loss is a training proxy metric (lower = better). Full benchmark evaluation (VQA-Score %, GQA accuracy %, POPE F1) via `scripts/evaluate.py` is pending.
 
-Training in progress. Results pending.
+### Competitive Context (Published Results at ~25% Token Retention)
 
-Planned: sweep lambda_budget ∈ {0.05, 0.1, 0.2, 0.4} and report (mean_k, val_vqa) for each, tracing the compression–accuracy Pareto frontier.
+Results on LLaVA-1.5-7B, VQAv2 validation set, k≈144 tokens:
 
-### Ablations (Planned)
+| Method | Tokens | VQAv2 | Trainable params | Core technique |
+|--------|--------|-------|-----------------|----------------|
+| LLaVA-1.5-7B (full) | 576 | 78.5% | — | Upper bound |
+| SparseVLM | ~144+8 recycled | ~78% | Yes (staged) | Text-conditioned selection + cross-attn recycler |
+| LLaVA-PruMerge | ~144 | ~77% | No | CLS-attention prune + cosine-sim merge into neighbors |
+| FastV | ~144 | ~76–77% | No | LLM layer-2 attention pruning |
+| CLS attention top-144 | 144 | 75–76% | No | Static ViT CLS attention ranking |
+| Uniform grid 12×12 | 144 | ~74% | No | Every 4th token (no selection) |
+| Random 144 | 144 | 72.5–73.5% | No | Uniform random |
+| **TC-ViTok (k=144)** | **144** | **TBD** | **Yes (query-conditioned)** | **TPN + informative merge** |
+| **TC-ViTok Adaptive** | **36–288** | **TBD** | **Yes** | **BudgetPredictor** |
 
-| Ablation | Question |
-|----------|---------|
-| No token merge (beta=0) vs. beta=0.3 | How much does informative merge help over hard drop? |
-| Fixed k=144 vs. adaptive budget | Does per-sample variable k beat fixed k at same mean budget? |
-| LoRA targets: 4 vs. 6 (with gate/up) | Is MLP adaptation needed after token merge? |
-| Orthogonal deflation (Phase 1.5 legacy) | Does it help as a regularizer? |
-| tau_min=0.1 vs. 0.3 | What is the STE gradient starvation threshold? |
+The total range from random (73%) to best (78%) is only ~5 points. Token merging (PruMerge: +2% over pruning) is the single most impactful parameter-free technique. Query conditioning (SparseVLM: +1%) adds on top of that. TC-ViTok combines query-conditioned selection with merge; achieving 77%+ is the target.
+
+### Planned Ablations
+
+| Ablation | Tests |
+|----------|-------|
+| No token merge (hard drop) | Contribution of merge step |
+| No STE tau-independent correction | Gradient path at low temperature |
+| No LoRA warm-freeze | Training stability of joint training |
+| Random selection baseline | TPN contribution vs. random |
+| Fixed-k vs. Adaptive at same avg k | Whether adaptive Pareto-dominates fixed-k |
+| No budget warmup | BudgetPredictor training stability |
+
+---
+
+## Architecture Evolution
+
+### Phase 1 v3 → Phase 1.5 (Learnable Pooler — 8 versions, all failed)
+
+After Phase 1 v3 (val_vqa=0.3334, LoRA r=32, hard drop), we attempted Phase 1.5: a cross-attention **UnselectedPooler** with 4 learned slot vectors (~512K params) to soft-recycle the 432 discarded tokens. This ran through 8 versions before the approach was abandoned.
+
+**Three fatal design mistakes:**
+
+**Mistake 1: Circular Co-Adaptation (structural, unfixable)**
+```
+Pooler output shifts → LLM input distribution changes → LoRA must re-adapt
+→ LoRA gradient to pooler changes → Pooler must re-adapt → cycle repeats
+```
+This is GAN-style instability. Reducing pooler LR slows the oscillation period but does not eliminate it:
+
+| Pooler LR | Oscillation period | Best val_vqa |
+|-----------|-------------------|-------------|
+| 5e-4 (v4–v7) | ~5k steps | 0.39–0.44 (cycling) |
+| 2e-5 (v8) | ~15k steps | 0.3663 at step 45k |
+| 0.0 (v8b, frozen) | None | Started at 0.4540 (optimizer catapult), unclear ceiling |
+
+**Mistake 2: 9 Conflicting Loss Terms**  
+At peak complexity, the TPN received gradients from: VQA, entropy, diversity, boundary, sparsity, spread, distillation, residual distillation, and slot orthogonality. With instance-normalized scores (finite gradient budget), auxiliary losses literally steal gradient from VQA.
+
+**Mistake 3: Train-Eval Mismatch (critical, undetected)**  
+During training, the LLM received k+4=148 tokens (4 pooler summaries + 144 selected). During evaluation (`generate()`), only 144 selected tokens were passed. The first 4 positions contained visual content instead of the summary tokens the model expected. Every Phase 1.5 validation metric was corrupted by this mismatch.
+
+**Conclusion:** Token merge solves all three problems simultaneously: zero new parameters → no co-adaptation; no extra sequence positions → no train-eval mismatch; no additional loss terms.
+
+### Phase 1.5 → Phase 1 Final (Token Merge + Rank 64)
+
+After abandoning the pooler, we rebuilt Phase 1 with:
+- **Informative Token Merge** (parameter-free, no co-adaptation, no mismatch)
+- **LoRA rank 32 → 64** (2× capacity for more LoRA adaptation to merged tokens)
+- **gate/up LoRA targets** added (FFN must adapt to merged feature distribution)
+- **lr_lora 2e-4 → 1e-4** (rank-64 LoRA needs lower LR to avoid overshoot)
+
+### Phase 1 Final → Phase 1 Adaptive (BudgetPredictor)
+
+Phase 1 Final establishes stable TPN+LoRA foundation. The BudgetPredictor needs meaningful, converged TPN scores to predict sensible budgets — it cannot be trained from scratch alongside TPN. Loading from Phase 1 Final provides a warm start where TPN scores already encode question-conditioned importance.
 
 ---
 
@@ -261,146 +366,272 @@ Planned: sweep lambda_budget ∈ {0.05, 0.1, 0.2, 0.4} and report (mean_k, val_v
 
 ```
 TC-ViTok/
-├── README.md
-├── setup.py
-├── train.py                          # Top-level training entry point
-├── evaluate.py                       # Evaluation entry point
-├── launch_multigpu.sh                # Multi-GPU DDP launcher
-├── visualize_masks.py                # TPN selection visualization
-├── diagnose_routing.py               # Routing collapse diagnostics
-│
 ├── configs/
-│   ├── base.yaml                     # Default hyperparameters
-│   ├── phase0.yaml                   # Phase 0: TPN warmup
-│   ├── phase1.yaml                   # Phase 1: basic joint finetuning
-│   ├── phase1_final.yaml             # Phase 1 Final: token merge + rank 64 LoRA
-│   ├── phase1_adaptive.yaml          # Phase 1 Adaptive: variable budget [NEW]
-│   └── phase2.yaml                   # Phase 2: domain transfer (optional)
-│
+│   ├── base.yaml                  # Default hyperparameters (all keys with defaults)
+│   ├── phase0.yaml                # TPN warmup (LLaVA frozen)
+│   ├── phase1_final.yaml          # Joint training with token merge (80K steps)
+│   └── phase1_adaptive.yaml       # Adaptive budget (loads from phase1_final)
 ├── src/tc_vitok/
 │   ├── models/
-│   │   ├── tpn.py                    # TokenizationPolicyNetwork + BudgetPredictor
-│   │   ├── encoders.py               # DINOv2-S (coarse) + CLIP text/full encoders
-│   │   ├── masking.py                # gumbel_sigmoid_ste, adaptive_gumbel_sigmoid_ste
-│   │   └── tc_vitok_model.py         # Full model: gather_tokens, informative_token_merge
-│   │
+│   │   ├── tpn.py                 # TPN (~887K) + BudgetPredictor (~25K)
+│   │   ├── encoders.py            # DINOv2-S (img_size=98) + CLIP text/full
+│   │   ├── masking.py             # gumbel_sigmoid_ste + adaptive_gumbel_sigmoid_ste
+│   │   └── tc_vitok_model.py      # Full model: encode → select → merge → LLaVA
 │   ├── training/
-│   │   ├── losses.py                 # compute_total_loss + all individual loss terms
-│   │   ├── curriculum.py             # get_tau, get_lambda, get_lr_schedule
-│   │   ├── trainer.py                # TCViTokTrainer: multi-phase training loop
-│   │   └── optimizer.py              # AdamW with per-group learning rates
-│   │
+│   │   ├── losses.py              # VQA, entropy, diversity, budget losses
+│   │   ├── curriculum.py          # tau and lambda schedules
+│   │   ├── trainer.py             # DDP training loop, validation, checkpointing
+│   │   └── optimizer.py           # Per-group AdamW (TPN/LoRA/MLP/BP separate LRs)
 │   ├── data/
-│   │   ├── datasets.py               # VQAv2, GQA, TextVQA, POPE loaders
-│   │   ├── caching.py                # HDF5 feature cache (coarse ViT + CLIP text)
-│   │   └── spatial_labels.py         # Spatial specificity classifier (GQA annotations)
-│   │
+│   │   ├── datasets.py            # VQAv2, GQA datasets + retry loop for corrupt JPEGs
+│   │   └── spatial_labels.py      # GQA spatial/global question classification
 │   └── evaluation/
-│       ├── metrics.py                # VQA-Score, GQA accuracy, POPE F1
-│       ├── spatial_eval.py           # Spatial vs. global question stratification
-│       ├── collapse_detection.py     # Spatial collapse & query-ignoring diagnostics
-│       └── pareto.py                 # Pareto curve analysis for adaptive budget
-│
-└── tests/                            # Unit and integration tests
+│       ├── metrics.py             # VQA-Score, GQA accuracy, POPE F1
+│       ├── spatial_eval.py        # Spatial vs. global stratification
+│       ├── collapse_detection.py  # Entropy + IoU collapse diagnostics
+│       └── pareto.py              # Pareto curve plotting utilities
+├── scripts/
+│   ├── train.py                   # Training entry point (Phase 0/1/1-adaptive)
+│   ├── evaluate.py                # Evaluation + Pareto sweep
+│   ├── launch_multigpu.sh         # 2-GPU DDP launcher (sets all NCCL/HF env vars)
+│   ├── cache_features.py          # Pre-compute DINOv2 + CLIP text → HDF5
+│   ├── visualize_masks.py         # Heatmap of TPN token selections
+│   └── diagnose_routing.py        # Verify TPN routes differently per question
+├── tests/
+│   ├── test_tpn.py                # TPN architecture + gradient flow
+│   ├── test_masking.py            # STE correctness + tau-independence
+│   └── test_adaptive_budget.py    # 14 tests: BudgetPredictor + adaptive STE
+└── documentation/                 # Extended design docs (see below)
+    ├── solutions.md               # Architecture decisions + Phase 1.5 post-mortem
+    ├── understanding.md           # Deep-dive: full forward pass with tensor shapes
+    ├── innovations.md             # SOTA literature review + novelty analysis
+    ├── ADAPTIVE_BUDGET.md         # Adaptive budget design rationale
+    ├── computations.md            # VRAM and FLOP breakdowns
+    └── run.md                     # Full setup + dataset download guide
 ```
 
 ---
 
 ## Setup and Installation
 
+### Requirements
+
+- Python 3.11 (3.12 works; 3.14 does not have PyTorch packages)
+- **PyTorch ≥ 2.6.0** — MANDATORY due to CVE-2025-32434 (transformers ≥ 4.40 requires `weights_only=True` in `torch.load`)
+- CUDA 12.1+ GPU with ≥ 24 GB VRAM for actual training (2× RTX 6000 Ada recommended)
+- Apple Silicon with MPS supported for development/testing
+
+### Installation
+
 ```bash
-# 1. Create environment
-conda create -n tc-vitok python=3.10
-conda activate tc-vitok
+git clone https://github.com/whyeventry0103/TC-ViTok.git
+cd TC-ViTok
 
-# 2. Install package
+conda create -n tcvitok python=3.11 -y
+conda activate tcvitok
+
+# CUDA (for training on server)
+pip install torch>=2.6.0 torchvision>=0.21.0 --index-url https://download.pytorch.org/whl/cu121
+
+# Apple Silicon (for development)
+pip install torch>=2.6.0 torchvision>=0.21.0
+
+pip install -r requirements.txt
 pip install -e .
+pip install peft h5py   # LoRA + feature caching (verify installed)
+```
 
-# 3. Download model weights (LLaVA-1.5-7B, DINOv2-S, CLIP ViT-L/14)
-#    Models are fetched from HuggingFace Hub on first run.
-#    Pre-download to avoid rank desync during DDP training:
-HF_HUB_OFFLINE=0 python -c "
-from transformers import AutoModelForCausalLM
-import timm, open_clip
-timm.create_model('vit_small_patch14_dinov2.lvd142m', pretrained=True)
-"
+### Model Downloads
 
-# 4. Download datasets
-#    VQAv2: https://visualqa.org/download.html  → ~/tc-vitok-data/vqav2/
-#    GQA:   https://cs.stanford.edu/people/dorarad/gqa/download.html → ~/tc-vitok-data/gqa/
+Pre-download models to avoid HuggingFace HTTP timeouts during DDP training:
+
+```bash
+# LLaVA-1.5-7B (includes CLIP ViT-L/14 and mm_projector) — ~13.5 GB
+huggingface-cli download llava-hf/llava-1.5-7b-hf
+
+# CLIP ViT-L/14 standalone (needed for feature extraction) — ~890 MB
+python -c "from transformers import CLIPModel; CLIPModel.from_pretrained('openai/clip-vit-large-patch14-336')"
+
+# DINOv2-S and CLIP ViT-B/32 download automatically on first run via timm/transformers
+```
+
+### Dataset Setup
+
+```bash
+export DATA_ROOT=~/tc-vitok-data
+mkdir -p $DATA_ROOT/{vqav2,gqa,pope,coco}
+
+# VQAv2 + COCO images (~25 GB total)
+cd $DATA_ROOT/coco
+wget http://images.cocodataset.org/zips/train2014.zip && unzip train2014.zip
+wget http://images.cocodataset.org/zips/val2014.zip && unzip val2014.zip
+
+cd $DATA_ROOT/vqav2
+wget https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Questions_Train_mscoco.zip && unzip *.zip
+wget https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Annotations_Train_mscoco.zip && unzip *.zip
+
+# Symlinks (required for evaluate.py)
+ln -s ../coco/train2014 $DATA_ROOT/vqav2/train2014
+ln -s ../coco/val2014 $DATA_ROOT/vqav2/val2014
+
+# GQA (~20 GB)
+cd $DATA_ROOT/gqa
+wget https://downloads.cs.stanford.edu/nlp/data/gqa/images.zip && unzip images.zip
+wget https://downloads.cs.stanford.edu/nlp/data/gqa/questions1.2.zip && unzip questions1.2.zip
+```
+
+### Verify Installation
+
+```bash
+# Core tests (no model downloads needed)
+PYTHONPATH=src python -m pytest tests/ -q   # expected: all pass
+
+# Dry run (StubLLM + dummy data, ~30 seconds)
+PYTHONPATH=src python scripts/train.py \
+    --config configs/phase0.yaml --output /tmp/tc_vitok_test \
+    --stub --dummy-data --no-wandb --max-steps 2
+# Expected: /tmp/tc_vitok_test/phase0/best.ckpt created
 ```
 
 ---
 
 ## Running Experiments
 
-### Standard Fixed-k Pipeline
+### Multi-GPU Training (2× GPU, recommended)
 
 ```bash
-# Phase 0: TPN warmup (~10K steps, TPN only)
-bash launch_multigpu.sh \
-  --config configs/phase0.yaml \
-  --output runs/phase0
+# Phase 0: TPN warmup
+tmux new-session -d -s phase0
+tmux send-keys -t phase0 "cd ~/TC-ViTok && bash scripts/launch_multigpu.sh \
+    --config configs/phase0.yaml --output runs/phase0" Enter
 
-# Phase 1 Final: joint training with token merge (80K steps)
-bash launch_multigpu.sh \
-  --config configs/phase1_final.yaml \
-  --output runs/phase1_final
+# Phase 1 Final: token merge + LoRA r=64 (loads phase0 checkpoint automatically)
+tmux new-session -d -s phase1_final
+tmux send-keys -t phase1_final "cd ~/TC-ViTok && bash scripts/launch_multigpu.sh \
+    --config configs/phase1_final.yaml --output runs/phase1_final" Enter
+
+# Phase 1 Adaptive: variable budget (loads phase1_final checkpoint automatically)
+tmux new-session -d -s phase1_adaptive
+tmux send-keys -t phase1_adaptive "cd ~/TC-ViTok && bash scripts/launch_multigpu.sh \
+    --config configs/phase1_adaptive.yaml --output runs/phase1_adaptive" Enter
 ```
 
-### Adaptive Budget Pipeline
+### Single-GPU Training
 
 ```bash
-# Phase 1 Adaptive: variable budget training (40K steps, loads from Phase 1 Final)
-# Sweep lambda_budget to trace the Pareto curve
-for lam in 0.05 0.1 0.2 0.4; do
-  bash launch_multigpu.sh \
-    --config configs/phase1_adaptive.yaml \
-    --output runs/phase1_adaptive_lam${lam} \
-    training.lambda_budget=${lam}
+export DATA_ROOT=~/tc-vitok-data
+PYTHONPATH=src python scripts/train.py --config configs/phase0.yaml --output runs/phase0
+PYTHONPATH=src python scripts/train.py --config configs/phase1_final.yaml --output runs/phase1_final
+PYTHONPATH=src python scripts/train.py --config configs/phase1_adaptive.yaml --output runs/phase1_adaptive
+```
+
+### Pareto Sweep (Adaptive Budget)
+
+```bash
+for lb in 0.05 0.1 0.2 0.4; do
+    tmux new-session -d -s adaptive_lb${lb}
+    tmux send-keys -t adaptive_lb${lb} "cd ~/TC-ViTok && bash scripts/launch_multigpu.sh \
+        --config configs/phase1_adaptive.yaml \
+        --output runs/adaptive_lb${lb} \
+        training.lambda_budget=${lb}" Enter
 done
 ```
 
-### Evaluation
+### Monitoring
 
 ```bash
-# Evaluate a checkpoint
-python evaluate.py \
-  --checkpoint runs/phase1_final/phase1/best.ckpt \
-  --config configs/phase1_final.yaml \
-  --datasets vqav2 gqa \
-  --output results/phase1_final/
+tmux attach -t phase1_final             # reattach to running session
+tail -f logs/train_*.log | tr '\r' '\n' | grep "Step"   # live metrics
+grep "val" logs/train_*.log             # validation checkpoints only
+nvidia-smi                              # GPU utilization
+ls -lh runs/phase1_final/phase1/        # checkpoint list
+```
 
-# Pareto analysis across adaptive budget runs
-python -c "
-from src.tc_vitok.evaluation.pareto import plot_pareto
-plot_pareto('results/adaptive/', output='pareto_curve.png')
-"
+---
+
+## Evaluation
+
+```bash
+# Phase 1 Final: VQAv2 + GQA + POPE
+python scripts/evaluate.py \
+    --checkpoint runs/phase1_final/phase1/best.ckpt \
+    --config configs/phase1_final.yaml \
+    --benchmarks vqav2 gqa pope \
+    --data-root ~/tc-vitok-data \
+    --output runs/eval_results/phase1_final.json
+
+# Phase 1 Adaptive: same benchmarks
+python scripts/evaluate.py \
+    --checkpoint runs/phase1_adaptive/phase1/best.ckpt \
+    --config configs/phase1_adaptive.yaml \
+    --benchmarks vqav2 gqa pope \
+    --data-root ~/tc-vitok-data \
+    --output runs/eval_results/phase1_adaptive.json
+
+# Pareto sweep: one model, multiple k values
+python scripts/evaluate.py \
+    --checkpoint runs/phase1_final/phase1/best.ckpt \
+    --token-budgets 72 144 216 288 576 \
+    --benchmarks vqav2 gqa \
+    --output runs/eval_results/pareto_sweep.json
+
+# GQA with spatial stratification (spatial vs. global reasoning)
+python scripts/evaluate.py \
+    --checkpoint runs/phase1_final/phase1/best.ckpt \
+    --benchmarks gqa --spatial-eval \
+    --output runs/eval_results/gqa_spatial.json
+
+# Random-drop baseline (ablation)
+python scripts/evaluate.py \
+    --checkpoint runs/phase1_final/phase1/best.ckpt \
+    --baseline random_drop --benchmarks vqav2 gqa \
+    --output runs/eval_results/random_drop.json
 ```
 
 ---
 
 ## Known Failure Modes and Mitigations
 
-| Failure Mode | Symptom | Root Cause | Fix |
-|---|---|---|---|
-| **Spatial collapse** | Same spatial region selected regardless of query | Entropy = log(k) instead of log(N); all samples select same tokens | Entropy regularization (lambda_entropy=0.02) + Gumbel noise on noisy scores (not raw scores) |
-| **Score saturation** | TPN scores reach O(100), static crop from step 1000 | Adam pushes scores to large values, overwhelming Gumbel noise | Per-sample instance normalization on s_N — enforces zero-mean, unit-std; cannot be saturated |
-| **Query-ignoring** | Different questions → same token selection | TPN learns image-only saliency; text input ignored | Diversity loss + LoRA warm-freeze (3K steps): forces TPN to route VQA signal before LoRA compensates |
-| **Budget collapse** | BudgetPredictor immediately outputs k_min | Budget loss gradient before TPN/LoRA are stable | Budget warmup: BudgetPredictor frozen for first 2K steps |
-| **Co-adaptation oscillation** | val_vqa oscillates on ~10K step period | Mutual dependency between pooler and LoRA updates | Removed pooler entirely; replaced with parameter-free informative token merge |
-| **Gradient vanishing through STE** | mask.grad_fn is None; TPN receives no VQA signal | STE not implemented correctly; mask disconnected from soft path | `mask_ste = m_hard - m_soft.detach() + m_soft`; assert grad_fn is not None at train time |
+| Failure | Symptom | Fix |
+|---------|---------|-----|
+| **Spatial collapse** | All selected tokens from the same image region; entropy < 5.0 in logs | Increase `lambda_entropy` from 0.02 to 0.05 |
+| **Query-ignoring** | Same tokens selected regardless of question; IoU > 0.9 across batch | Increase `lambda_diversity`; verify STE additive correction is active |
+| **STE gradient vanishing** | TPN not learning after step 10k; loss plateau | Verify tau-independent correction: `v_selected *= (1 + sc - sc.detach())`; increase `tau_min` from 0.3 to 0.5 |
+| **Score magnitude explosion** | Loss NaN; select entropy = log(k) (always same tokens) | Verify instance normalization in TPN output; check `s_N.mean()` ≈ 0 in logs |
+| **Budget collapse** | `k_effective` stuck at k_min or k_max throughout training | Verify `budget_warmup_steps > 0`; adjust `lambda_budget`; check Path A gradient |
+| **Co-adaptation oscillation** | val_vqa oscillates ±0.04 every ~10k steps | Never train a learnable pooler simultaneously with LoRA; use token merge instead |
+| **Cross-phase checkpoint mismatch** | `RuntimeError: size mismatch for lora_A` | Trainer filters shape-mismatched keys before `load_state_dict` — verify `strict=False` |
+| **DDP rank desync** | NCCL timeout; SIGABRT instead of Python traceback | `HF_HUB_OFFLINE=1` must be set (use `launch_multigpu.sh`); all HF downloads before training |
+
+---
+
+## Key Design Decisions
+
+**Why two phases (Phase 0 + Phase 1)?** Phase 0 cold-starts TPN with meaningful importance scores before joint training. If LoRA trains from step 0, it compensates for bad selections and TPN never learns selectivity. Phase 0 establishes the selection foundation; Phase 1 co-optimizes everything.
+
+**Why Phase 1 Adaptive needs Phase 1 Final first?** BudgetPredictor predicts how many tokens a sample needs based on TPN scores. If TPN scores are not yet meaningful, the predictor receives noise → learns a useless function. Loading from Phase 1 Final gives BudgetPredictor access to stable, question-conditioned scores from step 0.
+
+**Why token merge instead of a learned pooler?** Eight training runs with a cross-attention pooler (Phase 1.5) all failed due to circular co-adaptation with LoRA. Token merge has zero new parameters — nothing can oscillate. It also eliminates the train-eval mismatch that corrupted all Phase 1.5 evaluation metrics.
+
+**Why instance normalization on TPN scores?** Without it, Adam pushes scores to ±100 → Gumbel noise becomes negligible → deterministic fixed selection → entropy collapse. `tanh` saturates too (gradient ~0 at ±100). Instance norm anchors scores to mean=0, std=1 permanently with no learnable parameters that Adam can optimize away.
 
 ---
 
 ## Citation
 
 ```bibtex
-@article{tcvitok2026,
-  title     = {TC-ViTok: Task-Conditioned Visual Tokenization with Adaptive Budget},
-  author    = {Shah, Muhammad Ali},
-  year      = {2026},
-  institution = {Lahore University of Management Sciences (LUMS)},
-  note      = {Preprint}
+@article{shah2025tcvitok,
+  title     = {TC-ViTok: Task-Conditioned Visual Tokenization with Adaptive Budget
+               for Efficient Vision-Language Reasoning},
+  author    = {Shah, Muhammad Ali and Ul Haq, Talha Hassan},
+  institution = {Lahore University of Management Sciences},
+  year      = {2025}
 }
 ```
+
+**Authors:** Muhammad Ali Shah (27100172), Talha Hassan Ul Haq (27100306)  
+**Institution:** Lahore University of Management Sciences (LUMS)
+
+---
+
+*MIT License — see [LICENSE](LICENSE) for details.*
