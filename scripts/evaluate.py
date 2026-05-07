@@ -155,7 +155,26 @@ def load_model(
         "image_only": ImageOnlyTPNModel,
     }[baseline]
 
+    # Auto-detect LoRA rank/alpha/targets from checkpoint before building model
+    print(f"[load_model] Pre-loading checkpoint to detect LoRA config: {checkpoint_path}")
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state_dict = ckpt.get("model_state_dict", ckpt)
+    for key, val in state_dict.items():
+        if "lora_A" in key and "q_proj" in key:
+            lora_config["rank"] = val.shape[0]
+            lora_config["alpha"] = val.shape[0] * 2
+            break
+    lora_target_set = {"q_proj", "k_proj", "v_proj", "o_proj"}
+    for key in state_dict:
+        if "lora_A" in key:
+            for t in ("gate_proj", "up_proj", "down_proj"):
+                if t in key:
+                    lora_target_set.add(t)
+    lora_config["targets"] = sorted(lora_target_set)
+
     print(f"[load_model] baseline={baseline}, k={k}, device={device}")
+    print(f"[load_model] Detected LoRA rank={lora_config['rank']}, "
+          f"alpha={lora_config['alpha']}, targets={lora_config['targets']}")
     print(f"[load_model] Loading LLaVA backbone from HF cache (offline)...")
     t0 = time.time()
 
@@ -169,10 +188,7 @@ def load_model(
     )
 
     print(f"[load_model] Backbone loaded in {time.time()-t0:.1f}s")
-    print(f"[load_model] Loading checkpoint: {checkpoint_path}")
-
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    state_dict = ckpt.get("model_state_dict", ckpt)
+    print(f"[load_model] Overlaying checkpoint weights...")
 
     missing, unexpected = model.load_state_dict(state_dict, strict=False)
 
