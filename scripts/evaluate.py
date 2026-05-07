@@ -275,7 +275,7 @@ def evaluate_vqav2(model, data_root, device, batch_size, max_samples=None, log_i
             for i in range(min(4, len(preds))):
                 gt_show = batch["answers"][i][:3] if isinstance(batch["answers"][i], list) else [batch["answers"][i]]
                 score_i = vqa_score(preds[i], batch["answers"][i])
-                tqdm.write(f"  [diag] pred={repr(preds[i])} | gt={gt_show} | score={score_i:.3f}")
+                print(f"  [diag] pred={repr(preds[i])} | gt={gt_show} | score={score_i:.3f}", flush=True)
 
         for pred, gt_answers, qid in zip(preds, batch["answers"], batch["question_id"]):
             score = vqa_score(pred, gt_answers)
@@ -288,10 +288,11 @@ def evaluate_vqav2(model, data_root, device, batch_size, max_samples=None, log_i
 
         if log_interval > 0 and (step + 1) % log_interval == 0:
             running = sum(scores) / len(scores) * 100
-            tqdm.write(
+            print(
                 f"[VQAv2] step {step+1}/{len(loader)} | "
                 f"VQA-Score: {running:.2f}% | "
-                f"samples: {len(scores)}"
+                f"samples: {len(scores)}",
+                flush=True,
             )
 
     vqa_score_pct = sum(scores) / len(scores) * 100
@@ -343,7 +344,7 @@ def evaluate_gqa(model, data_root, device, batch_size, max_samples=None, spatial
             for i in range(min(4, len(preds))):
                 gt_show = batch["answers"][i]
                 gt = gt_show[0] if isinstance(gt_show, list) else gt_show
-                tqdm.write(f"  [diag] pred={repr(preds[i])} | gt={repr(gt)}")
+                print(f"  [diag] pred={repr(preds[i])} | gt={repr(gt)}", flush=True)
 
         for i, (pred, gt_answers, qid) in enumerate(
             zip(preds, batch["answers"], batch["question_id"])
@@ -378,9 +379,10 @@ def evaluate_gqa(model, data_root, device, batch_size, max_samples=None, spatial
                 sp_acc = sum(spatial_correct) / len(spatial_correct) * 100
                 gl_acc = sum(global_correct) / len(global_correct) * 100 if global_correct else 0.0
                 sp_str = f" | Spatial: {sp_acc:.2f}% ({len(spatial_correct)}) | Global: {gl_acc:.2f}% ({len(global_correct)})"
-            tqdm.write(
+            print(
                 f"[GQA] step {step+1}/{len(loader)} | "
-                f"Overall: {overall_run:.2f}% | samples: {len(all_correct)}{sp_str}"
+                f"Overall: {overall_run:.2f}% | samples: {len(all_correct)}{sp_str}",
+                flush=True,
             )
 
     overall_acc = sum(all_correct) / len(all_correct) * 100
@@ -466,20 +468,22 @@ def evaluate_pope(model, data_root, device, batch_size, max_samples=None, log_in
 
             if not pope_diag_done and step == 0:
                 for i in range(min(4, len(preds))):
-                    tqdm.write(
+                    print(
                         f"  [diag] raw={repr(raw_answers[i])} | "
-                        f"pred={repr(preds[i])} | gt={repr(gt[i])}"
+                        f"pred={repr(preds[i])} | gt={repr(gt[i])}",
+                        flush=True,
                     )
                 pope_diag_done = True
 
             if log_interval > 0 and (step + 1) % log_interval == 0:
                 running = pope_f1(all_preds, all_gt)
-                tqdm.write(
+                print(
                     f"[POPE/{variant}] step {step+1}/{len(loader)} | "
                     f"F1: {running['f1']*100:.2f}% | "
                     f"Prec: {running['precision']*100:.2f}% | "
                     f"Rec: {running['recall']*100:.2f}% | "
-                    f"samples: {len(all_preds)}"
+                    f"samples: {len(all_preds)}",
+                    flush=True,
                 )
 
         metrics = pope_f1(all_preds, all_gt)
