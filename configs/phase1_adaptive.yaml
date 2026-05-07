@@ -76,5 +76,5 @@ logging:
   save_interval: 2000
 
 checkpoint:
-  load_from: "runs/phase1_final/best.ckpt"
+  load_from: "runs/phase1_final/phase1/best.ckpt"
   strict: false
