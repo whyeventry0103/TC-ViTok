@@ -662,13 +662,16 @@ class TCViTokTrainer:
         if result.unexpected_keys:
             print(f"Checkpoint unexpected keys: {result.unexpected_keys}")
 
-        # Detect cross-phase resume: checkpoint phase != current trainer phase
+        # Detect cross-phase resume: checkpoint phase != current trainer phase,
+        # OR checkpoint step >= current max_steps (came from a different run).
         ckpt_phase = checkpoint.get("config", {}).get("phase", self.phase)
-        cross_phase = (ckpt_phase != self.phase)
+        ckpt_step = checkpoint.get("global_step", 0)
+        cross_phase = (ckpt_phase != self.phase) or (ckpt_step >= self.max_steps)
 
         if cross_phase:
             # Cross-phase: keep model weights but reset training state
-            print(f"Cross-phase resume (phase {ckpt_phase} → {self.phase}): "
+            print(f"Cross-phase resume (phase {ckpt_phase} step {ckpt_step} → "
+                  f"phase {self.phase} max {self.max_steps}): "
                   f"loaded model weights, reset step/epoch/optimizer to 0")
         else:
             # Same-phase: restore full training state
