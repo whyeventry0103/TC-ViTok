@@ -1,0 +1,27 @@
+Phase_1_final training: 
+    tmux new -s phase1_final
+    cd ~/TC-ViTok
+    git pull origin main
+    bash scripts/launch_multigpu.sh \
+      --config configs/phase1_final.yaml \
+      --output runs/phase1_final
+
+
+wandb: ⭐️ View project at https://wandb.ai/TC-ViToK/tc-vitok
+wandb: 🚀 View run at https://wandb.ai/TC-ViToK/tc-vitok/runs/lejua5wt
+
+
+
+Phase_1_adaptive training: 
+    tmux new -s phase1_adaptive
+    cd ~/TC-ViTok
+    bash scripts/launch_multigpu.sh \
+      --config configs/phase1_adaptive.yaml \
+      --output runs/phase1_adaptive
+
+wandb: ⭐️ View project at https://wandb.ai/TC-ViToK/tc-vitok
+wandb: 🚀 View run at https://wandb.ai/TC-ViToK/tc-vitok/runs/7osdsmeo
+
+
+May need access to see these runs tho 
+Eval logs are already present in .log files within this same folder 
