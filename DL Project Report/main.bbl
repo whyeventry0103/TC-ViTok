@@ -1,0 +1,113 @@
+\begin{thebibliography}{21}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Bengio et~al.(2013)Bengio, L{\'e}onard, and Courville]{bengio2013estimating}
+Bengio, Y., L{\'e}onard, N., and Courville, A.
+\newblock Estimating or propagating gradients through stochastic neurons for conditional computation.
+\newblock \emph{arXiv:1308.3432}, 2013.
+
+\bibitem[Bolya et~al.(2023)Bolya, Fu, Dai, Zhang, and Feichtenhofer]{bolya2022token}
+Bolya, D., Fu, C.-Y., Dai, X., Zhang, P., and Feichtenhofer, C.
+\newblock Token merging: Your {V}i{T} but faster.
+\newblock In \emph{ICLR}, 2023.
+
+\bibitem[Chen et~al.(2024)Chen, Zhao, Wang, Chen, Xu, Dong, and Zhang]{chen2024fastv}
+Chen, L., Zhao, J., Wang, X., Chen, D., Xu, R., Dong, P., and Zhang, W.
+\newblock An image is worth 1/2 tokens after layer 2: Plug-and-play inference acceleration for large vision-language models.
+\newblock In \emph{ECCV}, 2024.
+
+\bibitem[Endo et~al.(2025)]{endo2025feather}
+Endo, Y. et~al.
+\newblock {FEATHER}: Fine-grained efficient attention for text-heavy and spatially grounded {VLM} tasks.
+\newblock \emph{arXiv:2502.06789}, 2025.
+
+\bibitem[Goyal et~al.(2017)Goyal, Khot, Summers-Stay, Batra, and Parikh]{goyal2017vqav2}
+Goyal, Y., Khot, T., Summers-Stay, D., Batra, D., and Parikh, D.
+\newblock Making the {V} in {VQA} matter: Elevating the role of image understanding in visual question answering.
+\newblock In \emph{CVPR}, 2017.
+
+\bibitem[Hudson \& Manning(2019)Hudson and Manning]{hudson2019gqa}
+Hudson, D.~A. and Manning, C.~D.
+\newblock {GQA}: A new dataset for real-world visual reasoning and compositional question answering.
+\newblock In \emph{CVPR}, 2019.
+
+\bibitem[Jang et~al.(2017)Jang, Gu, and Poole]{jang2017categorical}
+Jang, E., Gu, S., and Poole, B.
+\newblock Categorical reparameterization with {Gumbel-Softmax}.
+\newblock In \emph{ICLR}, 2017.
+
+\bibitem[Kaplan et~al.(2020)Kaplan, McCandlish, Henighan, Brown, Chess, Child, Gray, Radford, Wu, and Amodei]{kaplan2020scaling}
+Kaplan, J., McCandlish, S., Henighan, T., Brown, T.~B., Chess, B., Child, R., Gray, S., Radford, A., Wu, J., and Amodei, D.
+\newblock Scaling laws for neural language models.
+\newblock \emph{arXiv:2001.08361}, 2020.
+
+\bibitem[Li et~al.(2023{\natexlab{a}})Li, Li, Savarese, and Hoi]{li2023blip2}
+Li, J., Li, D., Savarese, S., and Hoi, S.
+\newblock {BLIP-2}: Bootstrapping language-image pre-training with frozen image encoders and large language models.
+\newblock In \emph{ICML}, 2023{\natexlab{a}}.
+
+\bibitem[Li et~al.(2025)]{li2025qgvtc}
+Li, S. et~al.
+\newblock {QG-VTC}: Question-guided visual token compression in {MLLMs} for efficient {VQA}.
+\newblock \emph{Neurocomputing}, 2025.
+
+\bibitem[Li et~al.(2023{\natexlab{b}})Li, Du, Zhou, Wang, Zhao, and Wen]{li2023pope}
+Li, Y., Du, Y., Zhou, K., Wang, J., Zhao, X., and Wen, J.-R.
+\newblock Evaluating object hallucination in large vision-language models.
+\newblock \emph{EMNLP}, 2023{\natexlab{b}}.
+
+\bibitem[Liang et~al.(2022)Liang, Ge, Tong, Song, Wang, and Xie]{liang2022evit}
+Liang, Y., Ge, C., Tong, Z., Song, Y., Wang, J., and Xie, P.
+\newblock Not all patches are what you need: Expediting vision transformers via token reorganizations.
+\newblock In \emph{ICLR}, 2022.
+
+\bibitem[Liu et~al.(2023)Liu, Li, Wu, and Lee]{liu2024llava}
+Liu, H., Li, C., Wu, Q., and Lee, Y.~J.
+\newblock Visual instruction tuning.
+\newblock In \emph{NeurIPS}, 2023.
+
+\bibitem[Maddison et~al.(2017)Maddison, Mnih, and Teh]{maddison2017concrete}
+Maddison, C.~J., Mnih, A., and Teh, Y.~W.
+\newblock The concrete distribution: A continuous relaxation of discrete random variables.
+\newblock In \emph{ICLR}, 2017.
+
+\bibitem[Meng et~al.(2022)Meng, Li, Chen, Lan, Wu, Jiang, and Lim]{meng2022adavit}
+Meng, L., Li, H., Chen, B.-C., Lan, S., Wu, Z., Jiang, Y.-G., and Lim, S.-N.
+\newblock {AdaViT}: Adaptive vision transformers for efficient image recognition.
+\newblock In \emph{CVPR}, 2022.
+
+\bibitem[Oquab et~al.(2023)Oquab, Darcet, Moutakanni, Vo, Szafraniec, Khalidov, Fernandez, Haziza, Massa, El-Nouby, et~al.]{oquab2023dinov2}
+Oquab, M., Darcet, T., Moutakanni, T., Vo, H., Szafraniec, M., Khalidov, V., Fernandez, P., Haziza, D., Massa, F., El-Nouby, A., et~al.
+\newblock {DINOv2}: Learning robust visual features without supervision.
+\newblock \emph{arXiv:2304.07193}, 2023.
+
+\bibitem[Radford et~al.(2021)Radford, Kim, Hallacy, Ramesh, Goh, Agarwal, Sastry, Askell, Mishkin, Clark, et~al.]{radford2021clip}
+Radford, A., Kim, J.~W., Hallacy, C., Ramesh, A., Goh, G., Agarwal, S., Sastry, G., Askell, A., Mishkin, P., Clark, J., et~al.
+\newblock Learning transferable visual models from natural language supervision.
+\newblock In \emph{ICML}, 2021.
+
+\bibitem[Rao et~al.(2021)Rao, Zhao, Liu, Lu, Zhou, and Hsieh]{rao2021dynamicvit}
+Rao, Y., Zhao, W., Liu, B., Lu, J., Zhou, J., and Hsieh, C.-J.
+\newblock {DynamicViT}: Efficient vision transformers with dynamic token sparsification.
+\newblock In \emph{NeurIPS}, 2021.
+
+\bibitem[Shang et~al.(2024)Shang, Cai, Xu, Lee, and Yan]{shang2024llava}
+Shang, Y., Cai, M., Xu, B., Lee, Y.~J., and Yan, Y.
+\newblock {LLaVA-PruMerge}: Adaptive token reduction for efficient large multimodal models.
+\newblock \emph{arXiv:2403.15388}, 2024.
+
+\bibitem[Zhang et~al.(2025)Zhang, Fan, Ma, Zheng, Huang, Cheng, Gudovskiy, Okuno, Nakata, Keutzer, et~al.]{zhang2025sparsevlm}
+Zhang, Y., Fan, C.-K., Ma, J., Zheng, W., Huang, T., Cheng, K., Gudovskiy, D., Okuno, T., Nakata, Y., Keutzer, K., et~al.
+\newblock {SparseVLM}: Visual token sparsification for efficient vision-language model inference.
+\newblock In \emph{ICML}, 2025.
+
+\bibitem[Zhu et~al.(2024)]{zhu2024focusllava}
+Zhu, Y. et~al.
+\newblock {FocusLLaVA}: A coarse-to-fine visual token selection framework for efficient multimodal reasoning.
+\newblock \emph{arXiv:2401.08681}, 2024.
+
+\end{thebibliography}

@@ -1,0 +1,211 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex)
+ restricted \write18 enabled.
+entering extended mode
+(./main.tex
+LaTeX2e <2025-11-01>
+L3 programming layer <2026-03-20>
+(/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/base/article.cls
+Document Class: article 2025/01/22 v1.4n Standard LaTeX document class
+(/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/base/size10.clo)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/microtype/microtype.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/graphics/keyval.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/etoolbox/etoolbox.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/microtype/microtype-pdftex.def) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/microtype/microtype.cfg)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/graphics/graphicx.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/graphics/graphics.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/graphics/trig.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/graphics-cfg/graphics.cfg) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/graphics-def/pdftex.def))) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/subfigure/subfigure.sty
+****************************************
+* Local config file subfigure.cfg used *
+****************************************
+(/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/subfigure/subfigure.cfg)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/booktabs/booktabs.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/hyperref/hyperref.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/iftex/iftex.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/kvsetkeys/kvsetkeys.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/kvdefinekeys/kvdefinekeys.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pdfescape/pdfescape.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/ltxcmds/ltxcmds.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pdftexcmds/pdftexcmds.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/infwarerr/infwarerr.sty))) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/hycolor/hycolor.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/hyperref/nameref.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/refcount/refcount.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/gettitlestring/gettitlestring.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/kvoptions/kvoptions.sty))) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/stringenc/stringenc.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/hyperref/pd1enc.def) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/intcalc/intcalc.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/hyperref/puenc.def) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/url/url.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/bitset/bitset.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/bigintcalc/bigintcalc.sty))) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/hyperref/hpdftex.def (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/rerunfilecheck/rerunfilecheck.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/uniquecounter/uniquecounter.sty))) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/amsmath/amsmath.sty
+For additional information on amsmath, use the `?' option.
+(/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/amsmath/amstext.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/amsmath/amsgen.sty)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/amsmath/amsbsy.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/amsmath/amsopn.sty)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/amsfonts/amssymb.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/amsfonts/amsfonts.sty)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/xcolor/xcolor.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/graphics-cfg/color.cfg) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/graphics/mathcolor.ltx)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/pgf/frontendlayer/tikz.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/pgf/basiclayer/pgf.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/pgf/utilities/pgfrcs.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/utilities/pgfutil-common.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/utilities/pgfutil-latex.def) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/utilities/pgfrcs.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/pgf.revision.tex))) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/pgf/basiclayer/pgfcore.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/pgf/systemlayer/pgfsys.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/systemlayer/pgfsys.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/utilities/pgfkeys.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/utilities/pgfkeyslibraryfiltered.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/systemlayer/pgf.cfg) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/systemlayer/pgfsys-pdftex.def (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/systemlayer/pgfsys-common-pdf.def))) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/systemlayer/pgfsyssoftpath.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/systemlayer/pgfsysprotocol.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcore.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmath.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathutil.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathparser.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathfunctions.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathfunctions.basic.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathfunctions.trigonometric.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathfunctions.random.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathfunctions.comparison.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathfunctions.base.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathfunctions.round.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathfunctions.misc.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathfunctions.integerarithmetics.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathcalc.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmathfloat.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfint.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcorepoints.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcorepathconstruct.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcorepathusage.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcorescopes.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcoregraphicstate.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcoretransformations.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcorequick.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcoreobjects.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcorepathprocessing.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcorearrows.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcoreshade.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcoreimage.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcoreexternal.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcorelayers.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcoretransparency.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcorepatterns.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/basiclayer/pgfcorerdf.code.tex))) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/modules/pgfmoduleshapes.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/modules/pgfmoduleplot.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/pgf/compatibility/pgfcomp-version-0-65.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/pgf/compatibility/pgfcomp-version-1-18.sty)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/pgf/utilities/pgffor.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/pgf/utilities/pgfkeys.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/utilities/pgfkeys.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/pgf/math/pgfmath.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/math/pgfmath.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/utilities/pgffor.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/frontendlayer/tikz/tikz.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/libraries/pgflibraryplothandlers.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/modules/pgfmodulematrix.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/frontendlayer/tikz/libraries/tikzlibrarytopaths.code.tex))) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/libraries/pgflibraryarrows.meta.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/frontendlayer/tikz/libraries/tikzlibrarypositioning.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/frontendlayer/tikz/libraries/tikzlibraryshapes.geometric.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/libraries/shapes/pgflibraryshapes.geometric.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/frontendlayer/tikz/libraries/tikzlibraryfit.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/frontendlayer/tikz/libraries/tikzlibrarycalc.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/pgfplots/pgfplots.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplots.revision.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplots.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplotscore.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/sys/pgfplotssysgeneric.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/libs/pgfplotslibrary.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/oldpgfcompatib/pgfplotsoldpgfsupp_loader.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/libraries/pgflibraryfpu.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/oldpgfcompatib/pgfplotsoldpgfsupp_pgfutil-common-lists.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/util/pgfplotsutil.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/liststructure/pgfplotsliststructure.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/liststructure/pgfplotsliststructureext.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/liststructure/pgfplotsarray.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/liststructure/pgfplotsmatrix.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/numtable/pgfplotstableshared.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/liststructure/pgfplotsdeque.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/util/pgfplotsbinary.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/util/pgfplotsbinary.data.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/util/pgfplotsutil.verb.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/libs/pgflibrarypgfplots.surfshading.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/sys/pgflibrarypgfplots.surfshading.pgfsys-pdftex.def))) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/util/pgfplotscolormap.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/util/pgfplotscolor.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplotsstackedplots.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplotsplothandlers.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplotsmeshplothandler.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplotsmeshplotimage.code.tex))) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplots.scaling.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplotscoordprocessing.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplots.errorbars.code.tex)
+(/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplots.markers.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplotsticks.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/pgfplots.paths.code.tex) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/frontendlayer/tikz/libraries/tikzlibrarydecorations.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/modules/pgfmoduledecorations.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/frontendlayer/tikz/libraries/tikzlibrarydecorations.pathmorphing.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/libraries/decorations/pgflibrarydecorations.pathmorphing.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/frontendlayer/tikz/libraries/tikzlibrarydecorations.pathreplacing.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/libraries/decorations/pgflibrarydecorations.pathreplacing.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgfplots/libs/tikzlibrarypgfplots.contourlua.code.tex)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/frontendlayer/tikz/libraries/tikzlibraryplotmarks.code.tex (/Users/apple/Library/TinyTeX/texmf-dist/tex/generic/pgf/libraries/pgflibraryplotmarks.code.tex))) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/psnfss/pifont.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/psnfss/upzd.fd) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/psnfss/upsy.fd)) (./icml2021.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/psnfss/times.sty) (./fancyhdr.sty) (./algorithm.sty
+Document Style `algorithm' - floating environment
+(/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/float/float.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/base/ifthen.sty)) (./algorithmic.sty
+Document Style `algorithmic' - environment
+(/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/tools/calc.sty)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/natbib/natbib.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/eso-pic/eso-pic.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/forloop/forloop.sty)) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/psnfss/ot1ptm.fd) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/l3backend/l3backend-pdftex.def)
+No file main.aux.
+(/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/microtype/mt-ptm.cfg) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/epstopdf-pkg/epstopdf-base.sty (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/grfext/grfext.sty) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/latexconfig/epstopdf-sys.cfg))
+Package pgfplots notification 'compat/show suggested version=true': document has been generated with the most recent feature set (\pgfplotsset{compat=1.18}).
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `\\' on input line 61.
+
+(/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/psnfss/ot1pcr.fd) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/microtype/mt-cmr.cfg) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/amsfonts/umsa.fd) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/microtype/mt-msa.cfg) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/amsfonts/umsb.fd) (/Users/apple/Library/TinyTeX/texmf-dist/tex/latex/microtype/mt-msb.cfg)
+
+Package natbib Warning: Citation `liu2024llava' on page 1 undefined on input line 96.
+
+
+Underfull \vbox (badness 5064) has occurred while \output is active
+
+Package natbib Warning: Citation `bolya2022token' on page 1 undefined on input line 112.
+
+
+Package natbib Warning: Citation `liang2022evit' on page 1 undefined on input line 112.
+
+
+Package natbib Warning: Citation `chen2024fastv' on page 1 undefined on input line 113.
+
+
+Package natbib Warning: Citation `shang2024llava' on page 1 undefined on input line 113.
+
+
+Package natbib Warning: Citation `zhang2025sparsevlm' on page 1 undefined on input line 114.
+
+
+Package natbib Warning: Citation `zhu2024focusllava' on page 1 undefined on input line 119.
+
+
+Package natbib Warning: Citation `li2025qgvtc' on page 1 undefined on input line 120.
+
+
+LaTeX Warning: Reference `sec:tpn' on page 1 undefined on input line 131.
+
+
+Underfull \vbox (badness 10000) has occurred while \output is active [1{/Users/apple/Library/TinyTeX/texmf-var/fonts/map/pdftex/updmap/pdftex.map}{/Users/apple/Library/TinyTeX/texmf-dist/fonts/enc/dvips/base/8r.enc}]
+
+LaTeX Warning: Reference `sec:ste' on page 2 undefined on input line 136.
+
+
+LaTeX Warning: Reference `eq:taufix' on page 2 undefined on input line 136.
+
+
+LaTeX Warning: Reference `sec:merge' on page 2 undefined on input line 141.
+
+
+LaTeX Warning: Reference `eq:thresh' on page 2 undefined on input line 144.
+
+
+LaTeX Warning: Reference `sec:adaptive' on page 2 undefined on input line 146.
+
+
+Underfull \hbox (badness 2221) in paragraph at lines 148--155
+[]\OT1/ptm/m/n/10 (+20) Empirically, our sys-tem achieves \OT1/ptm/b/n/10 (+20) 67.12% on GQA
+
+Package natbib Warning: Citation `bolya2022token' on page 2 undefined on input line 161.
+
+
+Package natbib Warning: Citation `rao2021dynamicvit' on page 2 undefined on input line 163.
+
+
+Package natbib Warning: Citation `liang2022evit' on page 2 undefined on input line 165.
+
+
+Package natbib Warning: Citation `shang2024llava' on page 2 undefined on input line 167.
+
+
+Package natbib Warning: Citation `chen2024fastv' on page 2 undefined on input line 170.
+
+
+Package natbib Warning: Citation `chen2024fastv' on page 2 undefined on input line 174.
+
+
+Package natbib Warning: Citation `endo2025feather' on page 2 undefined on input line 174.
+
+
+Package natbib Warning: Citation `li2023blip2' on page 2 undefined on input line 177.
+
+
+Package natbib Warning: Citation `zhang2025sparsevlm' on page 2 undefined on input line 180.
+
+
+Package natbib Warning: Citation `li2025qgvtc' on page 2 undefined on input line 183.
+
+
+Package natbib Warning: Citation `zhu2024focusllava' on page 2 undefined on input line 186.
+
+
+Underfull \vbox (badness 10000) has occurred while \output is active
+
+Package natbib Warning: Citation `jang2017categorical' on page 2 undefined on input line 192.
+
+
+Package natbib Warning: Citation `maddison2017concrete' on page 2 undefined on input line 192.
+
+
+Package natbib Warning: Citation `bengio2013estimating' on page 2 undefined on input line 195.
+
+
+Package natbib Warning: Citation `meng2022adavit' on page 2 undefined on input line 198.
+
+
+Underfull \hbox (badness 1466) in paragraph at lines 191--202
+[]\OT1/ptm/b/n/10 (+20) Differentiable dis-crete op-ti-miza-tion. \OT1/ptm/m/n/10 (+20) The Gumbel-
+
+LaTeX Warning: Reference `tab:methods' on page 2 undefined on input line 203.
+
+
+Package natbib Warning: Citation `bolya2022token' on page 2 undefined on input line 232.
+
+
+Package natbib Warning: Citation `rao2021dynamicvit' on page 2 undefined on input line 232.
+
+
+Package natbib Warning: Citation `liang2022evit' on page 2 undefined on input line 232.
+
+
+Package natbib Warning: Citation `shang2024llava' on page 2 undefined on input line 232.
+
+
+Package natbib Warning: Citation `chen2024fastv' on page 2 undefined on input line 232.
+
+
+Package natbib Warning: Citation `zhang2025sparsevlm' on page 2 undefined on input line 232.
+
+
+Package natbib Warning: Citation `li2025qgvtc' on page 2 undefined on input line 232.
+
+
+Package natbib Warning: Citation `zhu2024focusllava' on page 2 undefined on input line 232.
+
+[2
+pdfTeX warning (ext4): destination with the same identifier (name{table.1}) has been already used, duplicate ignored
+<argument> ...shipout:D \box_use:N \l_shipout_box 
+                                                  \__shipout_drop_firstpage_...
+l.251 \[
+        ]
+
+Package natbib Warning: Citation `oquab2023dinov2' on page 3 undefined on input line 262.
+
+
+Package natbib Warning: Citation `radford2021clip' on page 3 undefined on input line 269.
+
+
+Package natbib Warning: Citation `radford2021clip' on page 3 undefined on input line 271.
+
+
+Overfull \hbox (75.51852pt too wide) detected at line 288
+\OML/cmm/m/it/10 Q \OT1/cmr/m/n/10 = \OT1/cmr/bx/n/10 q \OML/cmm/m/it/10 W[] \OMS/cmsy/m/n/10 2 \U/msb/m/n/10 R[]\OML/cmm/m/it/10 ;  K \OT1/cmr/m/n/10 = \OT1/cmr/bx/n/10 v[] \OML/cmm/m/it/10 W[] \OMS/cmsy/m/n/10 2 \U/msb/m/n/10 R[]\OML/cmm/m/it/10 ;  V \OT1/cmr/m/n/10 = \OT1/cmr/bx/n/10 v[] \OML/cmm/m/it/10 W[] \OMS/cmsy/m/n/10 2 \U/msb/m/n/10 R[]
+
+Package natbib Warning: Citation `jang2017categorical' on page 3 undefined on input line 318.
+
+
+Package natbib Warning: Citation `bengio2013estimating' on page 3 undefined on input line 318.
+
+
+LaTeX Warning: Reference `eq:noisy' on page 3 undefined on input line 335.
+
+
+Package natbib Warning: Citation `shang2024llava' on page 3 undefined on input line 442.
+
+[3]
+Overfull \hbox (27.16624pt too wide) detected at line 549
+[][][]\OML/cmm/m/it/10 k[] \OT1/cmr/m/n/10 = \OML/cmm/m/it/10 ^^[  [] ;
+
+LaTeX Warning: Reference `eq:thresh' on page 4 undefined on input line 569.
+
+
+LaTeX Warning: Reference `tab:loss' on page 4 undefined on input line 597.
+
+[4
+pdfTeX warning (ext4): destination with the same identifier (name{figure.1}) has been already used, duplicate ignored
+<argument> ...shipout:D \box_use:N \l_shipout_box 
+                                                  \__shipout_drop_firstpage_...
+l.623 
+      
+pdfTeX warning (ext4): destination with the same identifier (name{figure.2}) has been already used, duplicate ignored
+<argument> ...shipout:D \box_use:N \l_shipout_box 
+                                                  \__shipout_drop_firstpage_...
+l.623 
+      ]
+! Double subscript.
+l.625 ...al{L}_\mathrm{div} = \mathbb{E}[\cos(\sN_
+                                                  a,\sN_b) \cdot
+? </Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx6.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx9.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmex10.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi5.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi6.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi7.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi9.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmmib10.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmr5.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmr6.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmr7.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy5.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy6.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy7.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy9.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/symbols/msbm10.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/public/amsfonts/symbols/msbm7.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/urw/courier/ucrr8a.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/urw/times/utmb8a.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/urw/times/utmr8a.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/urw/times/utmr8a.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/urw/times/utmri8a.pfb></Users/apple/Library/TinyTeX/texmf-dist/fonts/type1/urw/zapfding/uzdr.pfb>
+Output written on main.pdf (4 pages, 314224 bytes).
+Transcript written on main.log.

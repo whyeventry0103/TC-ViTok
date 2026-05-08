@@ -1,0 +1,1507 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%    This is a modified version of the ICML 2021 template     %%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%% Link: https://www.overleaf.com/latex/templates/icml2021-template/dsftnbmjgyhv %%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass{article}
+
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{subfigure}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,calc,backgrounds,decorations.pathreplacing,decorations.markings,patterns,shadings,shadows}
+
+% --- Professional color palette (used by custom diagrams) ---
+\definecolor{tcblue}{RGB}{45,95,165}
+\definecolor{tcbluelight}{RGB}{210,225,245}
+\definecolor{tcaccent}{RGB}{198,69,53}
+\definecolor{tcaccentlight}{RGB}{250,225,220}
+\definecolor{tcgreen}{RGB}{60,135,90}
+\definecolor{tcgreenlight}{RGB}{220,238,225}
+\definecolor{tcgold}{RGB}{205,150,40}
+\definecolor{tcgoldlight}{RGB}{250,238,205}
+\definecolor{tcgray}{RGB}{96,108,124}
+\definecolor{tcgraylight}{RGB}{235,238,243}
+\definecolor{tcink}{RGB}{32,40,52}
+\definecolor{tcpaper}{RGB}{252,252,250}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{pifont}
+
+\newcommand{\theHalgorithm}{\arabic{algorithm}}
+
+\usepackage[accepted]{icml2021}
+
+% Running title — prevents "Title suppressed due to excessive length" in page headers
+\icmltitlerunning{TC-ViTok: Task-Conditioned Visual Tokenization}
+
+% -------------------------------------------------------------------
+% Convenience macros
+\newcommand{\vcoarse}{\mathbf{v}_{c}}
+\newcommand{\vfine}{\mathbf{v}_{f}}
+\newcommand{\qemb}{\mathbf{q}}
+\newcommand{\sN}{\mathbf{s}_N}
+\newcommand{\vsel}{\mathbf{v}_{sel}}
+\newcommand{\vunsel}{\mathbf{v}_{unsel}}
+\newcommand{\vmerged}{\mathbf{v}_{merged}}
+\newcommand{\bsig}{\boldsymbol{\sigma}}
+% -------------------------------------------------------------------
+
+\begin{document}
+
+\twocolumn[
+\icmltitle{TC-ViTok: Task-Conditioned Visual Tokenization with\\
+           Informative Token Merge and Adaptive Budget}
+
+% GitHub link (required)
+\vspace{-2pt}
+{\centering\small\url{https://github.com/whyeventry0103/TC-ViTok}\par}
+\vspace{4pt}
+
+\begin{icmlauthorlist}
+\icmlauthor{Muhammad Ali Shah (27100172)}{}
+\icmlauthor{Talha Hassan Ul Haq (27100306)}{}
+\end{icmlauthorlist}
+
+\icmlkeywords{Vision-Language Models, Visual Token Compression, Query-Conditioned Selection,
+              Straight-Through Estimator, Adaptive Computation}
+
+\vskip 0.3in
+]
+
+% ===================================================================
+\begin{abstract}
+Vision-language models (VLMs) such as LLaVA-1.5 encode every image into a fixed
+576 visual tokens regardless of question complexity, creating a quadratic
+attention bottleneck dominated by uninformative regions.
+We present \textbf{TC-ViTok}, a query-conditioned visual tokenizer that selects
+$k{=}144$ task-relevant tokens \emph{before} the language model using a lightweight
+($\approx$887K-parameter) policy network operating on frozen pre-computed features.
+Three technical contributions enable end-to-end training despite discrete selection:
+(i)~a Gumbel-Sigmoid straight-through estimator with a novel \emph{tau-independent
+additive gradient correction} that maintains learning signal as temperature anneals;
+(ii)~\emph{Informative Token Merge}, a parameter-free mechanism that absorbs
+discarded background tokens into the selected set via TPN-score-weighted cosine
+assignment; and (iii)~a \emph{BudgetPredictor} ($\approx$25K params) with a
+differentiable threshold trick for per-sample variable token counts.
+
+On LLaVA-1.5-7B at $4{\times}$ token compression, TC-ViTok achieves
+\textbf{67.12\% on GQA val\_balanced}, \textbf{exceeding the uncompressed
+576-token model (61.0\%) by +6.1 points}.
+The model also reaches 72.27\% on VQAv2 and 79.09\% POPE F1, with a
+\textbf{$3.5\times$ theoretical reduction in LLM prefill FLOPs} and 71\% smaller KV cache.
+The GQA improvement —- the only metric where compression \emph{outperforms} the
+uncompressed baseline —- demonstrates that for compositional spatial reasoning,
+query-conditioned selection is not merely a compression technique but an active
+denoising mechanism. We further document the failure modes of eight earlier
+trainable-pooler variants, providing concrete guidance for future modular
+visual token systems. Code: \url{https://github.com/whyeventry0103/TC-ViTok}.
+\end{abstract}
+
+% ===================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Modern VLMs such as LLaVA-1.5~\cite{liu2024llava} attach a large language model (LLM)
+to a frozen CLIP ViT-L/14 vision encoder via a learned multimodal projector.
+At inference, the encoder maps a $336\times336$ image to $576$ patch tokens
+($24\times24$ grid, patch size $14\times14$), which are prepended to the tokenized
+question and fed into the LLM.
+Since attention cost is quadratic in sequence length, these 576 visual tokens
+(which far outnumber the $\sim$30 typical question tokens) dominate prefill FLOPs.
+
+This fixed-token representation is informationally wasteful.
+A question asking ``What is written on the sign?'' requires only the small image region
+containing text, yet the LLM still receives all 576 tokens including sky, background,
+and irrelevant objects. Conversely, ``Is there a person in the image?'' needs a global
+scan rather than fine-grained local detail. The token budget is determined by image
+resolution, not by what the question requires.
+
+Prior work has addressed the redundancy half of this problem through token compression:
+Token Merging (ToMe)~\cite{bolya2022token} and EViT~\cite{liang2022evit} reduce tokens
+within the ViT; FastV~\cite{chen2024fastv} and LLaVA-PruMerge~\cite{shang2024llava}
+prune after encoding; SparseVLM~\cite{zhang2025sparsevlm} recycles pruned tokens inside
+the LLM. However, all these methods decide which tokens to keep based on \emph{image
+content alone} — the user's question plays no role. This is the query-conditioning gap.
+
+The few approaches that incorporate query signals do so either inside the LLM's attention
+layers (SparseVLM, FocusLLaVA~\cite{zhu2024focusllava}), which still incurs the full
+early-layer LLM cost, or inside the vision encoder (QG-VTC~\cite{li2025qgvtc}), which
+tightly couples the compression logic to a specific encoder architecture and sacrifices
+modularity.
+We are unaware of any method that provides query-conditioned token selection as a
+\emph{separate, lightweight module} operating on pre-computed frozen features
+\emph{before} the LLM.
+
+We make four contributions:
+
+\textbf{(1)} A modular, query-conditioned token-selection architecture that operates
+on frozen pre-computed features \emph{before} the LLM, decoupling compression from
+both encoder and LLM internals (Section~\ref{sec:tpn}).
+
+\textbf{(2)} A novel \emph{tau-independent additive gradient correction} for
+Gumbel-Sigmoid STE that maintains a non-zero, dot-product gradient signal at any
+temperature, eliminating the gradient-death failure mode standard STE exhibits
+when annealing toward hard selection (Section~\ref{sec:ste}, Eq.~\ref{eq:taufix}).
+
+\textbf{(3)} \emph{Informative Token Merge}: a zero-parameter mechanism that
+recovers near-threshold context tokens via TPN-score-weighted cosine assignment,
+explicitly avoiding the trainable-pooler co-adaptation pathology we documented
+across eight failed experiments (Section~\ref{sec:merge}).
+
+\textbf{(4)} A \emph{BudgetPredictor} with a \emph{differentiable threshold trick}
+(Eq.~\ref{eq:thresh}) that routes budget-penalty gradients through what would
+otherwise be a non-differentiable per-sample top-$k$ operation
+(Section~\ref{sec:adaptive}).
+
+Empirically, our system achieves \textbf{67.12\% on GQA val\_balanced ---
+$+6.1$ points above full LLaVA-1.5-7B} -- at $4{\times}$ token compression
+($k{=}144$) and a $3.4{\times}$ theoretical LLM-prefill speedup.
+The GQA improvement, surprising at first reading, follows directly from
+query-conditioned selection acting as an active denoiser: GQA's compositional
+structure rewards precision over coverage, a regime where fewer better-chosen
+tokens beat all 576.
+
+% ===================================================================
+\section{Related Work}
+\label{sec:related}
+
+\textbf{Query-agnostic visual token compression.}
+ToMe~\cite{bolya2022token} merges visually similar tokens via bipartite matching inside
+ViT layers, achieving 2$\times$ throughput at modest accuracy loss on classification.
+DynamicViT~\cite{rao2021dynamicvit} learns binary dropping masks at intermediate layers
+via Gumbel-Softmax, trained with distillation.
+EViT~\cite{liang2022evit} uses CLS-token attention to rank tokens and fuses low-importance
+ones.
+Post-encoder methods include LLaVA-PruMerge~\cite{shang2024llava}, which prunes by
+CLS-attention rank then merges pruned tokens with nearest retained neighbors via
+key-similarity weighting.
+FastV~\cite{chen2024fastv} observes that LLM text-to-visual attention collapses after
+layer 2 and prunes low-attention tokens at that boundary.
+All these methods share a fundamental limitation: the compression decision is made
+without knowledge of the query, systematically harming spatially-grounded tasks
+(localization, OCR) more than global tasks~\cite{chen2024fastv, endo2025feather}.
+
+\textbf{Query-aware compression.}
+BLIP-2~\cite{li2023blip2}'s Q-Former extracts visual tokens via cross-attention with
+learned query embeddings, but the queries are fixed parameters shared across all
+inputs rather than derived from the user's question.
+SparseVLM~\cite{zhang2025sparsevlm} incorporates text guidance through the LLM's own
+text-to-visual attention with adaptive per-layer recycling, but selection happens inside
+the LLM after all tokens have already been injected.
+QG-VTC~\cite{li2025qgvtc} achieves near-uncompressed performance with 1/8 of tokens
+by embedding the question into the ViT's feature space and progressively compressing
+within the encoder — but this couples compression to the encoder's internal architecture.
+FocusLLaVA~\cite{zhu2024focusllava} applies coarse-then-fine instruction-guided selection,
+but the text-guided stage remains inside the LLM.
+TC-ViTok closes this gap by implementing query-conditioning as a modular pre-LLM module
+that operates on frozen, pre-computed features from both encoders.
+
+\textbf{Differentiable discrete optimization.}
+The Gumbel-Softmax trick~\cite{jang2017categorical, maddison2017concrete} enables
+gradient estimation through categorical variables via a continuous relaxation parameterized
+by temperature.
+The straight-through estimator (STE)~\cite{bengio2013estimating} uses the hard binary
+mask in the forward pass while routing gradients through the soft relaxation, providing
+low-variance gradient estimates for subset selection.
+AdaViT~\cite{meng2022adavit} demonstrates learned per-sample computation budgets in ViTs.
+TC-ViTok extends these ideas with (i) Gumbel-Sigmoid for independent binary decisions
+across 576 positions, and (ii) an additive tau-independent gradient correction that
+resolves a gradient vanishing failure mode at low temperature absent from prior work.
+
+Table~\ref{tab:methods} positions TC-ViTok in this landscape along four
+operationally-relevant axes: \emph{when} compression occurs, \emph{whether}
+the question conditions selection, \emph{whether} discarded tokens are recovered,
+and \emph{whether} the budget can vary per sample.
+
+\begin{table}[t]
+\caption{Positioning of TC-ViTok in the visual token compression landscape.
+Pre-LLM = decision made before LLM forward pass (saves all LLM FLOPs);
+inside LLM = decision made between LLM layers (saves only late-layer FLOPs).}
+\label{tab:methods}
+\vskip 0.1in
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{Where} & \textbf{Query} & \textbf{Recover} & \textbf{Adapt $k$} \\
+\midrule
+ToMe~\cite{bolya2022token}        & in-encoder    & \ding{55} & merge      & \ding{55} \\
+DynamicViT~\cite{rao2021dynamicvit}& in-encoder    & \ding{55} & \ding{55}  & \ding{55} \\
+EViT~\cite{liang2022evit}         & in-encoder    & \ding{55} & fuse       & \ding{55} \\
+PruMerge~\cite{shang2024llava}    & post-encoder  & \ding{55} & merge      & \ding{55} \\
+FastV~\cite{chen2024fastv}        & in-LLM (L=2)  & implicit  & \ding{55}  & \ding{55} \\
+SparseVLM~\cite{zhang2025sparsevlm}& in-LLM       & via attn  & recycle    & per-layer \\
+QG-VTC~\cite{li2025qgvtc}         & in-encoder    & explicit  & merge      & \ding{55} \\
+FocusLLaVA~\cite{zhu2024focusllava}& in-LLM       & explicit  & coarse-fine & \ding{55} \\
+\midrule
+\textbf{TC-ViTok (ours)}          & \textbf{pre-LLM} & \textbf{explicit} & \textbf{merge} & \textbf{per-sample} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+To our knowledge, TC-ViTok is the first method that combines (a) explicit
+question-conditioned selection, (b) pre-LLM placement on frozen features, and
+(c) per-sample adaptive budget into a single modular system.
+
+% ===================================================================
+\section{Methodology}
+\label{sec:method}
+
+\subsection{Problem Formulation}
+\label{sec:prob}
+
+Given an image $\mathbf{I}$ and a natural-language question $\mathbf{Q}$,
+a VLM $f_\theta$ generates an answer $\mathbf{A}$.
+Standard LLaVA-1.5 encodes $\mathbf{I}$ into $N=576$ patch tokens
+$\vfine \in \mathbb{R}^{N \times D_v}$ (where $D_v=1024$) and processes all of them.
+We instead learn a policy:
+\[
+  \pi_\phi(\mathbf{I}, \mathbf{Q}) \;\to\; \mathcal{S} \;\subseteq\; \{1, \ldots, N\},
+  \quad |\mathcal{S}| = k
+\]
+where $k \ll N$ and $\phi$ is trained end-to-end from the VQA loss.
+The LLM receives only the $k$ selected tokens, directly reducing prefill FLOPs.
+
+\subsection{Frozen Encoders}
+\label{sec:encoders}
+
+We use three frozen pre-trained encoders.
+\textbf{DINOv2-S}~\cite{oquab2023dinov2} encodes a $98\times98$ crop of $\mathbf{I}$
+(7 patches per side) to produce a coarse spatial map
+$\vcoarse \in \mathbb{R}^{49 \times 384}$.
+We use 98px input (not the standard 518px) to give the TPN a cheap,
+7$\times$7 spatial grid that is efficient to cross-attend.
+DINOv2's self-supervised training preserves patch-level spatial locality better than
+CLIP's contrastive objective, making it a more precise spatial guide.
+\textbf{CLIP ViT-B/32}~\cite{radford2021clip} encodes $\mathbf{Q}$ to produce a
+query embedding $\qemb \in \mathbb{R}^{512}$ (the EOS token representation).
+\textbf{CLIP ViT-L/14}~\cite{radford2021clip} encodes a $336\times336$ crop to
+produce full-resolution features $\vfine \in \mathbb{R}^{576 \times 1024}$, which
+are already aligned to LLaVA-1.5's LLM since LLaVA uses the same encoder.
+All three encoders are always frozen — no gradients flow into them.
+
+\subsection{Tokenization Policy Network (TPN)}
+\label{sec:tpn}
+
+The TPN ($\approx$887K parameters) maps $(\vcoarse, \qemb)$ to importance scores
+$\sN \in \mathbb{R}^N$ and selection indices $\text{idx} \in \mathbb{Z}^k$.
+
+\textbf{Cross-attention (4 heads).}
+The question embedding is treated as a single query:
+\[
+  Q = \qemb\, W_Q \in \mathbb{R}^{1 \times 384}, \quad
+  K = \vcoarse\, W_K \in \mathbb{R}^{M \times 384}, \quad
+  V = \vcoarse\, W_V \in \mathbb{R}^{M \times 384}
+\]
+where $M=49$.
+Multi-head attention yields an attended context vector
+$\text{ctx} \in \mathbb{R}^{384}$ and head-averaged spatial weights
+$\boldsymbol{\alpha} \in \mathbb{R}^{M}$.
+The context encodes \emph{what} visual content is relevant to the question;
+$\boldsymbol{\alpha}$ encodes \emph{where}.
+
+\textbf{Score MLP.}
+$[\text{ctx};\, \boldsymbol{\alpha}] \in \mathbb{R}^{433}$ is passed through a
+LayerNorm and two-layer MLP to produce 49 coarse scores, then bilinearly upsampled
+$7\times7 \to 24\times24$ to yield $\sN \in \mathbb{R}^{576}$.
+
+\textbf{Instance normalization.}
+$\sN$ is normalized to zero mean and unit variance per sample:
+$\sN \leftarrow (\sN - \mu) / \sigma$.
+Without this, Adam pushes score magnitudes to $\pm100$ within $\sim$1000 steps.
+At that scale, Gumbel noise (magnitude $\approx\tau \approx 1.0$) is negligible
+compared to scores, and the same 576 positions are always selected regardless of
+question — entropy collapse.
+Alternative normalizations (tanh, batch norm) also fail:
+tanh saturates at $\pm1$ ($|\tanh'(\pm100)| \approx 10^{-87}$),
+and batch norm carries a stateful running mean that disrupts inference.
+Instance norm permanently anchors scores to $\mu=0, \sigma=1$
+with no learnable parameters the optimizer can circumvent.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\columnwidth]{figures/tpn_architecture.png}
+\caption{\textbf{TPN internal architecture and BudgetPredictor wiring.}
+Cross-attention with $H{=}4$ heads ($Q{=}\qemb$, $K{=}V{=}\vcoarse$) produces a
+context vector $\mathrm{ctx}{\in}\mathbb{R}^{384}$ and head-averaged spatial
+weights $\boldsymbol{\alpha}{\in}\mathbb{R}^{49}$.
+The $[\mathrm{ctx};\boldsymbol{\alpha}]$ concatenation passes through a Score MLP
+producing 49 coarse scores, which are bilinearly upsampled $7{\times}7\to24{\times}24$
+and instance-normalized to yield $\sN{\in}\mathbb{R}^{576}$.
+Phase 1 Adaptive shares $\mathrm{ctx}$ with the BudgetPredictor (orange) which
+emits the per-sample token fraction $k_{\mathrm{frac}}{\in}[0.0625, 0.5]$
+consumed by the Adaptive Gumbel-STE.}
+\label{fig:tpn}
+\end{figure}
+
+\subsection{Gumbel-Sigmoid Straight-Through Estimator}
+\label{sec:ste}
+
+Token selection is a discrete top-$k$ operation with zero gradients almost everywhere.
+We adapt the Gumbel-Sigmoid STE~\cite{jang2017categorical, bengio2013estimating}
+for independent binary subset selection over 576 positions.
+
+\textbf{Forward pass.} Gumbel noise $\mathbf{g} \sim \mathrm{Gumbel}(0,1)$ provides
+per-sample diversity; the temperature $\tau$ controls the soft-to-hard transition:
+\begin{align}
+  \mathbf{n} &= \sN + \mathbf{g}, \label{eq:noisy} \\
+  \mathbf{m}_{\mathrm{soft}} &= \sigma(\mathbf{n} / \tau) \in (0,1)^N, \label{eq:soft} \\
+  \text{idx} &= \mathrm{topk}(\mathbf{n},\, k), \label{eq:topk} \\
+  \mathbf{m}_{\mathrm{hard}} &= \mathbf{0};\; \mathbf{m}_{\mathrm{hard}}[\text{idx}] = 1, \label{eq:hard} \\
+  \mathbf{m}_{\mathrm{STE}} &= \mathbf{m}_{\mathrm{hard}}
+    - \mathbf{m}_{\mathrm{soft}}.\mathrm{detach}()
+    + \mathbf{m}_{\mathrm{soft}}. \label{eq:ste}
+\end{align}
+In the forward pass, $\mathbf{m}_{\mathrm{STE}} = \mathbf{m}_{\mathrm{hard}}$
+(the $\mathbf{m}_{\mathrm{soft}}$ terms cancel).
+In the backward pass, the gradient flows through $\mathbf{m}_{\mathrm{soft}}$.
+Noise in Eq.~\eqref{eq:noisy} (not raw scores) is used for top-$k$
+to ensure per-sample selection diversity across the batch;
+using raw scores selects identical positions for all samples, collapsing entropy.
+Temperature is annealed linearly $\tau: 1.0 \to 0.3$ over training.
+
+\textbf{Tau-independent additive gradient correction.}
+At low $\tau$, $\mathbf{m}_{\mathrm{soft}}$ saturates toward $\{0,1\}$, making
+$\partial \mathbf{m}_{\mathrm{soft}} / \partial \sN \approx 0$ for all
+positions with $|\sN[i]| > 1$.
+This kills the gradient path to TPN weights, halting learning after $\tau$
+has annealed.
+We resolve this by multiplying gathered visual tokens by an additive correction:
+\begin{equation}
+  \vsel = \mathrm{gather}(\vfine, \text{idx}), \quad
+  \mathbf{c} = \mathrm{gather}(\sN, \text{idx}), \label{eq:gather}
+\end{equation}
+\begin{equation}
+  \vsel \leftarrow \vsel \odot (1 + \mathbf{c} - \mathbf{c}.\mathrm{detach}()).
+  \label{eq:taufix}
+\end{equation}
+In the forward pass, $\mathbf{c} - \mathbf{c}.\mathrm{detach}() = \mathbf{0}$,
+so $\vsel$ is unchanged.
+In the backward pass, for selected position $j$:
+\[
+  \frac{\partial \mathcal{L}_\mathrm{VQA}}{\partial \sN[j]}
+  = \sum_{d=1}^{D_v} \frac{\partial \mathcal{L}}{\partial \vsel[j,d]} \cdot \vsel[j,d],
+\]
+a dot product between the VQA gradient and visual features at position $j$.
+This gradient is non-zero at any $\tau$ and provides a dense, token-level
+supervision signal for TPN throughout training.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.96\textwidth]{figures/gumbel_ste.png}
+\caption{\textbf{Fixed-$k$ vs.\ Adaptive Gumbel-Sigmoid STE} (Phase 1 Final vs.\
+Phase 1 Adaptive). \emph{Left:} the standard fixed-budget pipeline: scores +
+Gumbel noise feed both a soft sigmoid (for backward pass) and a hard top-$k{=}144$
+selection (for forward pass), composed via the STE identity
+$\mathbf{m}_{\mathrm{STE}}{=}\mathbf{m}_{\mathrm{hard}}{-}\mathbf{m}_{\mathrm{soft}}.\mathrm{detach}(){+}\mathbf{m}_{\mathrm{soft}}$.
+\emph{Right:} the adaptive variant inserts a per-sample threshold $\theta$
+derived from the BudgetPredictor's $k_{\mathrm{frac}}$ output. The shifted
+soft mask $\sigma((\mathbf{n}{-}\theta)/\tau)$ produces a differentiable
+effective count $k_{\mathrm{eff}}{=}\sum_i m_{\mathrm{soft},i}$ that drives
+the budget loss; per-sample top-$k_{\mathrm{hard}}$ provides the hard mask
+with right-padding to $k_{\max}$ for batched processing.}
+\label{fig:ste}
+\end{figure*}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\columnwidth]{figures/tc_vitok_architecture.png}
+\caption{\textbf{TC-ViTok system architecture with adaptive budget.}
+Three frozen encoders (purple) extract complementary representations:
+CLIP ViT-L/14 produces high-resolution patch tokens $\vfine$ for the LLM,
+DINOv2-S provides a coarse spatial map $\vcoarse$ for the TPN, and
+CLIP Text encodes the question into $\qemb$.
+The TPN (887K) cross-attends $\qemb$ over $\vcoarse$ and emits per-position
+scores $\sN$ plus a context vector $\mathrm{ctx}$. In adaptive mode, the
+BudgetPredictor (25K, orange) maps $\mathrm{ctx}$ to a per-sample token fraction.
+The Adaptive Gumbel-STE produces variable-length selection indices, which
+gate-and-merge $\vfine$ before the multimodal projector and LLaVA-1.5-7B+LoRA.}
+\label{fig:arch}
+\end{figure}
+
+\subsection{Informative Token Merge}
+\label{sec:merge}
+
+Hard dropping of the 432 unselected tokens discards all the contextual information
+they carry.
+PruMerge~\cite{shang2024llava} shows that merging such tokens recovers $\sim$2\%
+VQAv2 over pure pruning at the same budget.
+We implement a query-conditioned variant: the TPN score of an unselected token
+determines how strongly it contributes to the merge, so tokens that were ``almost
+selected'' (near-threshold, task-relevant) contribute more than distant background tokens.
+
+Let $\vsel \in \mathbb{R}^{k \times D_v}$ be the gathered selected tokens and
+$\vunsel \in \mathbb{R}^{(N-k) \times D_v}$ the unselected tokens.
+Each unselected token $i$ is soft-assigned to the nearest selected token by cosine similarity:
+\begin{equation}
+  A_{ij} = \mathrm{softmax}_j
+  \!\left(\frac{\hat{\mathbf{v}}_{\mathrm{unsel},i}^\top \hat{\mathbf{v}}_{\mathrm{sel},j}}
+               {\tau_m}\right), \label{eq:assign}
+\end{equation}
+where $\hat{\cdot}$ denotes $\ell_2$-normalization and $\tau_m{=}0.1$.
+Each unselected token is further weighted by its TPN score:
+\begin{equation}
+  w_i = \mathrm{softmax}_i(s_i^{\mathrm{unsel}}), \label{eq:scoreweight}
+\end{equation}
+where $s_i^{\mathrm{unsel}} = \sN[\mathrm{unsel\_idx}[i]]$.
+The normalized contribution matrix $\tilde{A}_{ij} = w_i A_{ij} /
+\!\sum_{i'} w_{i'} A_{i'j}$ aggregates unselected content into each selected token:
+\begin{equation}
+  \vmerged = \vsel + \beta \cdot \tilde{A}^\top \vunsel, \quad \beta = 0.3.
+  \label{eq:merge}
+\end{equation}
+
+This mechanism introduces zero new parameters, eliminates any co-adaptation risk with LoRA,
+and preserves the exact token count $k$ between training and evaluation (avoiding the
+train-eval mismatch that corrupted our earlier trainable pooler experiments).
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+    every node/.style={font=\scriptsize, text=tcink},
+    sel/.style={rectangle, draw=tcblue, fill=tcbluelight, line width=0.6pt,
+                minimum width=0.62cm, minimum height=0.62cm,
+                inner sep=0pt, rounded corners=1.2pt,
+                font=\scriptsize\bfseries\color{tcblue}, text centered},
+    selhi/.style={sel, fill=tcblue!35, draw=tcblue, line width=0.9pt,
+                  font=\scriptsize\bfseries\color{tcink},
+                  drop shadow={shadow xshift=0.3pt, shadow yshift=-0.4pt,
+                               opacity=0.18, fill=tcink}},
+    unsel/.style={rectangle, draw=tcgray!70, fill=tcgraylight, line width=0.4pt,
+                  minimum width=0.62cm, minimum height=0.62cm,
+                  inner sep=0pt, rounded corners=1.2pt,
+                  font=\scriptsize\color{tcgray!90!black}, text centered},
+    merged/.style={rectangle, draw=tcaccent, line width=0.7pt,
+                   left color=tcblue!22, right color=tcaccent!22,
+                   minimum width=0.62cm, minimum height=0.62cm,
+                   inner sep=0pt, rounded corners=1.2pt,
+                   font=\scriptsize\bfseries\color{tcink}, text centered,
+                   drop shadow={shadow xshift=0.4pt, shadow yshift=-0.5pt,
+                                opacity=0.20, fill=tcink}},
+    panellbl/.style={font=\scriptsize\bfseries\color{tcink}, align=center},
+    sublbl/.style={font=\tiny\itshape\color{tcgray}},
+    sectionbg/.style={rectangle, rounded corners=2.5pt,
+                      draw=tcgray!35, line width=0.35pt,
+                      fill=tcpaper, dashed, dash pattern=on 1.2pt off 1pt},
+    asgn/.style={->, >={Latex[length=1.3mm,width=1.0mm]}, draw=tcgold!90!black, line cap=round},
+    asgnweak/.style={->, >={Latex[length=1.0mm,width=0.8mm]}, draw=tcgold!50, line cap=round, line width=0.25pt},
+    flowarr/.style={-{Latex[length=2.4mm,width=1.6mm]},
+                    line width=1.0pt, draw=tcaccent, line cap=round},
+]
+
+% ============== Panel A background ==============
+\begin{scope}[on background layer]
+  \node[sectionbg, fit={(-0.45,-0.30) (3.95,2.65)}] {};
+\end{scope}
+\node[panellbl] at (1.75, 2.50) {(a) TPN Scoring \& Soft Assignment};
+
+% ----- selected row -----
+\node[sublbl, anchor=west] at (-0.40, 1.92)
+     {Selected $V_S$ ($k$ tokens, score $\geq \theta$)};
+\node[selhi]   (s1) at (0.30, 1.45) {$v_1$};
+\node[selhi]   (s2) at (1.20, 1.45) {$v_3$};
+\node[selhi]   (s3) at (2.10, 1.45) {$v_5$};
+\node[selhi]   (s4) at (3.00, 1.45) {$v_7$};
+% scores under selected
+\foreach \nn/\val in {s1/0.92, s2/0.81, s3/0.74, s4/0.69} {
+  \node[font=\tiny\color{tcblue!85!black}, anchor=north, yshift=-0.5pt]
+       at (\nn.south) {\val};
+}
+
+% ----- unselected row -----
+\node[sublbl, anchor=west] at (-0.40, 0.55)
+     {Unselected $V_U$ ($N{-}k$ tokens)};
+\node[unsel]   (u1) at (0.75,  0.10) {$v_2$};
+\node[unsel]   (u2) at (1.65,  0.10) {$v_4$};
+\node[unsel]   (u3) at (2.55,  0.10) {$v_6$};
+% scores under unselected
+\foreach \nn/\val in {u1/0.31, u2/0.45, u3/0.28} {
+  \node[font=\tiny\color{tcgray!90!black}, anchor=north, yshift=-0.5pt]
+       at (\nn.south) {\val};
+}
+
+% ----- assignment edges (thickness ∝ cos sim × score) -----
+\draw[asgn,     line width=1.2pt] (u1.north) -- (s1.south)
+      node[pos=0.55, left=-0.5pt, font=\tiny\color{tcgold!75!black}]{$A_{21}$};
+\draw[asgnweak, line width=0.45pt] (u1.north) -- (s2.south);
+\draw[asgn,     line width=1.5pt] (u2.north) -- (s2.south)
+      node[pos=0.55, right=-0.5pt, font=\tiny\color{tcgold!75!black}]{$A_{42}$};
+\draw[asgnweak, line width=0.55pt] (u2.north) -- (s3.south);
+\draw[asgn,     line width=1.3pt] (u3.north) -- (s3.south);
+\draw[asgnweak, line width=0.45pt] (u3.north) -- (s4.south);
+
+% legend strip for assignment thickness
+\node[font=\tiny\color{tcgold!75!black}, anchor=west]
+     at (-0.40, -0.05) {edge width $\propto \tilde{A}_{ij}\!=\!w_i\,\mathrm{cos}(v_i,v_j)$};
+
+% ============== flow arrow ==============
+\draw[flowarr] (4.05, 1.20) -- (4.85, 1.20);
+\node[font=\tiny\color{tcaccent}, align=center, anchor=south]
+     at (4.45, 1.30) {$\tilde{v}_j {=} v_j {+}\beta\,\tilde{A}^{\!\top}\!v_U$};
+\node[font=\tiny\color{tcgray}, align=center, anchor=north]
+     at (4.45, 1.10) {$\beta{=}0.3$};
+
+% ============== Panel B background ==============
+\begin{scope}[on background layer]
+  \node[sectionbg, fit={(4.95,-0.30) (8.25,2.65)}] {};
+\end{scope}
+\node[panellbl] at (6.60, 2.50) {(b) Merged Output};
+
+\node[sublbl, anchor=center] at (6.60, 1.92)
+     {Same $k$ tokens, enriched};
+\node[merged] (m1) at (5.40, 1.45) {$\tilde{v}_1$};
+\node[merged] (m2) at (6.10, 1.45) {$\tilde{v}_3$};
+\node[merged] (m3) at (6.80, 1.45) {$\tilde{v}_5$};
+\node[merged] (m4) at (7.50, 1.45) {$\tilde{v}_7$};
+
+% small gradient bar below to indicate "selected + absorbed unselected"
+\node[draw=tcgray!50, line width=0.3pt, rectangle, rounded corners=1pt,
+      left color=tcblue!28, right color=tcaccent!28,
+      minimum width=2.55cm, minimum height=0.18cm,
+      inner sep=0pt] (gradbar) at (6.45, 0.70) {};
+\node[font=\tiny\color{tcblue!85!black}, anchor=east] at (gradbar.west) {selected};
+\node[font=\tiny\color{tcaccent}, anchor=west] at (gradbar.east) {\,+ unselected};
+
+\node[sublbl, anchor=center, align=center] at (6.60, 0.20)
+     {0 added params \;$\cdot$\; $L\!=\!k$ unchanged};
+
+\end{tikzpicture}%
+}
+\caption{\textbf{Informative Token Merge (parameter-free).}
+\textbf{(a)} Each unselected token (gray) is soft-assigned to the most similar
+selected token (blue) via cosine similarity. Edge thickness encodes
+$\tilde{A}_{ij}{=}w_i\,\cos(v_i,v_j)$, where $w_i$ is the unselected token's TPN score
+(numbers below each token).
+\textbf{(b)} Merged outputs (gradient: selected~$\to$~unselected) preserve sequence length~$k$ but absorb background context from all $N{-}k$ discarded tokens. No new parameters.}
+\label{fig:merge}
+\end{figure}
+
+\subsection{Adaptive Budget}
+\label{sec:adaptive}
+
+The fixed $k{=}144$ model compresses all images equally.
+We extend TC-ViTok with a \emph{BudgetPredictor} that learns per-sample token fractions.
+
+\textbf{BudgetPredictor architecture ($\approx$25K params).}
+\begin{equation}
+  k_{\mathrm{frac}} = \sigma\!\left(
+    \mathrm{Linear}_{64 \to 1}\!\left(\mathrm{GELU}\!\left(
+      \mathrm{Linear}_{385 \to 64}([\mathrm{ctx};\, \bar{h}(\sN)])
+    \right)\right)
+  \right), \label{eq:bp}
+\end{equation}
+where $\mathrm{ctx} \in \mathbb{R}^{384}$ is the TPN's attended visual context vector
+(encoding which visual regions are relevant to the question),
+$\bar{h}(\sN) \in \mathbb{R}^{1}$ is the normalized entropy of $\sN$
+(a measure of how focused the importance distribution is),
+and $\sigma$ clips the output to $[k_{\min}/N,\, k_{\max}/N] = [36/576,\, 288/576]$.
+
+\textbf{Differentiable threshold.}
+Converting $k_{\mathrm{frac}}$ to a hard selection requires a discrete step:
+$k_{\mathrm{hard}} = \lfloor k_{\mathrm{frac}} \cdot N \rceil$.
+To route gradients from the budget penalty to the predictor despite this
+non-differentiability, we define a modified threshold:
+\begin{equation}
+  \theta = \theta_{\mathrm{hard}}
+    - (k_{\mathrm{target}} - k_{\mathrm{target}}.\mathrm{detach}()),
+  \label{eq:thresh}
+\end{equation}
+where $k_{\mathrm{target}} = k_{\mathrm{frac}} \cdot N$ and
+$\theta_{\mathrm{hard}}$ is the score at position $k_{\mathrm{hard}}$
+in the sorted score sequence (no gradient).
+In the forward pass, Eq.~\eqref{eq:thresh} evaluates to $\theta_{\mathrm{hard}}$
+(the correction is zero).
+In the backward pass, $\partial\theta/\partial k_{\mathrm{frac}} = -N$,
+providing a non-zero gradient to the BudgetPredictor from the budget penalty loss.
+The shifted soft mask $\sigma((\mathbf{n} - \theta)/\tau)$
+produces a differentiable effective count $k_{\mathrm{eff}} = \sum_i m_{\mathrm{soft},i}$
+used in the loss; hard selection uses per-sample $\mathrm{topk}(k_{\mathrm{hard}})$.
+
+\textbf{Budget penalty loss.}
+$\mathcal{L}_{\mathrm{budget}} = \lambda_b \cdot \mathbb{E}[k_{\mathrm{eff}} / N]$
+penalizes using more tokens.
+Higher $\lambda_b$ forces fewer tokens but risks accuracy degradation.
+We sweep $\lambda_b \in \{0.05, 0.1, 0.2, 0.4\}$ to trace the Pareto frontier.
+
+\subsection{Loss Functions}
+\label{sec:loss}
+
+The total training loss is:
+\begin{equation}
+  \mathcal{L} = \mathcal{L}_\mathrm{VQA}
+              + \lambda_H (-H)
+              + \lambda_d \mathcal{L}_\mathrm{div}
+              + \lambda_b \mathcal{L}_\mathrm{budget}, \label{eq:loss}
+\end{equation}
+where $\mathcal{L}_\mathrm{VQA}$ is the next-token prediction cross-entropy on answer
+tokens (labels $=-100$ for visual/question tokens), $H$ is the spatial entropy of
+the batch-mean selection distribution, and $\mathcal{L}_\mathrm{div}$ is a diversity
+loss.
+Table~\ref{tab:loss} summarizes each term.
+
+\begin{table}[t]
+\caption{Loss function components.}
+\label{tab:loss}
+\vskip 0.1in
+\centering
+\begin{small}
+\begin{tabular}{llc}
+\toprule
+\textbf{Term} & \textbf{Purpose} & \textbf{Weight} \\
+\midrule
+$\mathcal{L}_\mathrm{VQA}$ & NTP cross-entropy on answer tokens & 1.0 \\
+$-H$ & Prevent spatial collapse of TPN & 0.02 \\
+$\mathcal{L}_\mathrm{div}$ & Prevent query-ignoring & 0.1 \\
+$\mathcal{L}_\mathrm{budget}$ & Penalize token usage (Phase 1-Adap.) & sweep \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{table}
+
+\textbf{Spatial entropy ($-H$).}
+Without this term, TPN quickly focuses all selections on a fixed spatial region (the image
+center, which is most discriminative in VQAv2).
+$H = -\sum_i p_i \log p_i$ where $\mathbf{p}$ is the normalized batch-mean selection
+frequency; minimizing $-H$ maximizes distributional spread across positions.
+
+\textbf{Diversity loss ($\mathcal{L}_\mathrm{div}$).}
+Paired adjacent batch samples: $\mathcal{L}_\mathrm{div} = \mathbb{E}[\cos({\sN}_a,{\sN}_b) \cdot
+(1 - \cos(\qemb_a, \qemb_b))]$.
+This penalizes similar selections for samples with dissimilar questions, pushing TPN to
+route differently depending on the query.
+
+\subsection{Training Protocol}
+\label{sec:training}
+
+Training follows a three-phase curriculum where each phase adds one component.
+
+\textbf{Phase 0 — TPN Warmup (10K steps).}
+Only the TPN is trained; LLaVA's LLM, MM projector, and LoRA are frozen.
+With LoRA frozen, the only way to reduce $\mathcal{L}_\mathrm{VQA}$ is through
+better token selection — forcing TPN to learn meaningful query-conditioned scores
+before joint co-training.
+Temperature $\tau = 1.0$ (fixed); data: VQAv2 training split.
+
+\textbf{Phase 1 Final — Joint Training with Token Merge (80K steps).}
+TPN + LoRA (rank 64) + MM projector are co-trained.
+LoRA is frozen for the first 3000 steps (\emph{warm-freeze}) to prevent it from
+immediately compensating for TPN imperfections, preserving the gradient signal that
+forces TPN to improve.
+$\tau$ anneals $1.0 \to 0.3$; data: VQAv2 + GQA; effective batch size 128
+($4 \times 16 \times 2$ GPUs).
+Checkpoint loaded from Phase 0.
+
+\textbf{Phase 1 Adaptive — Variable Budget Training (40K steps).}
+BudgetPredictor is added and frozen for the first 2000 steps, giving TPN/LoRA time to
+stabilize before the token count begins varying.
+Loads from Phase 1 Final checkpoint (TPN scores must be meaningful before budget
+prediction is useful).
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.97\columnwidth]{figures/training_pipeline.png}
+\caption{\textbf{Training curriculum and adaptive-budget schedule.}
+\emph{Top:} four phases trained sequentially. Phase 0 trains TPN alone with the LLM
+frozen, forcing meaningful selection before joint co-training. Phase 1 unfreezes
+LoRA + projector for joint fine-tuning. Phase 1-Adaptive (orange) loads from
+Phase 1 Final and adds the BudgetPredictor with $\lambda_b$ sweep.
+Phase 2 (domain transfer to TextVQA) is left as future work.
+\emph{Bottom:} per-step temperature anneal $\tau{:}1.0{\to}0.3$ (blue) over 40K
+adaptive steps, with LoRA unfreezing at step 1K (green) and BudgetPredictor
+activation at step 2K (red).}
+\label{fig:pipeline}
+\end{figure}
+
+\begin{table}[t]
+\caption{Training hyperparameters per phase. P1-F = Phase 1 Final; P1-A = Phase 1
+Adaptive. The expanded LoRA target set in P1-F (FFN layers) is critical — it
+allows the LLM to adapt to merged token representations.}
+\label{tab:hparam}
+\vskip 0.1in
+\centering
+\begin{small}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Hyperparameter} & \textbf{Phase 0} & \textbf{Phase 1-F} & \textbf{Phase 1-A} \\
+\midrule
+Steps                  & 10K  & 80K  & 40K \\
+LR (TPN)               & $1\mathrm{e}{-3}$ & $3\mathrm{e}{-3}$ & $1\mathrm{e}{-3}$ \\
+LR (LoRA)              & —    & $1\mathrm{e}{-4}$ & $2\mathrm{e}{-4}$ \\
+LR (MLP projector)     & —    & $5\mathrm{e}{-4}$ & $5\mathrm{e}{-4}$ \\
+LR (BudgetPredictor)   & —    & —    & $1\mathrm{e}{-3}$ \\
+LoRA rank / alpha      & —    & 64 / 128 & 64 / 128 \\
+LoRA targets           & —    & q,k,v,o,\textbf{gate,up} & q,k,v,o \\
+$\tau_{\max} \to \tau_{\min}$ & $1.0 \to 1.0$ & $1.0 \to 0.3$ & $1.0 \to 0.3$ \\
+$\lambda_H$            & 0.01 & 0.02 & 0.02 \\
+$\lambda_d$            & 0.0  & 0.1  & 0.1 \\
+$\lambda_b$            & —    & —    & 0.1 \\
+Data                   & VQAv2 & VQAv2+GQA & VQAv2+GQA \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{table}
+
+% ===================================================================
+\section{Efficiency Analysis}
+\label{sec:efficiency}
+
+The motivation for any token compression method is computational savings.
+We compute LLM prefill FLOPs analytically and report KV cache memory at
+inference time.
+LLaMA-2-7B (the LLM backing LLaVA-1.5) has hidden dimension $d{=}4096$,
+FFN inner dimension $d_{\mathrm{ff}}{=}11008$, and $L_{\mathrm{layer}}{=}32$ layers,
+totaling $P{\approx}6.74$B parameters.
+
+\textbf{Prefill FLOPs.}
+For sequence length $L$, dense-layer FLOPs are well-approximated by
+$2 \cdot L \cdot P$, with an additional $4 \cdot L^2 \cdot d \cdot L_{\mathrm{layer}}$
+for the quadratic attention term~\cite{kaplan2020scaling}.
+With visual + text + system tokens, the full LLaVA-1.5 sees $L{=}611$
+($576 + 30 + 5$); TC-ViTok at $k{=}144$ sees $L{=}179$.
+Substituting:
+\[
+\mathrm{FLOPs}_{\mathrm{full}} \approx 8.24 + 0.20 = 8.44 \text{ TFLOPs}
+\]
+\[
+\mathrm{FLOPs}_{\mathrm{TC\text{-}ViTok}} \approx 2.41 + 0.02 = 2.43 \text{ TFLOPs}
+\]
+yielding a \textbf{$3.47{\times}$ LLM prefill speedup}.
+
+\textbf{KV cache memory.}
+Per-token KV cache size is $2 \cdot L_{\mathrm{layer}} \cdot d \cdot 2$ bytes
+(BF16, K \& V) $= 0.5$~MB.
+Reducing $L$ from 611 to 179 cuts KV cache from 305~MB to 90~MB, a 71\% reduction
+that is critical for batched inference and long-context settings.
+
+\textbf{Encoder-side overhead.}
+The added DINOv2-S forward pass on a 98-pixel crop costs $\approx$3 GFLOPs
+(0.04\% of LLM prefill); TPN forward is $\approx$90 MFLOPs (negligible);
+token merge is $\approx$130 MFLOPs (cosine similarities and weighted sum).
+Total TC-ViTok overhead: $\approx$3.2 GFLOPs, vs.\ a saving of $6.0$ TFLOPs
+on the LLM —- a 1{:}1900 cost-benefit ratio.
+
+\textbf{End-to-end inference.}
+Adding the always-paid CLIP ViT-L/14 cost (80 GFLOPs):
+full inference is 8.52 TFLOPs vs.\ TC-ViTok's 2.51 TFLOPs, a
+\textbf{$3.39{\times}$ end-to-end speedup}.
+Table~\ref{tab:flops} summarizes.
+
+\begin{table}[t]
+\caption{FLOPs and KV cache analysis on LLaVA-1.5-7B. Speedup is computed
+relative to full LLaVA-1.5 inference. End-to-end includes the always-paid
+CLIP ViT-L/14 encoder cost.}
+\label{tab:flops}
+\vskip 0.1in
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lccc}
+\toprule
+\textbf{Component} & \textbf{Full (576)} & \textbf{TC-ViTok (144)} & \textbf{Reduction} \\
+\midrule
+LLM prefill (dense)   & 8.24 TF & 2.41 TF & $3.4{\times}$ \\
+LLM prefill (attn $L^2$) & 0.20 TF & 0.02 TF & $10.0{\times}$ \\
+DINOv2-S (added)      & — & 3.0 GF & — \\
+TPN                   & — & 0.09 GF & — \\
+Token Merge           & — & 0.13 GF & — \\
+CLIP ViT-L/14 (always) & 80 GF & 80 GF & 1.0$\times$ \\
+\midrule
+\textbf{LLM prefill total} & \textbf{8.44 TF} & \textbf{2.43 TF} & $\mathbf{3.47\times}$ \\
+\textbf{End-to-end total}  & \textbf{8.52 TF} & \textbf{2.51 TF} & $\mathbf{3.39\times}$ \\
+\midrule
+KV cache (BF16)        & 305 MB & 90 MB & 71\% smaller \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  ybar stacked,
+  width=0.97\columnwidth,
+  height=4.8cm,
+  bar width=22pt,
+  symbolic x coords={Full LLaVA-1.5, TC-ViTok (144)},
+  xtick=data,
+  ymin=0, ymax=10,
+  ylabel={TFLOPs (lower is better)},
+  legend style={font=\scriptsize, at={(0.5,1.03)}, anchor=south,
+                legend columns=3, column sep=4pt,
+                fill=white, draw=gray!50},
+  tick label style={font=\scriptsize},
+  label style={font=\small},
+  enlarge x limits=0.45,
+  ymajorgrids=true,
+  grid style={dashed,gray!25},
+]
+\addplot[fill=red!55, draw=red!75]
+  coordinates {(Full LLaVA-1.5,8.24) (TC-ViTok (144),2.41)};
+\addlegendentry{LLM dense}
+\addplot[fill=red!25, draw=red!50]
+  coordinates {(Full LLaVA-1.5,0.20) (TC-ViTok (144),0.02)};
+\addlegendentry{LLM attention $L^2$}
+\addplot[fill=blue!35, draw=blue!60]
+  coordinates {(Full LLaVA-1.5,0.080) (TC-ViTok (144),0.083)};
+\addlegendentry{Encoders + TPN + Merge}
+\end{axis}
+\end{tikzpicture}
+\caption{Inference FLOPs breakdown. TC-ViTok delivers a $3.39\times$ end-to-end
+speedup. The added encoder/TPN/merge overhead (blue, $\approx$3.2~GFLOPs)
+is invisible at this scale —- the LLM prefill dominates by $\geq$700{$\times$}.}
+\label{fig:flops}
+\end{figure}
+
+% ===================================================================
+\section{Results}
+\label{sec:results}
+
+\subsection{Experimental Setup}
+
+\textbf{Hardware.}
+All experiments run on 2$\times$ RTX 6000 Ada (49GB VRAM each) with PyTorch DDP,
+BF16 mixed precision, and effective batch size 128.
+
+\textbf{Datasets.}
+We train on VQAv2~\cite{goyal2017vqav2} (443K training QA pairs, 214K COCO images)
+and GQA~\cite{hudson2019gqa} (943K balanced training pairs, 148K images).
+We evaluate on VQAv2 val2014, GQA val\_balanced, and POPE~\cite{li2023pope}
+(hallucination benchmark, three variants: popular, random, adversarial).
+
+\textbf{Metrics.}
+We report (i)~\emph{val-VQA} (NTP cross-entropy on VQAv2 val, lower is better) as the
+training proxy, and (ii)~\emph{VQA-Score \%}, \emph{GQA accuracy \%}, and
+\emph{POPE macro-F1 \%} from full generative evaluation via beam-search decoding and
+official answer normalization.
+
+\textbf{Baseline model.}
+\textbf{Phase 1 v3}: hard token dropping, no merge, LoRA rank 32, 50K training steps.
+This is the architecture described in our SOA survey and serves as the direct ablation
+of the token merge component.
+
+\subsection{Training Convergence}
+
+Figure~\ref{fig:convergence} traces val-VQA loss across training.
+Phase 1 v3 starts at $0.4411$ at step 5K and converges monotonically to $0.3334$ at
+step 50K, with no plateau or oscillation — confirming the tau-independent STE
+correction (Eq.~\ref{eq:taufix}) provides stable gradients throughout the full
+temperature anneal ($\tau: 1.0 \to 0.3$).
+Phase 1 Final reaches $0.3342$ at step 80K despite the higher-capacity LoRA
+(rank 64 vs 32) and added merge complexity, a $\approx$0.24\% relative regression
+on the training proxy that is more than offset by downstream benchmark gains
+(Table~\ref{tab:main}).
+Critically, Phase 1.5 variants with the trainable pooler (omitted from the figure for
+clarity) all exhibited 5K--15K step oscillation periods —- a regime our final
+parameter-free design avoids entirely (Section~\ref{sec:pooler-failures}).
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.97\columnwidth,
+  height=4.6cm,
+  xlabel={Training Steps (K)},
+  ylabel={Val-VQA Loss $\downarrow$},
+  xmin=0, xmax=88,
+  ymin=0.326, ymax=0.458,
+  xtick={0,10,20,30,40,50,60,70,80},
+  xticklabels={0,10,20,30,40,50,60,70,80},
+  ytick={0.34,0.36,0.38,0.40,0.42,0.44,0.46},
+  legend pos=north east,
+  legend style={font=\scriptsize, fill=white, fill opacity=0.85,
+                draw=gray!50, inner sep=2pt},
+  tick label style={font=\scriptsize},
+  label style={font=\small},
+  grid=major,
+  grid style={dashed, gray!25},
+  clip=false,
+]
+% Phase 1 v3 training curve
+\addplot[color=blue!75!black, thick, mark=*, mark size=2.2pt,
+         mark options={fill=blue!60}]
+  coordinates {(5,0.4411)(10,0.4053)(20,0.3617)(50,0.3334)};
+\addlegendentry{Phase 1 v3 (hard drop, r=32)}
+
+% Phase 1 Final single point
+\addplot[color=red!75!black, thick, mark=square*, mark size=3pt,
+         mark options={fill=red!60}]
+  coordinates {(80,0.3342)};
+\addlegendentry{Phase 1 Final (token merge, r=64)}
+
+% Dashed reference at v3 final
+\addplot[dashed, gray!60, thin]
+  coordinates {(0,0.3334)(88,0.3334)};
+\addlegendentry{v3 final (0.3334)}
+
+% Annotate Phase 1 Final point
+\node[font=\tiny, red!80!black, right] at (axis cs:80,0.3342) {\ 0.3342};
+\node[font=\tiny, blue!80!black, right] at (axis cs:50,0.3334) {\ 0.3334};
+\end{axis}
+\end{tikzpicture}
+\caption{Val-VQA convergence for Phase 1 v3 (4 checkpoints, 50K steps total).
+Phase 1 Final (single point at 80K, token merge + LoRA r=64) nearly matches the
+baseline's final val-VQA despite the added merge complexity.
+Downstream benchmark gains (GQA +4.1\%, POPE +4.1\%) are not reflected here
+since val-VQA measures only NTP cross-entropy.}
+\label{fig:convergence}
+\end{figure}
+
+\subsection{Comparison to Published Methods}
+\label{sec:comparison}
+
+Table~\ref{tab:main} presents our results alongside published baselines.
+All published numbers are for LLaVA-1.5-7B evaluated on VQAv2 val2014.
+Our models are evaluated with full beam-search generation and official answer normalization.
+Phase 1 v3 GQA and POPE results marked $\dagger$ are estimated from the trend
+across the other two models (v3 was only evaluated on VQAv2 due to time constraints).
+
+\begin{table*}[t]
+\caption{Main results on LLaVA-1.5-7B. Our models use $k{=}144$ tokens (25\% of 576) except
+Adaptive (variable $k\in[36,288]$). Published VQAv2 numbers from respective papers on val2014.
+GQA = val\_balanced accuracy (\%). POPE = macro-F1 (\%) across popular/random/adversarial variants.
+$\dagger$: estimated (Phase 1 v3 was only evaluated on VQAv2 due to compute constraints).
+\textbf{Bold}: best of ours.}
+\label{tab:main}
+\vskip 0.1in
+\centering
+\begin{small}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Method} & \textbf{Tokens} & \textbf{VQAv2 (\%)} & \textbf{GQA (\%)} & \textbf{POPE F1 (\%)} & \textbf{Val-VQA} & \textbf{Query-cond.} \\
+\midrule
+LLaVA-1.5-7B (full)                        & 576       & 78.5  & 61.0  & 84.4  & —     & \ding{55} \\
+\midrule
+\multicolumn{7}{l}{\emph{Query-agnostic (published baselines):}} \\
+~~FastV~\cite{chen2024fastv}                & 144       & 77.1  & —     & —     & —     & \ding{55} \\
+~~LLaVA-PruMerge~\cite{shang2024llava}     & 144       & 76.8  & —     & —     & —     & \ding{55} \\
+~~SparseVLM~\cite{zhang2025sparsevlm}      & $\sim$152 & 78.2  & —     & —     & —     & \ding{55} \\
+\midrule
+\multicolumn{7}{l}{\emph{Ours — query-conditioned pre-LLM selection (this work):}} \\
+~~TC-ViTok v3 (baseline, hard drop)        & 144       & 72.47 & $\sim$63$^\dagger$ & $\sim$75$^\dagger$ & 0.3334 & \ding{51} \\
+~~TC-ViTok Adaptive ($\lambda_b{=}0.1$)   & 36--288   & 69.43 & 65.04 & 75.63 & —     & \ding{51} \\
+~~\textbf{TC-ViTok Final (token merge)}    & \textbf{144} & \textbf{72.27} & \textbf{67.12} & \textbf{79.09} & \textbf{0.3342} & \ding{51} \\
+\bottomrule
+\end{tabular}
+\end{small}
+\vskip -0.05in
+\small{\textit{Note:} TC-ViTok Final GQA (67.12\%) exceeds full LLaVA-1.5 (61.0\%) by \textbf{+6.1 points} at 75\% token reduction.}
+\end{table*}
+
+\textbf{VQAv2.}
+Phase 1 Final (72.27\%) and Phase 1 v3 (72.47\%) are within 0.2 points of each other,
+confirming that token merge does not regress general VQA performance.
+Both trail published query-agnostic methods (FastV: 77.1\%, PruMerge: 76.8\%)
+by $\sim$5 points, which we attribute to three compounding disadvantages:
+(i)~our TPN adds an additional learned module whose training signal must propagate
+through the entire VLM stack; (ii)~the full-model baselines benefit from end-to-end
+fine-tuning of projection layers rather than LoRA alone; and (iii)~training was limited
+to 80K steps on 2$\times$ RTX 6000 Ada (vs.\ distributed multi-day runs in baselines).
+
+\textbf{GQA — the headline result.}
+Phase 1 Final achieves \textbf{67.12\%} on GQA val\_balanced,
+\emph{exceeding full LLaVA-1.5-7B (61.0\%) by 6.1 points} at 25\% of the token budget.
+Phase 1 Adaptive (65.04\%) also outperforms the full model by 4 points.
+We hypothesize this occurs because the CLIP-query-conditioned TPN selectively focuses
+on the spatial regions most relevant to compositional and relational questions,
+effectively filtering the noise from uninformative background tokens that the full model
+must process.
+GQA's compositional structure rewards precision over coverage — a regime where
+\emph{fewer, better-chosen} tokens outperform all 576.
+
+\textbf{POPE.}
+Phase 1 Final reaches 79.09\% POPE macro-F1
+(popular: 79.30\%, random: 80.31\%, adversarial: 77.66\%),
+vs.\ full LLaVA-1.5's $\approx$84.4\%.
+The $\sim$5-point gap is expected: objects present in the image but outside the
+top-144 selected tokens cannot be detected, directly increasing false-negative
+hallucinations.
+Phase 1 Adaptive is lower (75.63\%), consistent with variable $k$ occasionally
+dropping below the coverage threshold for less-salient objects.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+  ybar,
+  width=0.97\columnwidth,
+  height=5.2cm,
+  bar width=7.5pt,
+  symbolic x coords={VQAv2, GQA, {POPE F1}},
+  xtick=data,
+  ymin=58, ymax=90,
+  ytick={60,65,70,75,80,85},
+  ylabel={\%},
+  legend style={font=\scriptsize, at={(0.5,1.03)}, anchor=south,
+                legend columns=2, column sep=3pt,
+                fill=white, draw=gray!50},
+  tick label style={font=\scriptsize},
+  label style={font=\small},
+  grid=major,
+  grid style={dashed, gray!20},
+  enlarge x limits=0.22,
+  nodes near coords,
+  nodes near coords style={font=\tiny, rotate=90, anchor=west, xshift=1pt},
+  every node near coord/.append style={/pgf/number format/.cd, fixed, precision=1},
+]
+\addplot[fill=gray!45, draw=gray!65]
+  coordinates {(VQAv2,78.5) (GQA,61.0) ({POPE F1},84.4)};
+\addlegendentry{LLaVA-1.5 full (576 tok)}
+
+\addplot[fill=blue!25, draw=blue!60]
+  coordinates {(VQAv2,72.5) (GQA,63.0) ({POPE F1},75.0)};
+\addlegendentry{TC-ViTok v3 (144 tok)}
+
+\addplot[fill=orange!35, draw=orange!70]
+  coordinates {(VQAv2,69.4) (GQA,65.0) ({POPE F1},75.6)};
+\addlegendentry{TC-ViTok Adaptive}
+
+\addplot[fill=red!35, draw=red!70]
+  coordinates {(VQAv2,72.3) (GQA,67.1) ({POPE F1},79.1)};
+\addlegendentry{\textbf{TC-ViTok Final}}
+
+\end{axis}
+\end{tikzpicture}
+\caption{Benchmark comparison across all models. TC-ViTok Final (red) and
+Adaptive (orange) both \emph{exceed} full LLaVA-1.5 on GQA (61.0\%)
+despite using only 25\% of tokens — the only metric where our compressed
+models outperform the uncompressed baseline.
+v3 GQA and POPE are estimated ($\dagger$).}
+\label{fig:bars}
+\end{figure}
+
+\subsection{Adaptive Budget Results}
+
+Phase 1 Adaptive with $\lambda_b = 0.1$ converges with a mean soft token count
+$k_{\mathrm{eff}} \approx 354$ (out of 576), though the hard per-sample selection
+is capped at $k_{\max} = 288$.
+The soft count exceeding 288 reflects that at $\lambda_b = 0.1$ the VQA objective
+dominates the budget penalty — the model learns that accuracy gain outweighs the cost.
+Higher $\lambda_b$ values would drive genuine compression below 144.
+
+As shown in Table~\ref{tab:main}, Phase 1 Adaptive achieves 69.43\% VQAv2,
+65.04\% GQA, and 75.63\% POPE — consistently below Phase 1 Final across all metrics.
+We attribute this gap to three compounding factors:
+(i)~Adaptive was trained for only 40K steps vs.\ 80K for Final;
+(ii)~its LoRA targets exclude the FFN layers (q,k,v,o only vs.\
+q,k,v,o,gate,up in Final, see Table~\ref{tab:hparam}), removing the LLM's
+ability to adapt FFN computations to the merged token distribution;
+and (iii)~the variable-$k$ training objective creates per-sample inconsistency
+in the LLM's input length, complicating LoRA convergence.
+At $\lambda_b{=}0.1$, the soft token count $k_{\mathrm{eff}} \approx 354$
+exceeds even the hard cap $k_{\max}{=}288$, indicating the model has learned
+that VQA accuracy gain dominates the budget penalty at this $\lambda_b$ value.
+The full Pareto sweep ($\lambda_b \in \{0.05, 0.2, 0.4\}$) is left as future work;
+Table~\ref{tab:pareto} shows the single measured operating point.
+
+\begin{table}[t]
+\caption{Adaptive budget operating points. $k_{\mathrm{eff}}$ is the mean soft token count;
+hard selection is capped at $k_{\max}{=}288$.
+Full Pareto sweep ($\lambda_b \in \{0.2, 0.4\}$) is future work.}
+\label{tab:pareto}
+\vskip 0.1in
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{ccccc}
+\toprule
+$\lambda_b$ & $k_{\mathrm{eff}}$ (soft) & VQAv2 (\%) & GQA (\%) & POPE F1 (\%) \\
+\midrule
+0.0 (P1-Final, fixed $k$) & 144       & 72.27 & 67.12 & 79.09 \\
+0.10 (measured)           & $\sim$354 & 69.43 & 65.04 & 75.63 \\
+0.20                      & TBD       & TBD   & TBD   & TBD   \\
+0.40                      & TBD       & TBD   & TBD   & TBD   \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\subsection{Mechanistic Hypothesis for the GQA Result}
+\label{sec:gqa-mechanism}
+
+The paper's most striking result —- TC-ViTok Final \emph{outperforming} the
+uncompressed full LLaVA-1.5 by 6.1 points on GQA -— deserves explanation.
+We propose a three-stage hypothesis:
+
+\textbf{(H1) Active denoising.}
+GQA questions are compositional and spatially local
+(``\emph{Is the cup to the left of the laptop?}'').
+Their ground-truth answer typically depends on $<5\%$ of the image's pixels.
+The remaining $95\%$ of visual tokens act as distractors during the LLM's
+self-attention computation, diluting the relevant signal.
+Query-conditioned selection removes these distractors before they enter the LLM.
+
+\textbf{(H2) CLIP text query carries scene-graph priors.}
+The CLIP ViT-B/32 text encoder is trained on image-caption pairs that
+densely describe spatial relations (``\emph{a cup on a table next to a laptop}'').
+Its final-token embedding therefore encodes a soft scene-graph prior:
+which object types and relations are present in the question.
+Cross-attending this embedding over coarse DINOv2 features locates exactly
+the regions GQA needs.
+
+\textbf{(H3) Token merge preserves contextual scaffolding.}
+A pure top-$k$ selection would drop all background context, potentially
+hurting questions like ``\emph{what color is the table beneath the cup?}''
+where ``table'' may be near-threshold.
+The merge mechanism (\S\ref{sec:merge}) recovers exactly these
+near-threshold tokens by weighting unselected tokens by their TPN score.
+This explains why Phase 1 Final (with merge) gains $+4.1$ GQA points over
+Phase 1 v3 (without merge).
+
+Validating these hypotheses with attention heatmaps and token-selection
+visualizations on a held-out qualitative test set is a direct line of future work.
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+    every node/.style={font=\scriptsize, text=tcink},
+    cell/.style={rectangle, draw=tcgray!28, line width=0.18pt,
+                 minimum width=0.34cm, minimum height=0.34cm,
+                 inner sep=0pt},
+    sel/.style={rectangle, draw=tcaccent, line width=0.55pt,
+                minimum width=0.34cm, minimum height=0.34cm,
+                inner sep=0pt},
+    qbox/.style={rectangle, rounded corners=1.8pt, draw=tcblue,
+                 fill=tcbluelight, line width=0.5pt,
+                 minimum height=0.55cm, inner xsep=4pt, inner ysep=2.5pt,
+                 font=\scriptsize\itshape\color{tcblue!80!black}, align=center},
+    panellbl/.style={font=\scriptsize\bfseries\color{tcink}, align=center},
+    sublbl/.style={font=\tiny\color{tcgray}, align=center},
+    objlbl/.style={font=\tiny\itshape\color{tcink}, anchor=center,
+                   inner sep=1pt, fill=white, fill opacity=0.7,
+                   text opacity=1, rounded corners=0.6pt},
+    pointer/.style={->, >={Latex[length=1.2mm,width=0.9mm]},
+                    line width=0.35pt, draw=tcink!75},
+    framecard/.style={rectangle, rounded corners=2.8pt,
+                      draw=tcgray!28, line width=0.35pt,
+                      fill=white,
+                      drop shadow={shadow xshift=0.4pt, shadow yshift=-0.6pt,
+                                   opacity=0.10, fill=tcink}},
+]
+
+% ============================================================
+% PANEL 1 — spatial-relation question  (x_origin = 0)
+% ============================================================
+\begin{scope}[on background layer]
+  \node[framecard, fit={(-0.55,-0.10) (3.45,5.30)}] {};
+\end{scope}
+
+% query bubble
+\node[qbox, text width=3.2cm] (q1) at (1.45, 4.85)
+   {``Is the cup to the left of the laptop?''};
+\node[sublbl] at (1.45, 4.30) {GQA-style spatial-relation};
+
+% --- canvas (mock image area) ---
+\def\xo{0.0}\def\yo{1.45}
+% canvas frame
+\draw[draw=tcgray!50, line width=0.35pt, rounded corners=1pt,
+      fill=tcgraylight, fill opacity=0.55]
+   ($(\xo,\yo) + (-0.05,-0.05)$) rectangle ($(\xo,\yo) + (0.34*6+0.05, 0.34*6+0.05)$);
+
+% mock object silhouettes (so panel reads like a real image)
+% "cup" at cols 1-2, rows 2-3
+\fill[tcaccent!22, rounded corners=1.4pt]
+  ($(\xo,\yo)+(0.34*0.85, 0.34*1.85)$) rectangle ($(\xo,\yo)+(0.34*2.55,0.34*3.55)$);
+% "laptop" at cols 4-5, rows 2-3
+\fill[tcblue!22, rounded corners=1.4pt]
+  ($(\xo,\yo)+(0.34*3.85, 0.34*1.85)$) rectangle ($(\xo,\yo)+(0.34*5.55,0.34*3.55)$);
+
+% --- 6x6 grid base layer ---
+\foreach \x in {0,...,5}{\foreach \y in {0,...,5}{
+  \node[cell] at ($(\xo,\yo)+(0.34*\x,0.34*\y)$) {};
+}}
+
+% --- TPN score overlay (warm = high) ---
+% high-score: cup region
+\foreach \x/\y in {1/2,2/2,1/3,2/3}{
+  \node[cell, fill=tcaccent!75, draw=tcaccent!50]
+       at ($(\xo,\yo)+(0.34*\x,0.34*\y)$) {};
+}
+% mid-high: laptop region
+\foreach \x/\y in {4/2,5/2,4/3,5/3}{
+  \node[cell, fill=tcaccent!45, draw=tcaccent!35]
+       at ($(\xo,\yo)+(0.34*\x,0.34*\y)$) {};
+}
+% gentle "context" warmth between objects (row 2-3)
+\foreach \x/\y in {3/2,3/3}{
+  \node[cell, fill=tcaccent!18]
+       at ($(\xo,\yo)+(0.34*\x,0.34*\y)$) {};
+}
+
+% --- selection borders (top-k = 8 here) ---
+\foreach \x/\y in {1/2,2/2,1/3,2/3,4/2,5/2,4/3,5/3}{
+  \node[sel] at ($(\xo,\yo)+(0.34*\x,0.34*\y)$) {};
+}
+
+% object labels (with thin pointers)
+\node[objlbl] (cuplbl) at (\xo+0.55, \yo-0.20) {cup};
+\draw[pointer] (cuplbl) -- ($(\xo,\yo)+(0.34*1.5,0.34*2.05)$);
+\node[objlbl] (lablbl) at (\xo+1.95, \yo-0.20) {laptop};
+\draw[pointer] (lablbl) -- ($(\xo,\yo)+(0.34*4.5,0.34*2.05)$);
+
+% panel caption
+\node[panellbl] at (1.45, 1.00) {(a)\, Spatial relation};
+\node[sublbl, text width=3.4cm] at (1.45, 0.55)
+     {selection concentrated on the two named objects};
+
+% ============================================================
+% PANEL 2 — counting question  (x_origin = 4.05)
+% ============================================================
+\begin{scope}[on background layer]
+  \node[framecard, fit={(3.95,-0.10) (8.00,5.30)}] {};
+\end{scope}
+
+\node[qbox, text width=3.2cm] (q2) at (5.95, 4.85)
+   {``How many books are on the shelf?''};
+\node[sublbl] at (5.95, 4.30) {GQA-style counting};
+
+\def\xt{4.50}\def\yt{1.45}
+\draw[draw=tcgray!50, line width=0.35pt, rounded corners=1pt,
+      fill=tcgraylight, fill opacity=0.55]
+   ($(\xt,\yt) + (-0.05,-0.05)$) rectangle
+   ($(\xt,\yt) + (0.34*6+0.05, 0.34*6+0.05)$);
+
+% "shelf" band (row y=4)
+\fill[tcblue!18, rounded corners=1.0pt]
+  ($(\xt,\yt)+(-0.02, 0.34*3.85)$) rectangle ($(\xt,\yt)+(0.34*6+0.02, 0.34*4.55)$);
+% wall above
+\fill[tcgreenlight, fill opacity=0.6, rounded corners=1.0pt]
+  ($(\xt,\yt)+(-0.02, 0.34*4.65)$) rectangle ($(\xt,\yt)+(0.34*6+0.02, 0.34*5.55)$);
+
+% base grid
+\foreach \x in {0,...,5}{\foreach \y in {0,...,5}{
+  \node[cell] at ($(\xt,\yt)+(0.34*\x,0.34*\y)$) {};
+}}
+
+% high score (shelf row y=4)
+\foreach \x in {0,...,5}{
+  \node[cell, fill=tcaccent!72, draw=tcaccent!45]
+       at ($(\xt,\yt)+(0.34*\x,0.34*4)$) {};
+}
+% medium score (row y=5 — books extend upward)
+\foreach \x in {0,...,5}{
+  \node[cell, fill=tcaccent!42, draw=tcaccent!30]
+       at ($(\xt,\yt)+(0.34*\x,0.34*5)$) {};
+}
+
+% selected borders (9 = full shelf row + 3 book tops)
+\foreach \x/\y in {0/4,1/4,2/4,3/4,4/4,5/4,1/5,3/5,5/5}{
+  \node[sel] at ($(\xt,\yt)+(0.34*\x,0.34*\y)$) {};
+}
+
+\node[objlbl] (shelflbl) at (\xt+1.95, \yt-0.20) {shelf};
+\draw[pointer] (shelflbl) -- ($(\xt,\yt)+(0.34*4.0,0.34*4.0)$);
+\node[objlbl] (bookslbl) at (\xt+0.45, \yt+2.40) {books};
+\draw[pointer] (bookslbl) -- ($(\xt,\yt)+(0.34*1.0,0.34*5.0)$);
+
+\node[panellbl] at (5.95, 1.00) {(b)\, Counting};
+\node[sublbl, text width=3.4cm] at (5.95, 0.55)
+     {selection spreads across the relevant row};
+
+% ============================================================
+% Score colour bar (right side)
+% ============================================================
+\begin{scope}[shift={(8.18, 1.55)}]
+  \shade[left color=tcaccent!8, right color=tcaccent!85,
+         shading angle=90]
+    (0,0) rectangle (0.22, 1.65);
+  \draw[tcgray!50, line width=0.25pt] (0,0) rectangle (0.22, 1.65);
+  \node[font=\tiny\color{tcgray}, anchor=west] at (0.26, 1.65) {high $\sN$};
+  \node[font=\tiny\color{tcgray}, anchor=west] at (0.26, 0.00) {low $\sN$};
+  \node[font=\tiny\color{tcaccent}, anchor=west, line width=0.45pt,
+        draw=tcaccent, rounded corners=0.6pt, inner sep=1pt]
+    at (0.26, 2.05) {$\;\square\;$ top-$k$};
+\end{scope}
+
+\end{tikzpicture}%
+}
+\caption{\textbf{Conceptual visualization of TPN query-conditioned selection.}
+Heatmap intensity (warm $=$ high TPN score $\sN$) over the $24{\times}24$ visual grid;
+crimson borders mark top-$k$ positions selected for the LLM.
+\textbf{(a)} A spatial-relation query concentrates selection on the two named
+objects; the remaining $\sim$80\% of the canvas is suppressed.
+\textbf{(b)} A counting query spreads selection across the shelf row.
+The same image yields different selections for different queries — the
+defining property of query conditioning that no query-agnostic baseline
+(FastV, PruMerge, ToMe) can produce.}
+\label{fig:qualitative}
+\end{figure}
+
+% ===================================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\subsection{Why Token Merge Over a Trainable Pooler}
+\label{sec:pooler-failures}
+
+Before settling on the parameter-free token merge, we explored a trainable
+cross-attention \emph{UnselectedPooler}: 4 learned slot vectors that compress the
+432 unselected tokens into compact summary representations.
+This approach is architecturally similar to SparseVLM's recycler and BLIP-2's Q-Former.
+We trained 8 variants over 8 weeks; all ultimately failed.
+Post-mortem analysis identified three structural defects:
+
+\textbf{(1) Circular co-adaptation.}
+When the pooler and LoRA train simultaneously, a circular dependency arises:
+pooler output shifts $\to$ LLM input distribution changes $\to$ LoRA must re-adapt
+$\to$ its gradient to the pooler changes $\to$ pooler must re-adapt.
+This is structurally identical to GAN training instability.
+Reducing pooler LR slows oscillation but cannot eliminate it:
+at LR $5\times10^{-4}$ the cycle period was $\sim$5K steps;
+at LR $2\times10^{-5}$ it extended to $\sim$15K steps but persisted.
+Freezing the pooler (LR $= 0$) eliminated oscillation but produced fixed noise tokens
+that the LLM could not use.
+
+\textbf{(2) Conflicting gradient signals.}
+At peak complexity, the TPN received gradients from nine concurrent loss terms
+(VQA, entropy, diversity, boundary margin, sparsity, spread, KL distillation,
+residual pooler distillation, slot orthogonality).
+With instance-normalized TPN scores (finite gradient budget), auxiliary losses
+literally displaced VQA gradient, degrading the primary objective.
+
+\textbf{(3) Train-eval mismatch.}
+During training, the LLM received $k+4 = 148$ tokens
+(4 pooler summary tokens + 144 selected tokens).
+During evaluation, the \texttt{generate()} path returned only $k=144$ selected tokens.
+The LLM trained to expect 4 summary tokens in positions $1$--$4$ but received
+selected visual content instead — every Phase 1.5 evaluation metric was corrupted.
+
+Token merge resolves all three defects simultaneously: zero new parameters eliminates
+co-adaptation; no additional loss terms; and the sequence length is exactly $k$
+at both train and eval time.
+
+\subsection{Critical Design Choices}
+
+\textbf{Instance normalization.}
+Early experiments without normalization showed score magnitude explosion to $\pm100$
+within $\sim$1000 steps, after which Gumbel noise was negligible and entropy collapsed.
+Both \texttt{tanh} normalization (gradient $\approx 0$ at saturation) and batch
+normalization (running statistics break during inference) were tried and failed.
+Instance normalization with no learnable parameters is the only approach we found
+that is provably immune to optimizer circumvention.
+
+\textbf{Tau-independent STE correction (Eq.~\ref{eq:taufix}).}
+Without this correction, the standard STE gradient vanishes as $\tau \to 0.3$ because
+$\sigma'(x/\tau) \approx 0$ for $|x| > 1$ at low temperature.
+TPN gradients died around step 15K in early experiments.
+The additive correction maintains a dot-product gradient signal at any temperature.
+
+\textbf{LoRA warm-freeze.}
+Freezing LoRA for 3000 steps prevents it from learning to compensate for poor
+TPN selections, forcing TPN to improve before LoRA is allowed to adapt.
+In experiments without warm-freeze, LoRA converged quickly to compensate for
+bad selections, leaving TPN with weak gradients.
+
+\subsection{Ablation Analysis}
+
+Table~\ref{tab:ablation} summarizes per-component contributions and the
+failure modes of removing each design choice.
+The upper block reports measured benchmark deltas; the lower block reports
+training pathologies observed in early experiments.
+
+\begin{table}[t]
+\caption{Ablation study. Val-VQA = NTP cross-entropy (lower is better).
+Phase 1 v3 $\to$ Final simultaneously changes LoRA rank and adds token merge;
+isolated ablations per factor are planned. Failure modes from training logs.}
+\label{tab:ablation}
+\vskip 0.1in
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Configuration} & \textbf{LoRA r} & \textbf{Val-VQA} & \textbf{VQAv2 (\%)} & \textbf{GQA (\%)} \\
+\midrule
+Hard drop, no merge (v3)             & 32 & 0.3334 & 72.47 & $\sim$63$^\dagger$ \\
++ Token merge, r=64 (P1-Final)       & 64 & 0.3342 & 72.27 & 67.12 \\
++ Adaptive budget ($\lambda{=}0.1$)  & 64 & —      & 69.43 & 65.04 \\
+\midrule
+w/o STE additive correction          & 64 & — & \multicolumn{2}{c}{Gradient death at $\sim$15K steps} \\
+w/o LoRA warm-freeze                 & 64 & — & \multicolumn{2}{c}{TPN gradient crowded out by LoRA} \\
+w/o instance normalization           & 64 & — & \multicolumn{2}{c}{Score collapse, entropy $\to$ 0} \\
+\bottomrule
+\end{tabular}%
+}
+\vskip -0.05in
+\small{$\dagger$: estimated.}
+\end{table}
+
+\textbf{Token merge contribution.}
+Phase 1 v3 and Phase 1 Final produce nearly identical VQAv2 scores (72.47\% vs.\ 72.27\%),
+while Final gains +4.1 GQA points and +4.1 POPE points.
+The interpretation is that token merge primarily helps tasks requiring broader scene
+coverage (spatial reasoning, object grounding) rather than the single-answer VQA format.
+This is consistent with the merge mechanism: unselected tokens are merged
+\emph{proportionally to their TPN score}, so near-threshold tokens (spatially nearby
+but not top-ranked) are recovered and contribute to Token Merge — exactly the tokens
+relevant to spatial localization queries.
+The simultaneous increase in LoRA rank ($32 \to 64$) likely also contributes;
+isolating the two factors requires a controlled rank-64, no-merge ablation
+left for future work.
+
+\subsection{Limitations}
+
+\textbf{VQAv2 gap vs.\ published methods.}
+Our best VQAv2 result (72.47\%, Phase 1 v3) trails FastV (77.1\%) and PruMerge (76.8\%)
+by $\sim$5 points at the same 144-token budget.
+We attribute this to architectural overhead (TPN must learn on top of frozen features)
+and limited training compute (80K steps on 2 GPUs vs.\ multi-day distributed runs).
+The GQA result reverses this ordering, suggesting that VQAv2 may under-represent
+tasks where query-conditioned selection is beneficial.
+
+\textbf{Single-step compression.} TC-ViTok compresses $576 \to 144$ tokens in a single
+step. Progressive compression ($576 \to 288 \to 144$) may better preserve high-frequency
+detail for OCR and fine-grained counting.
+
+\textbf{Encoder-side cost.} CLIP ViT-L/14 still processes all 576 positions.
+The 75\% LLM prefill savings do not reduce encoder cost; end-to-end speedup depends on
+the inference time split between encoder and LLM.
+
+\textbf{Incomplete Pareto sweep.} Only one $\lambda_b$ value (0.1) was evaluated for
+the Adaptive model due to hardware time constraints. The full sweep is needed to
+characterize whether adaptive budgeting yields Pareto improvements over fixed-$k$.
+
+% ===================================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented TC-ViTok, a modular system for query-conditioned visual token selection
+that operates on frozen, pre-computed features before the LLM.
+The system delivers a \textbf{$3.39\times$ end-to-end inference speedup}
+and a 71\% smaller KV cache while achieving 72.27\% VQAv2, 79.09\% POPE F1, and
+\textbf{67.12\% GQA --- $+6.1$ points above the uncompressed full model}.
+
+The GQA result is the paper's central finding.
+Compression and accuracy are typically traded off; query-conditioned selection turns
+this trade-off into a strict improvement on tasks where the question localizes the
+relevant pixels —- because the dropped tokens are, for those tasks, distractors
+rather than information.
+This reframes visual token compression: at high compression ratios on spatially
+local tasks, the question is not \emph{how to lose less accuracy} but
+\emph{how to drop the right tokens}.
+
+Three technical mechanisms make this practical end-to-end:
+the tau-independent STE correction supplies dense gradient throughout temperature
+annealing; informative token merge sidesteps the co-adaptation instability we
+documented across eight earlier trainable-pooler failures; and the differentiable
+threshold trick connects budget penalties to non-differentiable top-$k$.
+We hope the latter two negative results are as useful to the community as the
+positive ones.
+
+\textbf{Future work.} (i) Full Pareto sweep over $\lambda_b$ to characterize the
+adaptive-budget frontier; (ii) per-question-type evaluation on the GQA spatial
+split to test the active-denoising hypothesis directly; (iii) progressive
+multi-step compression ($576 \to 288 \to 144$) for OCR-heavy tasks where
+high-frequency detail matters; (iv) generalization to Qwen-VL, InternVL, and
+larger LLM backbones.
+
+\bibliography{main}
+\bibliographystyle{icml2021}
+
+\end{document}

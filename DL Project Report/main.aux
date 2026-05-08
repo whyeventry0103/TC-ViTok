@@ -1,0 +1,116 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{liu2024llava}
+\citation{bolya2022token}
+\citation{liang2022evit}
+\citation{chen2024fastv}
+\citation{shang2024llava}
+\citation{zhang2025sparsevlm}
+\citation{zhu2024focusllava}
+\citation{li2025qgvtc}
+\newlabel{sec:intro}{{1}{1}{}{section.1}{}}
+\citation{bolya2022token}
+\citation{rao2021dynamicvit}
+\citation{liang2022evit}
+\citation{shang2024llava}
+\citation{chen2024fastv}
+\citation{chen2024fastv,endo2025feather}
+\citation{li2023blip2}
+\citation{zhang2025sparsevlm}
+\citation{li2025qgvtc}
+\citation{zhu2024focusllava}
+\citation{jang2017categorical,maddison2017concrete}
+\citation{bengio2013estimating}
+\citation{meng2022adavit}
+\citation{bolya2022token}
+\citation{rao2021dynamicvit}
+\citation{liang2022evit}
+\citation{shang2024llava}
+\citation{chen2024fastv}
+\citation{zhang2025sparsevlm}
+\citation{li2025qgvtc}
+\citation{zhu2024focusllava}
+\newlabel{sec:related}{{2}{2}{}{section.2}{}}
+\newlabel{tab:methods}{{1}{2}{Positioning of TC-ViTok in the visual token compression landscape. Pre-LLM = decision made before LLM forward pass (saves all LLM FLOPs); inside LLM = decision made between LLM layers (saves only late-layer FLOPs)}{table.1}{}}
+\citation{oquab2023dinov2}
+\citation{radford2021clip}
+\citation{radford2021clip}
+\citation{jang2017categorical,bengio2013estimating}
+\newlabel{sec:method}{{3}{3}{}{section.3}{}}
+\newlabel{sec:prob}{{3.1}{3}{}{subsection.3.1}{}}
+\newlabel{sec:encoders}{{3.2}{3}{}{subsection.3.2}{}}
+\newlabel{sec:tpn}{{3.3}{3}{}{subsection.3.3}{}}
+\newlabel{fig:tpn}{{1}{3}{\textbf {TPN internal architecture and BudgetPredictor wiring.} Cross-attention with $H{=}4$ heads ($Q{=}\qemb $, $K{=}V{=}\vcoarse $) produces a context vector $\mathrm {ctx}{\in }\mathbb {R}^{384}$ and head-averaged spatial weights $\boldsymbol {\alpha }{\in }\mathbb {R}^{49}$. The $[\mathrm {ctx};\boldsymbol {\alpha }]$ concatenation passes through a Score MLP producing 49 coarse scores, which are bilinearly upsampled $7{\times }7\to 24{\times }24$ and instance-normalized to yield $\sN {\in }\mathbb {R}^{576}$. Phase 1 Adaptive shares $\mathrm {ctx}$ with the BudgetPredictor (orange) which emits the per-sample token fraction $k_{\mathrm {frac}}{\in }[0.0625, 0.5]$ consumed by the Adaptive Gumbel-STE}{figure.1}{}}
+\newlabel{sec:ste}{{3.4}{3}{}{subsection.3.4}{}}
+\newlabel{eq:noisy}{{1}{3}{}{equation.1}{}}
+\newlabel{eq:soft}{{2}{3}{}{equation.2}{}}
+\newlabel{eq:topk}{{3}{3}{}{equation.3}{}}
+\newlabel{eq:hard}{{4}{3}{}{equation.4}{}}
+\newlabel{eq:ste}{{5}{3}{}{equation.5}{}}
+\citation{shang2024llava}
+\newlabel{eq:gather}{{6}{4}{}{equation.6}{}}
+\newlabel{eq:taufix}{{7}{4}{}{equation.7}{}}
+\newlabel{sec:merge}{{3.5}{4}{}{subsection.3.5}{}}
+\newlabel{eq:assign}{{8}{4}{}{equation.8}{}}
+\newlabel{eq:scoreweight}{{9}{4}{}{equation.9}{}}
+\newlabel{eq:merge}{{10}{4}{}{equation.10}{}}
+\newlabel{sec:adaptive}{{3.6}{4}{}{subsection.3.6}{}}
+\newlabel{eq:bp}{{11}{4}{}{equation.11}{}}
+\newlabel{eq:thresh}{{12}{4}{}{equation.12}{}}
+\newlabel{sec:loss}{{3.7}{4}{}{subsection.3.7}{}}
+\newlabel{eq:loss}{{13}{4}{}{equation.13}{}}
+\newlabel{fig:ste}{{2}{5}{\textbf {Fixed-$k$ vs.\ Adaptive Gumbel-Sigmoid STE} (Phase 1 Final vs.\^^MPhase 1 Adaptive). \emph {Left:} the standard fixed-budget pipeline: scores + Gumbel noise feed both a soft sigmoid (for backward pass) and a hard top-$k{=}144$ selection (for forward pass), composed via the STE identity $\mathbf {m}_{\mathrm {STE}}{=}\mathbf {m}_{\mathrm {hard}}{-}\mathbf {m}_{\mathrm {soft}}.\mathrm {detach}(){+}\mathbf {m}_{\mathrm {soft}}$. \emph {Right:} the adaptive variant inserts a per-sample threshold $\theta $ derived from the BudgetPredictor's $k_{\mathrm {frac}}$ output. The shifted soft mask $\sigma ((\mathbf {n}{-}\theta )/\tau )$ produces a differentiable effective count $k_{\mathrm {eff}}{=}\sum _i m_{\mathrm {soft},i}$ that drives the budget loss; per-sample top-$k_{\mathrm {hard}}$ provides the hard mask with right-padding to $k_{\max }$ for batched processing}{figure.2}{}}
+\newlabel{tab:loss}{{2}{5}{Loss function components}{table.2}{}}
+\newlabel{sec:training}{{3.8}{5}{}{subsection.3.8}{}}
+\newlabel{tab:hparam}{{3}{5}{Training hyperparameters per phase. P1-F = Phase 1 Final; P1-A = Phase 1 Adaptive. The expanded LoRA target set in P1-F (FFN layers) is critical — it allows the LLM to adapt to merged token representations}{table.3}{}}
+\newlabel{sec:efficiency}{{4}{5}{}{section.4}{}}
+\citation{kaplan2020scaling}
+\citation{goyal2017vqav2}
+\citation{hudson2019gqa}
+\citation{li2023pope}
+\newlabel{fig:arch}{{3}{6}{\textbf {TC-ViTok system architecture with adaptive budget.} Three frozen encoders (purple) extract complementary representations: CLIP ViT-L/14 produces high-resolution patch tokens $\vfine $ for the LLM, DINOv2-S provides a coarse spatial map $\vcoarse $ for the TPN, and CLIP Text encodes the question into $\qemb $. The TPN (887K) cross-attends $\qemb $ over $\vcoarse $ and emits per-position scores $\sN $ plus a context vector $\mathrm {ctx}$. In adaptive mode, the BudgetPredictor (25K, orange) maps $\mathrm {ctx}$ to a per-sample token fraction. The Adaptive Gumbel-STE produces variable-length selection indices, which gate-and-merge $\vfine $ before the multimodal projector and LLaVA-1.5-7B+LoRA}{figure.3}{}}
+\newlabel{fig:merge}{{4}{6}{\textbf {Informative Token Merge (parameter-free).} \textbf {(a)} Each unselected token (gray) is soft-assigned to the most similar selected token (blue) via cosine similarity. Edge thickness encodes $\tilde {A}_{ij}{=}w_i\,\cos (v_i,v_j)$, where $w_i$ is the unselected token's TPN score (numbers below each token). \textbf {(b)} Merged outputs (gradient: selected~$\to $~unselected) preserve sequence length~$k$ but absorb background context from all $N{-}k$ discarded tokens. No new parameters}{figure.4}{}}
+\newlabel{tab:flops}{{4}{6}{FLOPs and KV cache analysis on LLaVA-1.5-7B. Speedup is computed relative to full LLaVA-1.5 inference. End-to-end includes the always-paid CLIP ViT-L/14 encoder cost}{table.4}{}}
+\newlabel{sec:results}{{5}{6}{}{section.5}{}}
+\citation{chen2024fastv}
+\citation{shang2024llava}
+\citation{zhang2025sparsevlm}
+\newlabel{fig:pipeline}{{5}{7}{\textbf {Training curriculum and adaptive-budget schedule.} \emph {Top:} four phases trained sequentially. Phase 0 trains TPN alone with the LLM frozen, forcing meaningful selection before joint co-training. Phase 1 unfreezes LoRA + projector for joint fine-tuning. Phase 1-Adaptive (orange) loads from Phase 1 Final and adds the BudgetPredictor with $\lambda _b$ sweep. Phase 2 (domain transfer to TextVQA) is left as future work. \emph {Bottom:} per-step temperature anneal $\tau {:}1.0{\to }0.3$ (blue) over 40K adaptive steps, with LoRA unfreezing at step 1K (green) and BudgetPredictor activation at step 2K (red)}{figure.5}{}}
+\newlabel{sec:comparison}{{5.3}{7}{}{subsection.5.3}{}}
+\newlabel{fig:flops}{{6}{7}{Inference FLOPs breakdown. TC-ViTok delivers a $3.39\times $ end-to-end speedup. The added encoder/TPN/merge overhead (blue, $\approx $3.2~GFLOPs) is invisible at this scale —- the LLM prefill dominates by $\geq $700{$\times $}}{figure.6}{}}
+\newlabel{fig:convergence}{{7}{7}{Val-VQA convergence for Phase 1 v3 (4 checkpoints, 50K steps total). Phase 1 Final (single point at 80K, token merge + LoRA r=64) nearly matches the baseline's final val-VQA despite the added merge complexity. Downstream benchmark gains (GQA +4.1\%, POPE +4.1\%) are not reflected here since val-VQA measures only NTP cross-entropy}{figure.7}{}}
+\newlabel{tab:main}{{5}{8}{Main results on LLaVA-1.5-7B. Our models use $k{=}144$ tokens (25\% of 576) except Adaptive (variable $k\in [36,288]$). Published VQAv2 numbers from respective papers on val2014. GQA = val\_balanced accuracy (\%). POPE = macro-F1 (\%) across popular/random/adversarial variants. $\dagger $: estimated (Phase 1 v3 was only evaluated on VQAv2 due to compute constraints). \textbf {Bold}: best of ours}{table.5}{}}
+\newlabel{fig:bars}{{8}{8}{Benchmark comparison across all models. TC-ViTok Final (red) and Adaptive (orange) both \emph {exceed} full LLaVA-1.5 on GQA (61.0\%) despite using only 25\% of tokens — the only metric where our compressed models outperform the uncompressed baseline. v3 GQA and POPE are estimated ($\dagger $)}{figure.8}{}}
+\newlabel{tab:pareto}{{6}{8}{Adaptive budget operating points. $k_{\mathrm {eff}}$ is the mean soft token count; hard selection is capped at $k_{\max }{=}288$. Full Pareto sweep ($\lambda _b \in \{0.2, 0.4\}$) is future work}{table.6}{}}
+\newlabel{sec:gqa-mechanism}{{5.5}{9}{}{subsection.5.5}{}}
+\newlabel{sec:discussion}{{6}{9}{}{section.6}{}}
+\newlabel{sec:pooler-failures}{{6.1}{9}{}{subsection.6.1}{}}
+\newlabel{fig:qualitative}{{9}{9}{\textbf {Conceptual visualization of TPN query-conditioned selection.} Heatmap intensity (warm $=$ high TPN score $\sN $) over the $24{\times }24$ visual grid; crimson borders mark top-$k$ positions selected for the LLM. \textbf {(a)} A spatial-relation query concentrates selection on the two named objects; the remaining $\sim $80\% of the canvas is suppressed. \textbf {(b)} A counting query spreads selection across the shelf row. The same image yields different selections for different queries — the defining property of query conditioning that no query-agnostic baseline (FastV, PruMerge, ToMe) can produce}{figure.9}{}}
+\newlabel{tab:ablation}{{7}{10}{Ablation study. Val-VQA = NTP cross-entropy (lower is better). Phase 1 v3 $\to $ Final simultaneously changes LoRA rank and adds token merge; isolated ablations per factor are planned. Failure modes from training logs}{table.7}{}}
+\newlabel{sec:conclusion}{{7}{10}{}{section.7}{}}
+\bibdata{main}
+\bibcite{bengio2013estimating}{{1}{2013}{{Bengio et~al.}}{{Bengio, L{\'e}onard, and Courville}}}
+\bibcite{bolya2022token}{{2}{2023}{{Bolya et~al.}}{{Bolya, Fu, Dai, Zhang, and Feichtenhofer}}}
+\bibcite{chen2024fastv}{{3}{2024}{{Chen et~al.}}{{Chen, Zhao, Wang, Chen, Xu, Dong, and Zhang}}}
+\bibcite{endo2025feather}{{4}{2025}{{Endo et~al.}}{{}}}
+\bibcite{goyal2017vqav2}{{5}{2017}{{Goyal et~al.}}{{Goyal, Khot, Summers-Stay, Batra, and Parikh}}}
+\bibcite{hudson2019gqa}{{6}{2019}{{Hudson \& Manning}}{{Hudson and Manning}}}
+\bibcite{jang2017categorical}{{7}{2017}{{Jang et~al.}}{{Jang, Gu, and Poole}}}
+\bibcite{kaplan2020scaling}{{8}{2020}{{Kaplan et~al.}}{{Kaplan, McCandlish, Henighan, Brown, Chess, Child, Gray, Radford, Wu, and Amodei}}}
+\bibcite{li2023blip2}{{9}{2023{a}}{{Li et~al.}}{{Li, Li, Savarese, and Hoi}}}
+\bibcite{li2025qgvtc}{{10}{2025}{{Li et~al.}}{{}}}
+\bibcite{li2023pope}{{11}{2023{b}}{{Li et~al.}}{{Li, Du, Zhou, Wang, Zhao, and Wen}}}
+\bibcite{liang2022evit}{{12}{2022}{{Liang et~al.}}{{Liang, Ge, Tong, Song, Wang, and Xie}}}
+\bibcite{liu2024llava}{{13}{2023}{{Liu et~al.}}{{Liu, Li, Wu, and Lee}}}
+\bibcite{maddison2017concrete}{{14}{2017}{{Maddison et~al.}}{{Maddison, Mnih, and Teh}}}
+\bibcite{meng2022adavit}{{15}{2022}{{Meng et~al.}}{{Meng, Li, Chen, Lan, Wu, Jiang, and Lim}}}
+\bibcite{oquab2023dinov2}{{16}{2023}{{Oquab et~al.}}{{Oquab, Darcet, Moutakanni, Vo, Szafraniec, Khalidov, Fernandez, Haziza, Massa, El-Nouby, et~al.}}}
+\bibcite{radford2021clip}{{17}{2021}{{Radford et~al.}}{{Radford, Kim, Hallacy, Ramesh, Goh, Agarwal, Sastry, Askell, Mishkin, Clark, et~al.}}}
+\bibcite{rao2021dynamicvit}{{18}{2021}{{Rao et~al.}}{{Rao, Zhao, Liu, Lu, Zhou, and Hsieh}}}
+\bibcite{shang2024llava}{{19}{2024}{{Shang et~al.}}{{Shang, Cai, Xu, Lee, and Yan}}}
+\bibcite{zhang2025sparsevlm}{{20}{2025}{{Zhang et~al.}}{{Zhang, Fan, Ma, Zheng, Huang, Cheng, Gudovskiy, Okuno, Nakata, Keutzer, et~al.}}}
+\bibcite{zhu2024focusllava}{{21}{2024}{{Zhu et~al.}}{{}}}
+\bibstyle{icml2021}
+\gdef \@abspage@last{11}
