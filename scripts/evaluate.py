@@ -56,9 +56,12 @@ from tqdm import tqdm
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from tc_vitok.models.tc_vitok_model import TCViTokModel, gather_tokens
+from tc_vitok.models.tc_vitok_model import (
+    TCViTokModel, gather_tokens, informative_token_merge,
+)
 from tc_vitok.data.datasets import (
-    VQAv2Dataset, GQADataset, POPEDataset, collate_fn,
+    VQAv2Dataset, GQADataset, POPEDataset, TextVQADataset,
+    MMBenchDataset, MMEDataset, collate_fn,
 )
 from tc_vitok.evaluation.metrics import (
     vqa_score, gqa_accuracy, pope_f1, normalize_answer,
@@ -79,6 +82,11 @@ class RandomDropModel(TCViTokModel):
     """
 
     def _select_tokens(self, images_coarse, images_full, questions):
+        if self.adaptive_budget:
+            raise NotImplementedError(
+                "RandomDropModel does not support adaptive budget; "
+                "use --baseline none for adaptive eval."
+            )
         v_full = self.full_encoder(images_full)
         N = v_full.shape[1]
         B = v_full.shape[0]
@@ -86,7 +94,7 @@ class RandomDropModel(TCViTokModel):
             torch.randperm(N, device=v_full.device)[:self.k]
             for _ in range(B)
         ])
-        return gather_tokens(v_full, idx)
+        return gather_tokens(v_full, idx), None
 
 
 class ImageOnlyTPNModel(TCViTokModel):
@@ -95,7 +103,7 @@ class ImageOnlyTPNModel(TCViTokModel):
     Passes zero query embedding to TPN, removing language conditioning.
     TPN still runs and uses its trained weights, but sees no text signal —
     selection becomes purely content-based (no query conditioning).
-    Corresponds to ablation A3 in the paper.
+    Corresponds to ablation A3 in the paper (also tests Hypothesis H2).
     """
 
     def _select_tokens(self, images_coarse, images_full, questions):
@@ -104,15 +112,79 @@ class ImageOnlyTPNModel(TCViTokModel):
         q_embed_zero = torch.zeros(
             B, 512, device=v_coarse.device, dtype=v_coarse.dtype
         )
-        idx, _, __ = self.tpn(
+        idx, s_N, _, k_eff = self.tpn(
             v_coarse=v_coarse,
             q_embed=q_embed_zero,
             k=self.k,
             tau=0.1,
             training=False,
+            adaptive_budget=self.adaptive_budget,
+            budget_predictor=self.budget_predictor,
+            k_min=self.k_min,
+            k_max=self.k_max,
         )
         v_full = self.full_encoder(images_full)
-        return gather_tokens(v_full, idx)
+        if self.adaptive_budget:
+            v_selected = self._gather_adaptive(v_full, idx, s_N)
+            k_per_sample = (idx >= 0).sum(dim=1)
+            return v_selected, k_per_sample
+        if self.merge_beta > 0:
+            return informative_token_merge(
+                v_fine=v_full, idx=idx, s_N=s_N,
+                beta=self.merge_beta, tau_merge=self.merge_tau,
+            ), None
+        return gather_tokens(v_full, idx), None
+
+
+class Full576Model(TCViTokModel):
+    """Control: same LoRA / mm_projector as TC-ViTok Final, but full 576 tokens.
+
+    Bypasses the TPN, the token merge, and any selection. The fine encoder
+    output is forwarded to the LLM unmodified. This isolates the contribution
+    of compression from the contribution of LoRA fine-tuning — the missing
+    control flagged by the prior reviewer report (Step 2 / W1).
+
+    Reuses the Phase 1 Final LoRA adapter and mm_projector verbatim.
+    Returns 576 tokens unchanged.
+    """
+
+    def _select_tokens(self, images_coarse, images_full, questions):
+        if self.adaptive_budget:
+            raise NotImplementedError(
+                "Full576Model is the LoRA-576 control and must run with fixed "
+                "k=576; pass --baseline full_576 without --adaptive-budget."
+            )
+        v_full = self.full_encoder(images_full)  # [B, 576, 1024]
+        assert v_full.shape[1] == 576, (
+            f"Full576Model expects 576 visual tokens, got {v_full.shape[1]}"
+        )
+        return v_full, None
+
+
+class MergeDisabledModel(TCViTokModel):
+    """Ablation: Phase 1 Final checkpoint with merge disabled at eval.
+
+    Same TPN selection, same LoRA, same k, but beta=0 → no token merge.
+    Isolates the contribution of the merge mechanism (true single-variable
+    ablation; v3 vs Final changes too many things at once).
+    """
+
+    def _select_tokens(self, images_coarse, images_full, questions):
+        if self.adaptive_budget:
+            raise NotImplementedError(
+                "MergeDisabledModel runs against the fixed-k Final checkpoint; "
+                "use --baseline none for adaptive checkpoints."
+            )
+        v_coarse = self.coarse_encoder(images_coarse)
+        q_embed = self.text_encoder(questions)
+        idx, s_N, _, k_eff = self.tpn(
+            v_coarse=v_coarse, q_embed=q_embed, k=self.k, tau=0.1, training=False,
+            adaptive_budget=False,
+            budget_predictor=None,
+        )
+        v_full = self.full_encoder(images_full)
+        # Force beta=0: no merge, hard top-k only.
+        return gather_tokens(v_full, idx), None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -125,6 +197,11 @@ def load_model(
     k: int = 144,
     baseline: str = "none",
     llava_model_name: str = "llava-hf/llava-1.5-7b-hf",
+    merge_beta: float = 0.3,
+    merge_tau: float = 0.1,
+    adaptive_budget: bool = False,
+    k_min: int = 36,
+    k_max: int = 288,
 ) -> TCViTokModel:
     """Load TCViTokModel from Phase 1 checkpoint.
 
@@ -153,6 +230,8 @@ def load_model(
         "none": TCViTokModel,
         "random_drop": RandomDropModel,
         "image_only": ImageOnlyTPNModel,
+        "full_576": Full576Model,
+        "merge_disabled": MergeDisabledModel,
     }[baseline]
 
     # Auto-detect LoRA rank/alpha/targets from checkpoint before building model
@@ -178,6 +257,10 @@ def load_model(
     print(f"[load_model] Loading LLaVA backbone from HF cache (offline)...")
     t0 = time.time()
 
+    # Merge config: 0 disables merge entirely (used by merge_disabled / full_576).
+    # For the Final model checkpoint, the training config used beta=0.3, tau=0.1.
+    effective_merge_beta = 0.0 if baseline in ("merge_disabled", "full_576") else merge_beta
+
     model = model_cls(
         k=k,
         tpn_config=tpn_config,
@@ -185,6 +268,11 @@ def load_model(
         llava_model_name=llava_model_name,
         lora_config=lora_config,
         load_encoders=True,
+        merge_beta=effective_merge_beta,
+        merge_tau=merge_tau,
+        adaptive_budget=adaptive_budget,
+        k_min=k_min,
+        k_max=k_max,
     )
 
     print(f"[load_model] Backbone loaded in {time.time()-t0:.1f}s")
@@ -505,6 +593,212 @@ def evaluate_pope(model, data_root, device, batch_size, max_samples=None, log_in
     return results
 
 
+def evaluate_mmbench(model, data_root, device, batch_size, max_samples=None, log_interval=200):
+    """MMBench English dev. Multiple-choice; score = exact-match on letter."""
+    print("\n[MMBench] Loading English dev split...")
+    # Path: data_root/mmbench/mmbench_dev_en.tsv
+    tsv_candidates = list(Path(f"{data_root}/mmbench").glob("mmbench_dev_en*.tsv"))
+    if not tsv_candidates:
+        raise FileNotFoundError(
+            f"MMBench TSV not found in {data_root}/mmbench. "
+            f"Download from https://huggingface.co/datasets/lmms-lab/MMBench"
+        )
+    dataset = MMBenchDataset(str(tsv_candidates[0]), max_samples=max_samples)
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False,
+        num_workers=4, collate_fn=collate_fn, pin_memory=True,
+    )
+    print(f"[MMBench] {len(dataset)} samples")
+
+    correct: list[int] = []
+    per_category: dict[str, list[int]] = {}
+    per_question: list[dict] = []
+
+    letter_re = re.compile(r"\b([A-D])\b")
+    for step, batch in enumerate(tqdm(loader, desc="MMBench dev")):
+        with torch.no_grad():
+            preds = model.generate(
+                images_coarse=batch["images_coarse"].to(device),
+                images_full=batch["images_full"].to(device),
+                questions=batch["questions"],
+                max_new_tokens=4,
+            )
+        if step == 0:
+            for i in range(min(4, len(preds))):
+                print(
+                    f"  [diag] pred={repr(preds[i])} | gt={batch['answers'][i][0]}",
+                    flush=True,
+                )
+        for i, (pred, gt_list, qid) in enumerate(zip(
+            preds, batch["answers"], batch["question_id"],
+        )):
+            gt = gt_list[0].upper() if isinstance(gt_list, list) else str(gt_list).upper()
+            m = letter_re.search(pred.upper())
+            extracted = m.group(1) if m else (pred.strip().upper()[:1] if pred.strip() else "")
+            ok = int(extracted == gt)
+            correct.append(ok)
+            cat = batch.get("category", [""] * len(preds))[i] or ""
+            per_category.setdefault(cat, []).append(ok)
+            per_question.append({
+                "question_id": qid,
+                "pred": pred,
+                "extracted": extracted,
+                "gt": gt,
+                "correct": bool(ok),
+                "category": cat,
+            })
+        if log_interval > 0 and (step + 1) % log_interval == 0:
+            run = sum(correct) / len(correct) * 100
+            print(f"[MMBench] step {step+1}/{len(loader)} | acc: {run:.2f}%", flush=True)
+
+    overall = sum(correct) / len(correct) * 100 if correct else 0.0
+    by_cat = {
+        c: round(sum(v) / len(v) * 100, 2)
+        for c, v in per_category.items() if v
+    }
+    print(f"[MMBench] FINAL accuracy: {overall:.2f}%  ({len(correct)} samples)")
+    return {
+        "accuracy": round(overall, 2),
+        "by_category": by_cat,
+        "num_samples": len(correct),
+        "per_question": per_question,
+    }
+
+
+def evaluate_mme(model, data_root, device, batch_size, max_samples=None, log_interval=200):
+    """MME yes/no benchmark. Score = sum_subtask(accuracy + accuracy_plus)."""
+    print("\n[MME] Loading benchmark...")
+    dataset = MMEDataset(f"{data_root}/mme", max_samples=max_samples)
+    if len(dataset) == 0:
+        raise FileNotFoundError(
+            f"MME data not found in {data_root}/mme. "
+            f"Download from https://github.com/BradyFU/Awesome-Multimodal-Large-Language-Models/tree/Evaluation"
+        )
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False,
+        num_workers=4, collate_fn=collate_fn, pin_memory=True,
+    )
+    print(f"[MME] {len(dataset)} samples")
+
+    # Track per-subtask, per-image pair correctness
+    per_image: dict[tuple, list[int]] = {}
+    per_q: list[dict] = []
+    for step, batch in enumerate(tqdm(loader, desc="MME")):
+        with torch.no_grad():
+            preds = model.generate(
+                images_coarse=batch["images_coarse"].to(device),
+                images_full=batch["images_full"].to(device),
+                questions=batch["questions"],
+                max_new_tokens=4,
+            )
+        for i, (pred, gt_list, img_id, sub) in enumerate(zip(
+            preds, batch["answers"],
+            batch.get("image_id", [""] * len(preds)),
+            batch.get("subtask", [""] * len(preds)),
+        )):
+            gt = (gt_list[0] if isinstance(gt_list, list) else gt_list).lower()
+            yn = extract_yes_no(pred)
+            ok = int(yn == gt)
+            per_image.setdefault((sub, img_id), []).append(ok)
+            per_q.append({"subtask": sub, "image": img_id, "pred": pred, "gt": gt, "correct": bool(ok)})
+
+    # Per-subtask accuracy + accuracy_plus
+    sub_metrics: dict[str, dict] = {}
+    for (sub, _), oks in per_image.items():
+        s = sub_metrics.setdefault(sub, {"acc_total": 0, "acc_n": 0, "plus_total": 0, "plus_n": 0})
+        s["acc_total"] += sum(oks)
+        s["acc_n"] += len(oks)
+        s["plus_total"] += int(all(oks) and len(oks) >= 2)
+        s["plus_n"] += 1
+    sub_scores: dict[str, float] = {}
+    perception_total = 0.0
+    cognition_total = 0.0
+    PERCEPTION = {"existence", "count", "position", "color", "posters",
+                  "celebrity", "scene", "landmark", "artwork", "OCR"}
+    for sub, s in sub_metrics.items():
+        acc_pct = s["acc_total"] / max(1, s["acc_n"]) * 100
+        plus_pct = s["plus_total"] / max(1, s["plus_n"]) * 100
+        score = acc_pct + plus_pct
+        sub_scores[sub] = round(score, 2)
+        if sub in PERCEPTION:
+            perception_total += score
+        else:
+            cognition_total += score
+
+    print(f"[MME] Perception: {perception_total:.1f} | Cognition: {cognition_total:.1f}")
+    return {
+        "perception_total": round(perception_total, 2),
+        "cognition_total": round(cognition_total, 2),
+        "by_subtask": sub_scores,
+        "num_samples": len(per_q),
+        "per_question": per_q,
+    }
+
+
+def evaluate_textvqa(model, data_root, device, batch_size, max_samples=None, log_interval=200):
+    """TextVQA val. Uses VQA soft-accuracy against the 10 annotator answers."""
+    print("\n[TextVQA] Loading val split...")
+    dataset = TextVQADataset(
+        annotations_path=f"{data_root}/textvqa/TextVQA_0.5.1_val.json",
+        image_dir=f"{data_root}/textvqa/train_images",
+        max_samples=max_samples,
+    )
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False,
+        num_workers=4, collate_fn=collate_fn, pin_memory=True,
+    )
+    print(f"[TextVQA] {len(dataset)} samples")
+    scores: list[float] = []
+    per_q: list[dict] = []
+    for step, batch in enumerate(tqdm(loader, desc="TextVQA val")):
+        with torch.no_grad():
+            preds = model.generate(
+                images_coarse=batch["images_coarse"].to(device),
+                images_full=batch["images_full"].to(device),
+                questions=batch["questions"],
+                max_new_tokens=20,
+            )
+        for pred, gt_list, qid in zip(preds, batch["answers"], batch["question_id"]):
+            s = vqa_score(pred, gt_list)
+            scores.append(s)
+            per_q.append({"question_id": qid, "pred": pred, "score": round(s, 4)})
+        if log_interval > 0 and (step + 1) % log_interval == 0:
+            run = sum(scores) / len(scores) * 100
+            print(f"[TextVQA] step {step+1}/{len(loader)} | VQA-Score: {run:.2f}%", flush=True)
+    avg = sum(scores) / max(1, len(scores)) * 100
+    print(f"[TextVQA] FINAL VQA-Score: {avg:.2f}%  ({len(scores)} samples)")
+    return {"vqa_score": round(avg, 2), "num_samples": len(scores), "per_question": per_q}
+
+
+def _summarize_seeds(per_seed: list[dict]) -> dict:
+    """Compute mean/stddev for headline metric of each benchmark across seeds."""
+    import statistics
+
+    HEADLINE = {
+        "vqav2": "vqa_score",
+        "gqa": "overall_accuracy",
+        "pope": "macro_f1",
+        "mmbench": "accuracy",
+        "mme": "perception_total",
+        "textvqa": "vqa_score",
+    }
+    summary: dict = {}
+    for bench, key in HEADLINE.items():
+        vals = [s[bench][key] for s in per_seed if bench in s and key in s[bench]]
+        if not vals:
+            continue
+        if len(vals) == 1:
+            summary[bench] = {"mean": vals[0], "stddev": 0.0, "n_seeds": 1, "values": vals}
+        else:
+            summary[bench] = {
+                "mean": round(statistics.mean(vals), 3),
+                "stddev": round(statistics.stdev(vals), 3),
+                "n_seeds": len(vals),
+                "values": vals,
+            }
+    return summary
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -514,15 +808,44 @@ def parse_args():
     parser.add_argument("--checkpoint", required=True, help="Path to best.ckpt")
     parser.add_argument(
         "--benchmarks", nargs="+", default=["vqav2", "gqa", "pope"],
-        choices=["vqav2", "gqa", "pope"],
+        choices=["vqav2", "gqa", "pope", "mmbench", "mme", "textvqa"],
         help="Benchmarks to run",
     )
     parser.add_argument(
         "--baseline", default="none",
-        choices=["none", "random_drop", "image_only"],
-        help="Baseline variant (none = full TC-ViTok)",
+        choices=["none", "random_drop", "image_only", "full_576", "merge_disabled"],
+        help=(
+            "Baseline variant. 'none' = full TC-ViTok. "
+            "'full_576' = same LoRA + mm_proj as TC-ViTok but pass all 576 tokens "
+            "(critical missing control: isolates compression vs LoRA effect). "
+            "'merge_disabled' = Final TPN selection but beta=0 at eval "
+            "(true single-variable merge ablation). "
+            "'image_only' = TPN with zeroed CLIP query (Hypothesis H2 test)."
+        ),
     )
     parser.add_argument("--k", type=int, default=144, help="Token budget")
+    parser.add_argument(
+        "--merge-beta", type=float, default=0.3,
+        help="Token-merge strength. 0 disables merge. Default 0.3 matches Final.",
+    )
+    parser.add_argument(
+        "--merge-tau", type=float, default=0.1,
+        help="Token-merge softmax temperature.",
+    )
+    parser.add_argument(
+        "--adaptive-budget", action="store_true",
+        help="Use BudgetPredictor for per-sample variable k (Adaptive variant).",
+    )
+    parser.add_argument("--k-min", type=int, default=36)
+    parser.add_argument("--k-max", type=int, default=288)
+    parser.add_argument(
+        "--n-eval-seeds", type=int, default=1,
+        help=(
+            "Number of generation seeds to average over for eval-time variance. "
+            "Each seed re-runs the full benchmark; results are averaged and stddev "
+            "is reported. Default 1 = no variance estimate. Recommended: 3-5."
+        ),
+    )
     parser.add_argument("--data-root", default=None,
                         help="Dataset root (default: $DATA_ROOT env var)")
     parser.add_argument("--device", default=None,
@@ -577,43 +900,83 @@ def main():
     print(f"  Output     : {args.output}")
     print("=" * 60)
 
-    # Load model once — reuse across all benchmarks
+    # Load model once — reuse across all benchmarks AND across eval seeds
     model = load_model(
         checkpoint_path=args.checkpoint,
         device=device,
         k=args.k,
         baseline=args.baseline,
         llava_model_name=args.llava_model,
+        merge_beta=args.merge_beta,
+        merge_tau=args.merge_tau,
+        adaptive_budget=args.adaptive_budget,
+        k_min=args.k_min,
+        k_max=args.k_max,
     )
 
     results = {
         "checkpoint": args.checkpoint,
         "baseline": args.baseline,
         "k": args.k,
+        "merge_beta": float(model.merge_beta),
+        "merge_tau": float(model.merge_tau),
+        "adaptive_budget": bool(model.adaptive_budget),
+        "n_eval_seeds": args.n_eval_seeds,
         "device": device,
         "benchmarks": {},
     }
 
     t_start = time.time()
 
-    if "vqav2" in args.benchmarks:
-        results["benchmarks"]["vqav2"] = evaluate_vqav2(
-            model, data_root, device, args.batch_size, args.max_samples,
-            log_interval=args.log_interval,
-        )
+    # Multi-seed eval loop. Determinism via torch.manual_seed only affects
+    # any sampling in generate(); LLaVA greedy decoding is deterministic so
+    # variance comes from any tie-breaking + non-deterministic GPU kernels.
+    # We collect per-seed metrics and report mean ± stddev.
+    seeds = list(range(args.n_eval_seeds))
+    per_seed_metrics: list[dict] = []
+    for seed in seeds:
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        seed_results: dict = {}
 
-    if "gqa" in args.benchmarks:
-        results["benchmarks"]["gqa"] = evaluate_gqa(
-            model, data_root, device, args.batch_size,
-            args.max_samples, spatial_eval=args.spatial_eval,
-            log_interval=args.log_interval,
-        )
+        if "vqav2" in args.benchmarks:
+            seed_results["vqav2"] = evaluate_vqav2(
+                model, data_root, device, args.batch_size, args.max_samples,
+                log_interval=args.log_interval,
+            )
+        if "gqa" in args.benchmarks:
+            seed_results["gqa"] = evaluate_gqa(
+                model, data_root, device, args.batch_size,
+                args.max_samples, spatial_eval=args.spatial_eval,
+                log_interval=args.log_interval,
+            )
+        if "pope" in args.benchmarks:
+            seed_results["pope"] = evaluate_pope(
+                model, data_root, device, args.batch_size, args.max_samples,
+                log_interval=args.log_interval,
+            )
+        if "mmbench" in args.benchmarks:
+            seed_results["mmbench"] = evaluate_mmbench(
+                model, data_root, device, args.batch_size, args.max_samples,
+                log_interval=args.log_interval,
+            )
+        if "mme" in args.benchmarks:
+            seed_results["mme"] = evaluate_mme(
+                model, data_root, device, args.batch_size, args.max_samples,
+                log_interval=args.log_interval,
+            )
+        if "textvqa" in args.benchmarks:
+            seed_results["textvqa"] = evaluate_textvqa(
+                model, data_root, device, args.batch_size, args.max_samples,
+                log_interval=args.log_interval,
+            )
+        per_seed_metrics.append(seed_results)
 
-    if "pope" in args.benchmarks:
-        results["benchmarks"]["pope"] = evaluate_pope(
-            model, data_root, device, args.batch_size, args.max_samples,
-            log_interval=args.log_interval,
-        )
+    # First-seed full results (with per_question lists) used for downstream analysis.
+    results["benchmarks"] = per_seed_metrics[0]
+    if args.n_eval_seeds > 1:
+        results["per_seed"] = _summarize_seeds(per_seed_metrics)
 
     results["eval_time_minutes"] = round((time.time() - t_start) / 60, 1)
 
@@ -665,6 +1028,24 @@ def main():
         for v in ["popular", "random", "adversarial"]:
             if v in r:
                 print(f"    {v:12s}: F1={r[v]['f1']:.2f}%")
+
+    if "mmbench" in results["benchmarks"]:
+        r = results["benchmarks"]["mmbench"]
+        print(f"  MMBench dev: {r['accuracy']:.2f}%  ({r['num_samples']} samples)")
+
+    if "mme" in results["benchmarks"]:
+        r = results["benchmarks"]["mme"]
+        print(f"  MME perception: {r['perception_total']:.1f}")
+        print(f"  MME cognition : {r['cognition_total']:.1f}")
+
+    if "textvqa" in results["benchmarks"]:
+        r = results["benchmarks"]["textvqa"]
+        print(f"  TextVQA val: {r['vqa_score']:.2f}%")
+
+    if "per_seed" in results:
+        print("\n  Multi-seed summary (mean ± stddev over n seeds):")
+        for bench, stats in results["per_seed"].items():
+            print(f"    {bench:10s}: {stats['mean']:.2f} ± {stats['stddev']:.2f}  (n={stats['n_seeds']})")
 
     print("=" * 60)
 

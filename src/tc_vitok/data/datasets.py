@@ -477,6 +477,160 @@ class PairedVQADataset(Dataset):
         return sample
 
 
+class MMBenchDataset(Dataset):
+    """MMBench English dev split.
+
+    Multiple-choice format: each sample has 2-4 options labeled A/B/C/D.
+    The model is prompted "Question? A. opt1 B. opt2 ... Answer with the option's letter."
+    Scored by exact match against the ground-truth letter.
+
+    Args:
+        tsv_path: Path to mmbench_dev_en_<date>.tsv (HuggingFace OpenCompass format)
+        max_samples: Limit number of samples
+    """
+
+    def __init__(
+        self,
+        tsv_path: str,
+        max_samples: Optional[int] = None,
+    ):
+        import base64
+        import io
+        import csv
+
+        self.samples: List[Dict[str, Any]] = []
+        with open(tsv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter="\t")
+            for row in reader:
+                question = row.get("question", "").strip()
+                answer = row.get("answer", "").strip().upper()
+                hint = row.get("hint", "").strip()
+                opts = []
+                for letter in ("A", "B", "C", "D"):
+                    val = row.get(letter, "").strip()
+                    if val and val.lower() != "nan":
+                        opts.append((letter, val))
+                if not question or not opts or answer not in {l for l, _ in opts}:
+                    continue
+
+                prompt = ""
+                if hint:
+                    prompt += f"Hint: {hint}\n"
+                prompt += f"Question: {question}\n"
+                for letter, opt in opts:
+                    prompt += f"{letter}. {opt}\n"
+                prompt += "Answer with the option's letter from the given choices directly."
+
+                self.samples.append({
+                    "index": row.get("index", ""),
+                    "image_b64": row.get("image", ""),
+                    "question": prompt,
+                    "answer": answer,
+                    "category": row.get("category", ""),
+                    "l2_category": row.get("l2-category", ""),
+                })
+
+        self._b64 = base64
+        self._io = io
+        if max_samples is not None:
+            self.samples = self.samples[:max_samples]
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        sample = self.samples[idx]
+        img_bytes = self._b64.b64decode(sample["image_b64"])
+        image = Image.open(self._io.BytesIO(img_bytes)).convert("RGB")
+
+        return {
+            "images_coarse": DINO_TRANSFORM(image),
+            "images_full": CLIP_TRANSFORM(image),
+            "questions": sample["question"],
+            "answer_str": sample["answer"],
+            "answers": [sample["answer"]],
+            "question_id": sample["index"],
+            "category": sample["category"],
+            "l2_category": sample["l2_category"],
+        }
+
+
+class MMEDataset(Dataset):
+    """MME perception+cognition benchmark.
+
+    14 subtasks. Each sample is a yes/no question over a single image.
+    Score per subtask = (accuracy + accuracy_plus) where accuracy_plus
+    requires both questions for an image to be correct.
+
+    Args:
+        root: Path to MME directory with subtask subdirectories
+        max_samples: Cap per subtask
+    """
+
+    SUBTASKS = (
+        "existence", "count", "position", "color",
+        "posters", "celebrity", "scene", "landmark", "artwork", "OCR",
+        "commonsense_reasoning", "numerical_calculation",
+        "text_translation", "code_reasoning",
+    )
+
+    def __init__(self, root: str, max_samples: Optional[int] = None):
+        self.root = Path(root)
+        self.samples: List[Dict[str, Any]] = []
+
+        for subtask in self.SUBTASKS:
+            sub_dir = self.root / subtask
+            if not sub_dir.exists():
+                continue
+            # Each subtask: images in <subtask>/images, questions in
+            # <subtask>/questions_answers_YN/*.txt or <subtask>/<id>.txt
+            for q_file in sorted(sub_dir.glob("**/*.txt")):
+                with open(q_file) as f:
+                    for line in f:
+                        parts = line.strip().split("\t")
+                        if len(parts) < 2:
+                            continue
+                        question, answer = parts[0], parts[1].lower()
+                        # Resolve image path: same stem as q file, .jpg/.png
+                        img_path = None
+                        for ext in (".jpg", ".png", ".jpeg"):
+                            candidate = q_file.with_suffix(ext)
+                            if candidate.exists():
+                                img_path = candidate
+                                break
+                            # Also check sibling images dir
+                            alt = sub_dir / "images" / (q_file.stem + ext)
+                            if alt.exists():
+                                img_path = alt
+                                break
+                        if img_path is None:
+                            continue
+                        self.samples.append({
+                            "subtask": subtask,
+                            "image_path": str(img_path),
+                            "question": question,
+                            "answer": answer,
+                        })
+                        if max_samples is not None and len(self.samples) >= max_samples:
+                            break
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        sample = self.samples[idx]
+        image = Image.open(sample["image_path"]).convert("RGB")
+        return {
+            "images_coarse": DINO_TRANSFORM(image),
+            "images_full": CLIP_TRANSFORM(image),
+            "questions": sample["question"],
+            "answer_str": sample["answer"],
+            "answers": [sample["answer"]],
+            "image_id": sample["image_path"],
+            "subtask": sample["subtask"],
+        }
+
+
 def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Custom collate function for TC-ViTok batches.
 
@@ -503,7 +657,7 @@ def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     # return result
         # Pass through optional metadata fields as lists safely (handles ConcatDataset mixed batches)
     for key in ["answers", "question_id", "image_id", "gqa_annotation",
-                "paired_question"]:
+                "paired_question", "category", "l2_category", "subtask"]:
         if any(key in b for b in batch):
             result[key] = [b.get(key) for b in batch]
 

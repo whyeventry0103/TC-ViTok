@@ -448,6 +448,51 @@ PYTHONPATH=src python scripts/train.py \
 
 ---
 
+## Reproducing the BMVC 2026 Submission
+
+The BMVC 2026 paper is positioned as an insight + mechanism + negative-results
+paper around the **co-adaptation diagnosis** rather than as a SOTA paper. The
+empirical study consists of ten controlled evaluations on the **existing**
+Phase 1 Final / v3 / Adaptive checkpoints. **No new training runs are
+required.**
+
+The day-by-day playbook with copy-pasteable commands lives in
+[`RUN_THIS.md`](RUN_THIS.md). The experiments populate the `[E#]` placeholders
+in the paper:
+
+| ID | What it produces | Command (abbreviated) | GPU time |
+|---|---|---|---|
+| E1 | LoRA-576 control row (the missing critical control) | `evaluate.py --baseline full_576` | ~12h |
+| E2 | Single-variable merge ablation | `evaluate.py --baseline merge_disabled` | ~6h |
+| E3 | Zero-CLIP-query ablation (Hypothesis H2 test) | `evaluate.py --baseline image_only` | ~6h |
+| E4 | Eval-time variance (5 seeds) | `evaluate.py --n-eval-seeds 5` | ~10h |
+| E5 | MMBench + MME results | `evaluate.py --benchmarks mmbench mme` | ~8h |
+| E6 | TextVQA result | `evaluate.py --benchmarks textvqa` | ~8h |
+| E7 | Real qualitative TPN heatmaps for fig:qualitative-real | `dump_tpn_heatmaps.py` | ~30min |
+| E8 | Per-sample budget histogram | `dump_tpn_heatmaps.py` (Adaptive ckpt) | ~30min |
+| E9 | Co-adaptation oscillation figure | `plot_oscillation.py --use-known-points` | local CPU |
+| E10 | Retroactive v3 GQA + POPE eval | `evaluate.py` on v3 ckpt | ~10h |
+
+After each experiment finishes, paste the headline numbers into the paper's
+`[E#.X]` placeholders. The exact mapping is in `RUN_THIS.md`.
+
+### LaTeX template port (one-time)
+
+The paper currently uses the ICML 2021 template as a stand-in. Before
+submission:
+1. Download `bmvc2k.cls` (or whatever 2026 ships) from the official BMVC
+   2026 site: https://bmvc2026.bmva.org/calls/call-for-papers/
+2. Drop it into the `DL Project Report/` directory.
+3. Follow the in-file instructions at the top of `main.tex` to switch the
+   `\documentclass`, `\bibliographystyle`, and title block.
+4. Recompile. The body of the paper is template-portable; only the preamble
+   and title block change.
+
+The paper is **anonymized** for double-blind review (no author names, no
+GitHub URL, no acknowledgments).
+
+---
+
 ## Running Experiments
 
 ### Multi-GPU Training (2× GPU, recommended)
@@ -488,25 +533,67 @@ ls -lh runs/phase1_final/phase1/
 # Phase 1 Final: VQAv2 + GQA + POPE
 python scripts/evaluate.py \
     --checkpoint runs/phase1_final/phase1/best.ckpt \
-    --config configs/phase1_final.yaml \
     --benchmarks vqav2 gqa pope \
     --data-root ~/tc-vitok-data \
     --output runs/eval_results/phase1_final.json
 
-# Phase 1 Adaptive
-python scripts/evaluate.py \
-    --checkpoint runs/phase1_adaptive/phase1/best.ckpt \
-    --config configs/phase1_adaptive.yaml \
-    --benchmarks vqav2 gqa pope \
-    --data-root ~/tc-vitok-data \
-    --output runs/eval_results/phase1_adaptive.json
-
-# Pareto sweep: one model, multiple k values
+# E1 — LoRA-576 control (most important new evaluation; 576 tokens, same LoRA)
 python scripts/evaluate.py \
     --checkpoint runs/phase1_final/phase1/best.ckpt \
-    --token-budgets 72 144 216 288 576 \
-    --benchmarks vqav2 gqa \
-    --output runs/eval_results/pareto_sweep.json
+    --baseline full_576 \
+    --benchmarks vqav2 gqa pope \
+    --data-root ~/tc-vitok-data \
+    --output runs/eval_results/E1_lora576.json
+
+# E2 — single-variable merge ablation (TPN selection but beta=0 at eval)
+python scripts/evaluate.py \
+    --checkpoint runs/phase1_final/phase1/best.ckpt \
+    --baseline merge_disabled \
+    --benchmarks vqav2 gqa pope \
+    --data-root ~/tc-vitok-data \
+    --output runs/eval_results/E2_merge_disabled.json
+
+# E3 — zero-CLIP-query (Hypothesis H2 test)
+python scripts/evaluate.py \
+    --checkpoint runs/phase1_final/phase1/best.ckpt \
+    --baseline image_only \
+    --benchmarks vqav2 gqa pope \
+    --data-root ~/tc-vitok-data \
+    --output runs/eval_results/E3_zero_query.json
+
+# E4 — eval-time variance over 5 seeds
+python scripts/evaluate.py \
+    --checkpoint runs/phase1_final/phase1/best.ckpt \
+    --benchmarks gqa \
+    --n-eval-seeds 5 \
+    --data-root ~/tc-vitok-data \
+    --output runs/eval_results/E4_variance.json
+
+# E5/E6 — new benchmarks
+python scripts/evaluate.py \
+    --checkpoint runs/phase1_final/phase1/best.ckpt \
+    --benchmarks mmbench mme textvqa \
+    --data-root ~/tc-vitok-data \
+    --output runs/eval_results/E5_E6_new_benchmarks.json
+
+# E7/E8 — qualitative dump
+python scripts/dump_tpn_heatmaps.py \
+    --checkpoint runs/phase1_final/phase1/best.ckpt \
+    --data-root ~/tc-vitok-data \
+    --benchmark gqa --n-samples 32 \
+    --render-overlays \
+    --out runs/qualitative_dump
+
+# E9 — oscillation figure (no GPU needed; uses checkpoint history)
+python scripts/plot_oscillation.py --use-known-points \
+    --out "DL Project Report/figures/oscillation.pdf"
+
+# E10 — retroactive v3 GQA + POPE
+python scripts/evaluate.py \
+    --checkpoint runs/phase1_v3/phase1/best.ckpt \
+    --benchmarks gqa pope \
+    --data-root ~/tc-vitok-data \
+    --output runs/eval_results/E10_v3_gqa_pope.json
 ```
 
 ---
@@ -547,7 +634,7 @@ python scripts/evaluate.py \
 - **Single training seed.** All results are from one training run. Variance across seeds is unknown.
 - **Compute gap vs. published baselines.** FastV and PruMerge require no additional training. Our 80K-step comparison is not compute-matched to methods that trained for longer on more GPUs.
 - **POPE regression is real.** 5-point F1 drop on POPE is unavoidable at 75% compression for object-presence tasks. TC-ViTok is not appropriate where full object coverage is required.
-- **Missing LoRA-only control.** The cleanest way to isolate compression benefit from LoRA fine-tuning benefit on GQA would be to evaluate LLaVA-1.5-7B + identical LoRA + 576 tokens. This control was not run.
+- **LoRA-576 control:** wired as experiment E1. Run `evaluate.py --baseline full_576` against the Phase 1 Final checkpoint to populate the row in `tab:main`. Until E1 is run, the GQA delta vs. uncompressed is unattributable between compression and LoRA.
 - **Adaptive Pareto sweep.** Only λ_b=0.1 was evaluated; the full sweep {0.05, 0.1, 0.2, 0.4} was not completed.
 
 ---
