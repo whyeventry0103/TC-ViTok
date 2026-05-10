@@ -678,14 +678,11 @@ def evaluate_mmbench(model, data_root, device, batch_size, max_samples=None, log
 def evaluate_mme(model, data_root, device, batch_size, max_samples=None, log_interval=200):
     """MME yes/no benchmark. Score = sum_subtask(accuracy + accuracy_plus)."""
     print("\n[MME] Loading benchmark...")
-    # HuggingFace lmms-lab/MME puts subtasks under data/; try both layouts
     mme_root = f"{data_root}/mme"
     dataset = MMEDataset(mme_root, max_samples=max_samples)
     if len(dataset) == 0:
-        dataset = MMEDataset(f"{mme_root}/data", max_samples=max_samples)
-    if len(dataset) == 0:
         raise FileNotFoundError(
-            f"MME data not found in {mme_root} or {mme_root}/data. "
+            f"MME data not found in {mme_root}. "
             f"Download: python -c \"from huggingface_hub import snapshot_download; "
             f"snapshot_download('lmms-lab/MME', repo_type='dataset', local_dir='{mme_root}')\""
         )

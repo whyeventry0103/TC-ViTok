@@ -593,13 +593,12 @@ class MMBenchDataset(Dataset):
 class MMEDataset(Dataset):
     """MME perception+cognition benchmark.
 
-    14 subtasks. Each sample is a yes/no question over a single image.
-    Score per subtask = (accuracy + accuracy_plus) where accuracy_plus
-    requires both questions for an image to be correct.
+    Supports two layouts:
+      - Traditional: subtask subdirectories with .txt question files + images
+      - HuggingFace (lmms-lab/MME): data/*.parquet files
 
-    Args:
-        root: Path to MME directory with subtask subdirectories
-        max_samples: Cap per subtask
+    Score per subtask = accuracy + accuracy_plus where accuracy_plus
+    requires both questions for the same image to be correct.
     """
 
     SUBTASKS = (
@@ -613,12 +612,48 @@ class MMEDataset(Dataset):
         self.root = Path(root)
         self.samples: List[Dict[str, Any]] = []
 
+        parquet_dir = self.root / "data"
+        if parquet_dir.exists() and any(parquet_dir.glob("*.parquet")):
+            self._load_parquet(parquet_dir)
+        else:
+            self._load_files(self.root)
+
+        if max_samples is not None:
+            self.samples = self.samples[:max_samples]
+
+    def _load_parquet(self, data_dir: Path) -> None:
+        import pandas as pd, io as _io
+        dfs = [pd.read_parquet(p) for p in sorted(data_dir.glob("*.parquet"))]
+        if not dfs:
+            return
+        df = pd.concat(dfs, ignore_index=True)
+        for _, row in df.iterrows():
+            subtask = str(row.get("category", "") or "").strip()
+            question = str(row.get("question", "") or "").strip()
+            answer = str(row.get("answer", "") or "").strip().lower()
+            if not subtask or not question or answer not in ("yes", "no"):
+                continue
+            # Strip question-number suffix to get image_id for accuracy_plus pairing.
+            # question_id format: "existence/000001.jpg_0" -> img_id = "existence/000001.jpg"
+            qid = str(row.get("question_id", "") or "")
+            img_id = qid.rsplit("_", 1)[0] if qid else f"{subtask}_{len(self.samples)}"
+            img_field = row.get("image", None)
+            if img_field is None:
+                continue
+            img_bytes = img_field.get("bytes", b"") if isinstance(img_field, dict) else bytes(img_field)
+            self.samples.append({
+                "subtask": subtask,
+                "image_bytes": img_bytes,
+                "image_id": img_id,
+                "question": question,
+                "answer": answer,
+            })
+
+    def _load_files(self, root: Path) -> None:
         for subtask in self.SUBTASKS:
-            sub_dir = self.root / subtask
+            sub_dir = root / subtask
             if not sub_dir.exists():
                 continue
-            # Each subtask: images in <subtask>/images, questions in
-            # <subtask>/questions_answers_YN/*.txt or <subtask>/<id>.txt
             for q_file in sorted(sub_dir.glob("**/*.txt")):
                 with open(q_file) as f:
                     for line in f:
@@ -626,42 +661,42 @@ class MMEDataset(Dataset):
                         if len(parts) < 2:
                             continue
                         question, answer = parts[0], parts[1].lower()
-                        # Resolve image path: same stem as q file, .jpg/.png
                         img_path = None
                         for ext in (".jpg", ".png", ".jpeg"):
-                            candidate = q_file.with_suffix(ext)
-                            if candidate.exists():
-                                img_path = candidate
-                                break
-                            # Also check sibling images dir
-                            alt = sub_dir / "images" / (q_file.stem + ext)
-                            if alt.exists():
-                                img_path = alt
+                            for cand in (q_file.with_suffix(ext),
+                                         sub_dir / "images" / (q_file.stem + ext)):
+                                if cand.exists():
+                                    img_path = cand
+                                    break
+                            if img_path:
                                 break
                         if img_path is None:
                             continue
                         self.samples.append({
                             "subtask": subtask,
                             "image_path": str(img_path),
+                            "image_id": str(img_path),
                             "question": question,
                             "answer": answer,
                         })
-                        if max_samples is not None and len(self.samples) >= max_samples:
-                            break
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        import io as _io
         sample = self.samples[idx]
-        image = Image.open(sample["image_path"]).convert("RGB")
+        if "image_bytes" in sample:
+            image = Image.open(_io.BytesIO(sample["image_bytes"])).convert("RGB")
+        else:
+            image = Image.open(sample["image_path"]).convert("RGB")
         return {
             "images_coarse": DINO_TRANSFORM(image),
             "images_full": CLIP_TRANSFORM(image),
             "questions": sample["question"],
             "answer_str": sample["answer"],
             "answers": [sample["answer"]],
-            "image_id": sample["image_path"],
+            "image_id": sample["image_id"],
             "subtask": sample["subtask"],
         }
 
