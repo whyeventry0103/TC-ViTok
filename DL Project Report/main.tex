@@ -115,11 +115,10 @@ threshold trick for per-sample variable budgets, and present it as a
 design exploration rather than a tuned operating point.
 
 On LLaVA-1.5-7B at $4{\times}$ compression ($k{=}144$), the resulting
-system matches a same-LoRA, full-token reference within
-{\colorbox{tcgoldlight}{[$\Delta$VQAv2]}}~points VQA-Score and gains
-{\colorbox{tcgoldlight}{[$\Delta$GQA]}}~points on the spatial-reasoning
-benchmark GQA — a regime where fewer task-relevant tokens act as a
-denoising filter. We treat the eight-experiment failure analysis as the
+system scores 4.1 VQA-Score points and 3.4 GQA points below the
+same-LoRA, full-token reference (\textsc{LoRA-576}: 76.38\% VQAv2,
+70.55\% GQA) — a modest, honest compression cost that we report rather
+than hide. We treat the eight-experiment failure analysis as the
 more durable contribution: any future pre-LLM compression method that
 trains alongside an adapted LLM must contend with the same
 co-adaptation problem, and our parameter-free recovery is one
@@ -201,9 +200,9 @@ uncompressed published baseline conflate \emph{compression effects} with
 \emph{LoRA fine-tuning effects}. We add the missing control --- the
 same-LoRA, same-SFT, full-576-token reference --- which isolates the
 contribution of compression. At $4{\times}$ compression on
-LLaVA-1.5-7B, our system matches that reference on VQAv2 and exceeds
-it on GQA, a regime where compression appears to act as a query-relevant
-denoising filter (Section~\ref{sec:results}).
+LLaVA-1.5-7B, our system scores 4.1 VQAv2 points and 3.4 GQA points
+below the same-LoRA full-token reference, clearly isolating the
+compression cost at $4{\times}$ (Section~\ref{sec:results}).
 
 We do \emph{not} claim state-of-the-art on VQAv2 against query-agnostic
 methods (FastV~\cite{chen2024fastv}, PruMerge~\cite{shang2024llava},
@@ -1087,8 +1086,9 @@ parameter-free design avoids entirely (Section~\ref{sec:pooler-failures}).
 \caption{Val-VQA convergence for Phase 1 v3 (4 checkpoints, 50K steps total).
 Phase 1 Final (single point at 80K, token merge + LoRA r=64) nearly matches the
 baseline's final val-VQA despite the added merge complexity.
-Downstream benchmark gains (GQA +4.1\%, POPE +4.1\%) are not reflected here
-since val-VQA measures only NTP cross-entropy.}
+Downstream: Final gains +7.25 GQA points over v3 (59.87\%→67.12\%) and
++0.6 POPE points (78.50\%→79.09\%), though both are 3--7 points below
+LoRA-576 (the compression cost). Val-VQA measures NTP cross-entropy only.}
 \label{fig:convergence}
 \end{figure}
 
@@ -1143,10 +1143,10 @@ papers. \textbf{Note:} the headline comparison is TC-ViTok Final
 ~~LLaVA-1.5-7B (full)~\cite{liu2024llava}    & 576       & 78.5  & 61.0  & 84.4  & 64.3  & 1531 / 295 & 58.2 & \ding{55} \\
 \midrule
 \multicolumn{9}{l}{\emph{Same-LoRA reference and ours (this work, 80K steps, $2{\times}$RTX 6000 Ada):}} \\
-~~LoRA-576 reference [E1]                    & 576       & \texttt{[E1.V]} & \texttt{[E1.G]} & \texttt{[E1.P]} & \texttt{[E1.M]} & \texttt{[E1.E]} & \texttt{[E1.T]} & \ding{55} \\
-~~TC-ViTok v3 (hard-drop, $r{=}32$)          & 144       & 72.47 & \texttt{[E10.G]}$^\ddagger$ & \texttt{[E10.P]}$^\ddagger$ & — & — & — & \ding{51} \\
+~~LoRA-576 reference [E1]                    & 576       & 76.38 & 70.55 & 86.46 & 61.7  & 1254 / 218 & —     & \ding{55} \\
+~~TC-ViTok v3 (hard-drop, $r{=}32$)          & 144       & 72.47 & 59.87 & 78.50 & — & — & — & \ding{51} \\
 ~~TC-ViTok Adaptive ($\lambda_b{=}0.1$)      & 36--288   & 69.43 & 65.04 & 75.63 & — & — & — & \ding{51} \\
-~~\textbf{TC-ViTok Final} (merge, $r{=}64$)  & \textbf{144} & \textbf{72.27} & \textbf{67.12} & \textbf{79.09} & \texttt{[E5.M]} & \texttt{[E5.E]} & \texttt{[E6.T]} & \ding{51} \\
+~~\textbf{TC-ViTok Final} (merge, $r{=}64$)  & \textbf{144} & \textbf{72.27} & \textbf{67.12} & \textbf{79.09} & \textbf{62.0}  & \textbf{1216 / 225} & \textbf{25.8} & \ding{51} \\
 ~~\quad{} merge disabled at eval [E2]        & 144       & \texttt{[E2.V]} & \texttt{[E2.G]} & \texttt{[E2.P]} & — & — & — & \ding{51} \\
 ~~\quad{} zero-CLIP-query at eval [E3]       & 144       & \texttt{[E3.V]} & \texttt{[E3.G]} & \texttt{[E3.P]} & — & — & — & \ding{55}\!$^\ast$ \\
 \midrule
@@ -1170,40 +1170,40 @@ is TC-ViTok Final vs.\ LoRA-576.}}
 
 \textbf{VQAv2 vs.\ the LoRA-576 reference.}
 We report
-$\Delta_\text{VQAv2}^{\text{Final}} = 72.27 - \texttt{[E1.V]}$. The expected
-behaviour is a small loss --- compression is not a free lunch on a
-question distribution that already attends across the whole image. We
-report the gap rather than hide it. Against published query-agnostic
-methods (FastV: 77.1, PruMerge: 76.8, SparseVLM: 78.2), TC-ViTok
-underperforms by $\sim$5 points; but those methods enjoy a much larger
-SFT pipeline (Section~\ref{sec:compute}) that LoRA-576 also lacks. We
-therefore frame the architectural comparison as
-\emph{TC-ViTok vs.\ LoRA-576}, and the compute-matched comparison as
-``the gap is approximately constant across both rows'' once
-\texttt{[E1]} is populated.
+$\Delta_\text{VQAv2}^{\text{Final}} = 72.27 - 76.38 = -4.11$ points.
+Compression is not a free lunch on a question distribution that already
+attends across the whole image. We report the gap rather than hide it.
+Against published query-agnostic methods (FastV: 77.1, PruMerge: 76.8,
+SparseVLM: 78.2), TC-ViTok underperforms by $\sim$5 points; but those
+methods enjoy a much larger SFT pipeline (Section~\ref{sec:compute})
+that LoRA-576 also lacks. We therefore frame the architectural
+comparison as \emph{TC-ViTok Final vs.\ LoRA-576}: a $-4.1$ point
+VQAv2 compression cost, consistent across both rows.
 
-\textbf{GQA: where compression behaves like a denoiser.}
-TC-ViTok Final reaches \textbf{67.12\%} on GQA val\_balanced. Whether
-this remains a \emph{net gain attributable to compression} depends on
-the LoRA-576 number: if LoRA-576 lands near 65, the genuine effect is
-$\sim$2 points and still positive; if LoRA-576 lands near 67, the
-GQA gain is dominated by LoRA SFT and we say so. Either outcome is
-consistent with the paper's central thesis (a stable compression
-recipe). The mechanism we hypothesize for the positive direction ---
-the TPN concentrating attention on the small spatial region the
-compositional question targets --- is tested, not assumed
-(Section~\ref{sec:hypotheses}, ablation E3).
+\textbf{GQA: an honest compression cost.}
+TC-ViTok Final reaches \textbf{67.12\%} on GQA val\_balanced, vs.\
+LoRA-576 at \textbf{70.55\%}: a $-3.43$ point compression cost.
+This gap is smaller than on VQAv2 ($-4.11$ points), consistent with
+the hypothesis that query-conditioned selection recovers some
+spatial-reasoning capacity by concentrating on the relevant image
+region. Whether this partial recovery is the mechanism or a coincidence
+of the GQA question distribution is tested by ablation E3
+(Section~\ref{sec:hypotheses}).
+Against Phase 1 v3 (59.87\%), TC-ViTok Final gains $+7.25$ GQA
+points; but this gain conflates the compression mechanism with the
+stronger LoRA-64 adapter and is not attributable to compression alone.
 
-\textbf{POPE: an honest cost.}
+\textbf{POPE: a meaningful compression cost.}
 TC-ViTok Final reaches 79.09\% POPE macro-F1
-(popular: 79.30\%, random: 80.31\%, adversarial: 77.66\%) vs.\ full
-LLaVA-1.5's $\sim$84.4\%. POPE measures detection of objects
-\emph{regardless of question relevance}; our $4{\times}$ compression
-deliberately drops question-irrelevant tokens, so a coverage-driven
-regression is expected. We treat the gap as evidence the system is
-behaving as designed, and we explicitly recommend against deploying
-TC-ViTok in question-agnostic detection pipelines
-(Section~\ref{sec:limits}).
+(popular: 79.30\%, random: 80.31\%, adversarial: 77.66\%) vs.\
+LoRA-576 at \textbf{86.46\%}: a $-7.37$ point compression cost.
+POPE measures detection of objects \emph{regardless of question
+relevance}; our $4{\times}$ compression deliberately drops
+question-irrelevant tokens, so a coverage-driven regression is
+expected and is the largest per-metric cost we observe.
+We treat this as evidence the system is doing what it claims, and
+we explicitly recommend against deploying TC-ViTok in
+question-agnostic detection pipelines (Section~\ref{sec:limits}).
 
 \begin{figure}[t]
 \centering
@@ -1235,7 +1235,7 @@ TC-ViTok in question-agnostic detection pipelines
 \addlegendentry{LLaVA-1.5 full (576 tok)}
 
 \addplot[fill=blue!25, draw=blue!60]
-  coordinates {(VQAv2,72.5) (GQA,63.0) ({POPE F1},75.0)};
+  coordinates {(VQAv2,72.5) (GQA,59.9) ({POPE F1},78.5)};
 \addlegendentry{TC-ViTok v3 (144 tok)}
 
 \addplot[fill=orange!35, draw=orange!70]
@@ -1248,11 +1248,12 @@ TC-ViTok in question-agnostic detection pipelines
 
 \end{axis}
 \end{tikzpicture}
-\caption{Benchmark comparison across all models. TC-ViTok Final (red) and
-Adaptive (orange) both \emph{exceed} full LLaVA-1.5 on GQA (61.0\%)
-despite using only 25\% of tokens — the only metric where our compressed
-models outperform the uncompressed baseline.
-v3 GQA and POPE are estimated ($\dagger$).}
+\caption{Benchmark comparison. TC-ViTok Final (red) and Adaptive (orange)
+both exceed full LLaVA-1.5 on GQA (61.0\%) using only 25\% of tokens.
+The LoRA-576 control (not shown; 70.55\% GQA, 86.46\% POPE) is the
+compression-isolated reference: Final is $-3.4$ GQA and $-7.4$ POPE
+below it, an honest $4{\times}$ compression cost.
+v3 GQA and POPE are now measured from checkpoint (E10): 59.87\% / 78.50\%.}
 \label{fig:bars}
 \end{figure}
 
@@ -1343,8 +1344,9 @@ hurting questions like ``\emph{what color is the table beneath the cup?}''
 where ``table'' may be near-threshold.
 The merge mechanism (\S\ref{sec:merge}) recovers exactly these
 near-threshold tokens by weighting unselected tokens by their TPN score.
-This explains why Phase 1 Final (with merge) gains $+4.1$ GQA points over
-Phase 1 v3 (without merge).
+This is consistent with the $+7.25$ GQA points that Phase 1 Final (with
+merge, LoRA-64) gains over Phase 1 v3 (hard-drop, LoRA-32, 59.87\%→67.12\%),
+though the simultaneous LoRA rank increase prevents clean attribution.
 
 Validating these hypotheses with attention heatmaps and token-selection
 visualizations on a held-out qualitative test set is a direct line of future work.
@@ -1462,7 +1464,7 @@ isolated ablations per factor are planned. Failure modes from training logs.}
 \toprule
 \textbf{Configuration} & \textbf{LoRA r} & \textbf{Val-VQA} & \textbf{VQAv2 (\%)} & \textbf{GQA (\%)} \\
 \midrule
-Hard drop, no merge (v3)             & 32 & 0.3334 & 72.47 & $\sim$63$^\dagger$ \\
+Hard drop, no merge (v3)             & 32 & 0.3334 & 72.47 & 59.87 \\
 + Token merge, r=64 (P1-Final)       & 64 & 0.3342 & 72.27 & 67.12 \\
 + Adaptive budget ($\lambda{=}0.1$)  & 64 & —      & 69.43 & 65.04 \\
 \midrule
@@ -1473,14 +1475,15 @@ w/o instance normalization           & 64 & — & \multicolumn{2}{c}{Score colla
 \end{tabular}%
 }
 \vskip -0.05in
-\small{$\dagger$: estimated.}
 \end{table}
 
 \textbf{Token merge contribution.}
 Phase 1 v3 and Phase 1 Final produce nearly identical VQAv2 scores (72.47\% vs.\ 72.27\%),
-while Final gains +4.1 GQA points and +4.1 POPE points.
-The interpretation is that token merge primarily helps tasks requiring broader scene
-coverage (spatial reasoning, object grounding) rather than the single-answer VQA format.
+while Final gains $+7.25$ GQA points (59.87\%→67.12\%) and $+0.6$ POPE points
+(78.50\%→79.09\%).
+The GQA gain is large but conflates the token merge with the LoRA rank increase
+(32→64); the interpretation that merge helps spatial coverage tasks is plausible but
+requires a controlled rank-64, no-merge ablation (E2) to confirm.
 This is consistent with the merge mechanism: unselected tokens are merged
 \emph{proportionally to their TPN score}, so near-threshold tokens (spatially nearby
 but not top-ranked) are recovered and contribute to Token Merge — exactly the tokens
@@ -1567,13 +1570,12 @@ parameter-free recovery + a tau-independent STE correction --- for
 sidestepping it.
 
 On LLaVA-1.5-7B at $4{\times}$ compression and matched LoRA SFT,
-the resulting system matches the full-token reference on VQAv2
-within \texttt{[$\Delta$VQAv2]} points, gains
-\texttt{[$\Delta$GQA]} points on the spatial-reasoning benchmark
-GQA --- a regime where compression appears to act as a
-query-relevant denoising filter --- and regresses by
-$\sim$5 points on POPE, an honest cost we view as evidence
-the system does what it claims (drops question-irrelevant tokens).
+the resulting system scores \textbf{4.1 VQAv2 points} and
+\textbf{3.4 GQA points} below the same-LoRA full-token reference
+at $4{\times}$ compression, and \textbf{7.4 POPE points} below it ---
+a larger cost that we interpret as evidence the system correctly
+drops question-irrelevant tokens even when those tokens contain
+detectable objects.
 
 The most durable artifact, in our reading, is the
 eight-experiment failure analysis (Section~\ref{sec:pooler-failures})
