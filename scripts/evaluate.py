@@ -596,14 +596,24 @@ def evaluate_pope(model, data_root, device, batch_size, max_samples=None, log_in
 def evaluate_mmbench(model, data_root, device, batch_size, max_samples=None, log_interval=200):
     """MMBench English dev. Multiple-choice; score = exact-match on letter."""
     print("\n[MMBench] Loading English dev split...")
-    # Path: data_root/mmbench/mmbench_dev_en.tsv
-    tsv_candidates = list(Path(f"{data_root}/mmbench").glob("mmbench_dev_en*.tsv"))
-    if not tsv_candidates:
+    mmbench_dir = Path(f"{data_root}/mmbench")
+    # Try TSV first (OpenCompass format), then HF parquet (lmms-lab/MMBench)
+    tsv_candidates = list(mmbench_dir.glob("mmbench_dev_en*.tsv"))
+    parquet_candidates = list(mmbench_dir.glob("en/dev-*.parquet")) + \
+                         list(mmbench_dir.glob("en/*.parquet"))
+    if tsv_candidates:
+        bench_path = str(tsv_candidates[0])
+    elif parquet_candidates:
+        bench_path = str(sorted(parquet_candidates)[0])
+    else:
         raise FileNotFoundError(
-            f"MMBench TSV not found in {data_root}/mmbench. "
-            f"Download from https://huggingface.co/datasets/lmms-lab/MMBench"
+            f"MMBench not found in {mmbench_dir}. "
+            f"Run: python -c \"from huggingface_hub import snapshot_download; "
+            f"snapshot_download('lmms-lab/MMBench', repo_type='dataset', "
+            f"local_dir='{mmbench_dir}')\""
         )
-    dataset = MMBenchDataset(str(tsv_candidates[0]), max_samples=max_samples)
+    print(f"[MMBench] Using: {bench_path}")
+    dataset = MMBenchDataset(bench_path, max_samples=max_samples)
     loader = DataLoader(
         dataset, batch_size=batch_size, shuffle=False,
         num_workers=4, collate_fn=collate_fn, pin_memory=True,

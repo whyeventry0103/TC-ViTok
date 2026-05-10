@@ -480,67 +480,102 @@ class PairedVQADataset(Dataset):
 class MMBenchDataset(Dataset):
     """MMBench English dev split.
 
-    Multiple-choice format: each sample has 2-4 options labeled A/B/C/D.
-    The model is prompted "Question? A. opt1 B. opt2 ... Answer with the option's letter."
-    Scored by exact match against the ground-truth letter.
+    Accepts either:
+      - A .tsv file (HuggingFace OpenCompass format, base64 images)
+      - A .parquet file (lmms-lab/MMBench HuggingFace dataset format)
 
-    Args:
-        tsv_path: Path to mmbench_dev_en_<date>.tsv (HuggingFace OpenCompass format)
-        max_samples: Limit number of samples
+    Multiple-choice format: each sample has 2-4 options labeled A/B/C/D.
+    Scored by exact match against the ground-truth letter.
     """
 
-    def __init__(
-        self,
-        tsv_path: str,
-        max_samples: Optional[int] = None,
-    ):
-        import base64
+    def __init__(self, tsv_path: str, max_samples: Optional[int] = None):
         import io
-        import csv
 
+        self._io = io
         self.samples: List[Dict[str, Any]] = []
-        with open(tsv_path, newline="", encoding="utf-8") as f:
+
+        if tsv_path.endswith(".parquet"):
+            self._load_parquet(tsv_path)
+        else:
+            self._load_tsv(tsv_path)
+
+        if max_samples is not None:
+            self.samples = self.samples[:max_samples]
+
+    def _build_prompt(self, question: str, hint: str, opts: list) -> str:
+        prompt = ""
+        if hint:
+            prompt += f"Hint: {hint}\n"
+        prompt += f"Question: {question}\n"
+        for letter, opt in opts:
+            prompt += f"{letter}. {opt}\n"
+        prompt += "Answer with the option's letter from the given choices directly."
+        return prompt
+
+    def _load_tsv(self, path: str) -> None:
+        import base64, csv
+        self._b64 = base64
+        with open(path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f, delimiter="\t")
             for row in reader:
                 question = row.get("question", "").strip()
                 answer = row.get("answer", "").strip().upper()
                 hint = row.get("hint", "").strip()
-                opts = []
-                for letter in ("A", "B", "C", "D"):
-                    val = row.get(letter, "").strip()
-                    if val and val.lower() != "nan":
-                        opts.append((letter, val))
+                opts = [(l, row.get(l, "").strip()) for l in ("A", "B", "C", "D")
+                        if row.get(l, "").strip() and row.get(l, "").strip().lower() != "nan"]
                 if not question or not opts or answer not in {l for l, _ in opts}:
                     continue
-
-                prompt = ""
-                if hint:
-                    prompt += f"Hint: {hint}\n"
-                prompt += f"Question: {question}\n"
-                for letter, opt in opts:
-                    prompt += f"{letter}. {opt}\n"
-                prompt += "Answer with the option's letter from the given choices directly."
-
                 self.samples.append({
                     "index": row.get("index", ""),
-                    "image_b64": row.get("image", ""),
-                    "question": prompt,
+                    "image_data": ("b64", row.get("image", "")),
+                    "question": self._build_prompt(question, hint, opts),
                     "answer": answer,
                     "category": row.get("category", ""),
                     "l2_category": row.get("l2-category", ""),
                 })
 
-        self._b64 = base64
-        self._io = io
-        if max_samples is not None:
-            self.samples = self.samples[:max_samples]
+    def _load_parquet(self, path: str) -> None:
+        import pandas as pd
+        df = pd.read_parquet(path)
+        for _, row in df.iterrows():
+            question = str(row.get("question", "") or "").strip()
+            answer = str(row.get("answer", "") or "").strip().upper()
+            hint = str(row.get("hint", "") or "").strip()
+            opts = []
+            for letter in ("A", "B", "C", "D"):
+                val = str(row.get(letter, "") or "").strip()
+                if val and val.lower() not in ("nan", "none", ""):
+                    opts.append((letter, val))
+            if not question or not opts or answer not in {l for l, _ in opts}:
+                continue
+            # Image stored as dict {"bytes": b"...", "path": ...} in HF parquet
+            img_field = row.get("image", None)
+            if img_field is None:
+                continue
+            if isinstance(img_field, dict):
+                img_bytes = img_field.get("bytes", b"")
+            else:
+                img_bytes = bytes(img_field)
+            self.samples.append({
+                "index": str(row.get("index", "")),
+                "image_data": ("bytes", img_bytes),
+                "question": self._build_prompt(question, hint, opts),
+                "answer": answer,
+                "category": str(row.get("category", "") or ""),
+                "l2_category": str(row.get("l2-category", "") or ""),
+            })
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        import base64
         sample = self.samples[idx]
-        img_bytes = self._b64.b64decode(sample["image_b64"])
+        fmt, data = sample["image_data"]
+        if fmt == "b64":
+            img_bytes = base64.b64decode(data)
+        else:
+            img_bytes = data
         image = Image.open(self._io.BytesIO(img_bytes)).convert("RGB")
 
         return {
