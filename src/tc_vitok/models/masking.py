@@ -136,7 +136,7 @@ def adaptive_gumbel_sigmoid_ste(
         # Build binary mask from valid indices only.
         # idx_full is from topk() → always in [0, N-1], no clamping needed.
         mask = torch.zeros_like(scores)
-        mask.scatter_(1, idx_full, valid_mask.float())
+        mask.scatter_(1, idx_full, valid_mask.to(mask.dtype))
 
         k_effective = k_hard.float()
         return mask, idx, k_effective
@@ -181,7 +181,7 @@ def adaptive_gumbel_sigmoid_ste(
     # with 0.0, corrupting selection of the most-important token when it sits at index 0.
     # Since topk returns unique indices, each position appears at most once → safe.
     m_hard = torch.zeros_like(scores)  # [B, N]
-    m_hard.scatter_(1, idx_full, valid_mask.float())
+    m_hard.scatter_(1, idx_full, valid_mask.to(m_hard.dtype))
 
     # Build padded idx with -1 for invalid
     idx = idx_full.clone()
