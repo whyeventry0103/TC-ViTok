@@ -1,0 +1,92 @@
+# Phase 1 v3: image-only TokenScorerV3 + adaptive per-sample budget +
+# augmented SFT mixture (VQAv2 + GQA + TextVQA + LLaVA-Instruct-150K).
+#
+# Design rationale (diagnostic-driven, with citations to concurrent work):
+#   - Image-only TPN: E3 (zero_query > query) + FasterVLM, VisPruner, VisionZip
+#     all independently show text-agnostic selection is competitive or better.
+#   - Adaptive budget: BudgetPredictor (~25K params) predicts per-sample k
+#     ∈ [36, 288]. Most published methods use fixed k → adaptive budget gives
+#     us a Pareto curve no one else publishes.
+#   - No token merge: E2 showed β=0.3 is mechanistically a no-op; β=0.7 may
+#     amplify visual feature magnitudes. We skip merge entirely — simpler.
+#   - LLaVA-Instruct-150K: required to compete with published numbers on
+#     LLaVA-1.5-7B (the standard SFT mixture).
+
+defaults:
+  - base
+
+phase: 1
+description: "v3: image-only TokenScorerV3 + adaptive budget + LLaVA-Instruct mixture"
+
+model:
+  k: 144
+  tpn_version: "v3"
+  tpn:
+    d_visual: 1024
+    d_h: 256
+    n_heads: 4
+    dropout: 0.1
+    N: 576
+
+  # Adaptive per-sample budget — the headline experimental contribution.
+  adaptive_budget: true
+  k_min: 36                  # 6.25% of 576
+  k_max: 288                 # 50% of 576
+
+  # No token merge (E2: β=0.3 is a no-op; cleaner story without it)
+  merge_beta: 0.0
+  merge_tau: 0.1
+
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 100000
+  batch_size: 4
+  grad_accum_steps: 16       # effective batch = 4 × 16 × 2 GPUs = 128
+
+  lambda_max: 0.0
+  lambda_entropy: 0.02       # spatial diversity (validated in v1 v3)
+  lambda_diversity: 0.0      # no text query → no diversity loss
+  lambda_budget: 0.05        # budget pressure for adaptive Pareto curve
+
+  budget_warmup_steps: 5000  # freeze BudgetPredictor for first 5k steps
+  lora_warmfreeze_steps: 3000
+
+  lr_tpn: 1e-3               # was 3e-3 in v1 — smaller TPN, safer LR
+  lr_lora: 1e-4
+  lr_mlp: 5e-4
+  lr_budget: 1e-3
+
+  tau_max: 1.0
+  tau_min: 0.3
+
+  max_grad_norm: 5.0         # was 1.0 — 1.0 is unusually aggressive
+  weight_decay: 0.01
+  warmup_steps: 3000         # was 1000 — 100k steps deserves longer warmup
+  T_warmup: 5000
+
+data:
+  datasets: ["vqav2", "gqa", "textvqa", "llava_instruct"]
+
+  # TextVQA training paths (already downloaded on server)
+  textvqa_train_annotations: "${data.data_root}/textvqa/TextVQA_0.5.1_train.json"
+  textvqa_train_image_dir: "${data.data_root}/textvqa/train_images"
+
+  # LLaVA-Instruct-150K: download from HuggingFace, COCO train2017 images
+  llava_instruct_json: "${data.data_root}/llava_instruct/llava_instruct_150k.json"
+  llava_instruct_image_dir: "${data.data_root}/coco"
+
+logging:
+  wandb_run_name: "phase1_v3"
+  eval_interval: 5000
+  max_val_batches: 100
+  log_interval: 50
+  save_interval: 5000
+
+checkpoint:
+  load_from: "runs/phase0_v3/phase0/best.ckpt"
+  strict: false

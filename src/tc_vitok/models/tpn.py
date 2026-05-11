@@ -345,3 +345,159 @@ class TokenizationPolicyNetwork(nn.Module):
     def get_num_params(self) -> int:
         """Return the number of trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+
+class TokenScorerV3(nn.Module):
+    """v3 image-only token scorer operating directly on CLIP ViT-L/14 features.
+
+    Differences from v1 TokenizationPolicyNetwork:
+    - No DINOv2 coarse encoder (saves memory + forward time)
+    - No CLIP text encoder (E3 empirically: query conditioning hurts; consistent
+      with concurrent FasterVLM/VisPruner/VisionZip — all text-agnostic)
+    - No 7×7 → 24×24 bilinear upsampling (eliminates resolution smearing)
+    - Operates at native 24×24 = 576 resolution per token
+
+    Architecture:
+        proj_in  : Linear 1024 → d_h
+        attn     : 1× pre-LN MultiheadAttention (spatial reasoning across tokens)
+        ffn      : pre-LN 2-layer MLP (d_h → 2·d_h → d_h)
+        score    : Linear d_h → 1
+        + per-sample instance norm on scores (same as v1 — prevents Adam runaway)
+
+    Parameters at d_h=256: ~790K. Smaller and faster than v1 TPN (887K).
+    """
+
+    def __init__(
+        self,
+        d_visual: int = 1024,
+        d_h: int = 256,
+        n_heads: int = 4,
+        dropout: float = 0.1,
+        N: int = 576,
+    ):
+        super().__init__()
+        self.d_visual = d_visual
+        self.d_h = d_h
+        self.N = N
+
+        self.proj_in = nn.Linear(d_visual, d_h)
+
+        # Pre-LN self-attention block
+        self.norm_attn = nn.LayerNorm(d_h)
+        self.attn = nn.MultiheadAttention(
+            d_h, n_heads, dropout=dropout, batch_first=True,
+        )
+
+        # Pre-LN FFN block
+        self.norm_ffn = nn.LayerNorm(d_h)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_h, d_h * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_h * 2, d_h),
+        )
+
+        # Score head
+        self.norm_out = nn.LayerNorm(d_h)
+        self.score_head = nn.Linear(d_h, 1)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(
+        self,
+        v_full: torch.Tensor,
+        k: int,
+        tau: float = 1.0,
+        training: bool = True,
+        adaptive_budget: bool = False,
+        budget_predictor: 'BudgetPredictor | None' = None,
+        k_min: int = 36,
+        k_max: int = 288,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Score CLIP-L visual tokens and select top-k via Gumbel-Sigmoid STE.
+
+        Args:
+            v_full: CLIP-L features [B, N=576, 1024]
+            k: Token budget (fixed-k mode)
+            tau: Gumbel-Sigmoid temperature
+            training: Training mode flag
+            adaptive_budget: If True, use BudgetPredictor for per-sample k
+            budget_predictor: BudgetPredictor module (required when adaptive)
+            k_min, k_max: Adaptive budget bounds
+
+        Returns:
+            idx          : [B, k] (fixed) or [B, k_max_batch] (adaptive, -1 padding)
+            s_N          : [B, N] instance-normed scores (for losses)
+            mask_ste     : [B, N] STE mask (training) or None (eval)
+            k_effective  : [B] expected token count (adaptive) or None (fixed)
+        """
+        B, N, _ = v_full.shape
+
+        # Project per-token to internal dim
+        h = self.proj_in(v_full)  # [B, N, d_h]
+
+        # Pre-LN self-attention with residual
+        h_n = self.norm_attn(h)
+        attn_out, _ = self.attn(h_n, h_n, h_n, need_weights=False)
+        h = h + attn_out
+
+        # Pre-LN FFN with residual
+        h = h + self.ffn(self.norm_ffn(h))
+
+        # Score head
+        h_out = self.norm_out(h)
+        scores = self.score_head(h_out).squeeze(-1)  # [B, N]
+
+        # Per-sample instance normalization (same rationale as v1 TPN)
+        s_mean = scores.mean(dim=-1, keepdim=True)
+        s_std = scores.std(dim=-1, keepdim=True).clamp(min=1e-8)
+        s_N = (scores - s_mean) / s_std
+
+        # Global context vector for BudgetPredictor — mean of post-self-attn
+        # features. Carries scene-level info (complexity, layout) that lets the
+        # BudgetPredictor decide per-sample k.
+        ctx = h.mean(dim=1)  # [B, d_h]
+
+        # Token selection
+        if adaptive_budget and budget_predictor is not None:
+            from .masking import adaptive_gumbel_sigmoid_ste
+
+            k_frac = budget_predictor(ctx, s_N=s_N)
+
+            if training:
+                mask_ste, idx, k_eff = adaptive_gumbel_sigmoid_ste(
+                    s_N, k_frac=k_frac, tau=tau, training=True,
+                    k_min=k_min, k_max=k_max, N=N,
+                )
+                assert mask_ste.grad_fn is not None, (
+                    "v3 adaptive mask has no gradient — STE is broken."
+                )
+                return idx, s_N, mask_ste, k_eff
+            else:
+                _, idx, k_eff = adaptive_gumbel_sigmoid_ste(
+                    s_N, k_frac=k_frac, tau=tau, training=False,
+                    k_min=k_min, k_max=k_max, N=N,
+                )
+                return idx, s_N, None, k_eff
+        else:
+            from .masking import gumbel_sigmoid_ste
+
+            if training:
+                mask_ste, idx = gumbel_sigmoid_ste(s_N, k=k, tau=tau, training=True)
+                assert mask_ste.grad_fn is not None, (
+                    "v3 mask has no gradient — STE is broken."
+                )
+                return idx, s_N, mask_ste, None
+            else:
+                _, idx = gumbel_sigmoid_ste(s_N, k=k, tau=tau, training=False)
+                return idx, s_N, None, None
+
+    def get_num_params(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)

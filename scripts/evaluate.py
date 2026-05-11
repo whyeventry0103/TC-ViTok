@@ -203,6 +203,7 @@ def load_model(
     k_min: int = 36,
     k_max: int = 288,
     zero_query: bool = False,
+    tpn_version: str = "v1",
 ) -> TCViTokModel:
     """Load TCViTokModel from Phase 1 checkpoint.
 
@@ -210,16 +211,26 @@ def load_model(
     lora_*, multi_modal_projector.*). The 7B LLaVA backbone is re-loaded
     from HF cache (offline) and trainable weights are overlaid via strict=False.
     """
-    # Wiring config matching Phase 1 training exactly
-    tpn_config = {
-        "n_heads": 4,
-        "d_model": 384,
-        "d_coarse": 384,
-        "d_h": 512,
-        "d_text": 512,
-        "M": 49,
-        "N": 576,
-    }
+    # Wiring config matching Phase 1 training. Defaults are v1 (cross-attention TPN).
+    # For v3 (image-only scorer), we pass a slimmer config (no d_coarse/d_text/M).
+    if tpn_version == "v3":
+        tpn_config = {
+            "d_visual": 1024,
+            "d_h": 256,
+            "n_heads": 4,
+            "dropout": 0.1,
+            "N": 576,
+        }
+    else:
+        tpn_config = {
+            "n_heads": 4,
+            "d_model": 384,
+            "d_coarse": 384,
+            "d_h": 512,
+            "d_text": 512,
+            "M": 49,
+            "N": 576,
+        }
     lora_config = {
         "rank": 32,
         "alpha": 64,
@@ -275,6 +286,7 @@ def load_model(
         k_min=k_min,
         k_max=k_max,
         zero_query=zero_query,
+        tpn_version=tpn_version,
     )
 
     print(f"[load_model] Backbone loaded in {time.time()-t0:.1f}s")
@@ -854,7 +866,12 @@ def parse_args():
     parser.add_argument("--k-max", type=int, default=288)
     parser.add_argument(
         "--zero-query", action="store_true",
-        help="Zero out CLIP text embedding before TPN (use for v2 checkpoint trained with zero_query=True).",
+        help="Zero out CLIP text embedding before TPN (v1 with zero_query=True).",
+    )
+    parser.add_argument(
+        "--tpn-version", default="v1", choices=["v1", "v3"],
+        help="TPN architecture. 'v1' = cross-attention TPN (DINOv2+CLIP-text). "
+             "'v3' = image-only TokenScorerV3 (per-token MLP + self-attn on CLIP).",
     )
     parser.add_argument(
         "--n-eval-seeds", type=int, default=1,
@@ -931,6 +948,7 @@ def main():
         k_min=args.k_min,
         k_max=args.k_max,
         zero_query=args.zero_query,
+        tpn_version=args.tpn_version,
     )
 
     results = {

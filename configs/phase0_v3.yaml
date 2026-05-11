@@ -1,0 +1,54 @@
+# Phase 0 v3: TokenScorerV3 warmup with frozen LLaVA.
+# Trains only the v3 TPN (per-token MLP + self-attn on CLIP-L features).
+# DINOv2 and CLIP-text encoders are NOT loaded — v3 is image-only.
+
+defaults:
+  - base
+
+phase: 0
+description: "Phase 0 v3: TokenScorerV3 warmup (image-only, CLIP-L direct scoring)"
+
+model:
+  k: 144
+  tpn_version: "v3"
+  tpn:
+    d_visual: 1024
+    d_h: 256
+    n_heads: 4
+    dropout: 0.1
+    N: 576
+
+  # Adaptive budget OFF in Phase 0 — fixed k=144 to keep warmup simple.
+  # Phase 1 turns adaptive_budget on after TPN scoring is stable.
+  adaptive_budget: false
+
+training:
+  max_steps: 30000
+  batch_size: 8
+  grad_accum_steps: 4       # effective batch = 32 per GPU, ~32 single-GPU Phase 0
+
+  # Sparsity + entropy regularization for warmup
+  lambda_max: 0.01           # mild L1 (instance norm makes this near-useless but harmless)
+  lambda_entropy: 0.01       # spatial diversity
+  lambda_diversity: 0.0      # no text query → no query diversity term
+
+  lr_tpn: 1e-3               # v3 TPN is smaller; safer LR than v1's 3e-3
+
+  tau_max: 1.0
+  tau_min: 0.3               # don't anneal too sharp — preserve STE gradient
+
+  max_grad_norm: 5.0
+  weight_decay: 0.01
+  warmup_steps: 1000
+  T_warmup: 5000
+
+data:
+  datasets: ["vqav2", "gqa"]
+  train_samples: null
+
+logging:
+  wandb_run_name: "phase0_v3"
+  eval_interval: 2000
+  max_val_batches: 50
+  log_interval: 50
+  save_interval: 5000

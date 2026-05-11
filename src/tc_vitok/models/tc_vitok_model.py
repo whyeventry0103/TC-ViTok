@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .tpn import TokenizationPolicyNetwork, BudgetPredictor
+from .tpn import TokenizationPolicyNetwork, BudgetPredictor, TokenScorerV3
 from .encoders import CoarseVisualEncoder, TextEncoder, FullVisualEncoder
 
 
@@ -356,6 +356,7 @@ class TCViTokModel(nn.Module):
         k_min: int = 36,
         k_max: int = 288,
         zero_query: bool = False,
+        tpn_version: str = "v1",
     ):
         super().__init__()
 
@@ -367,39 +368,52 @@ class TCViTokModel(nn.Module):
         self.k_min = k_min
         self.k_max = k_max
         self.zero_query = zero_query
+        self.tpn_version = tpn_version
+        is_v3 = (tpn_version == "v3")
 
-        # 1. Coarse visual encoder (DINOv2-S, frozen)
-        # When load_encoders=False (e.g., testing with stub), use None and
-        # rely on forward_cached or external feature pipelines.
+        # 1. Encoders
+        # v3: only the full encoder (CLIP ViT-L/14) is needed — TPN scores
+        # CLIP features directly. DINOv2-S and CLIP text are unused.
+        # v1: all three encoders are needed (cross-attention TPN).
         if load_encoders:
-            self.coarse_encoder = CoarseVisualEncoder()
-            self.text_encoder = TextEncoder()
+            if not is_v3:
+                self.coarse_encoder = CoarseVisualEncoder()
+                self.text_encoder = TextEncoder()
+            else:
+                self.coarse_encoder = None
+                self.text_encoder = None
             self.full_encoder = FullVisualEncoder()
         else:
             self.coarse_encoder = None
             self.text_encoder = None
             self.full_encoder = None
 
-        # 3. Tokenization Policy Network (TPN, trainable)
+        # 2. Tokenization Policy Network
         tpn_config = tpn_config or {}
-        self.tpn = TokenizationPolicyNetwork(**tpn_config)
+        if is_v3:
+            v3_keys = {"d_visual", "d_h", "n_heads", "dropout", "N"}
+            v3_config = {kk: vv for kk, vv in tpn_config.items() if kk in v3_keys}
+            self.tpn = TokenScorerV3(**v3_config)
+        else:
+            self.tpn = TokenizationPolicyNetwork(**tpn_config)
 
-        # 3b. Budget Predictor (adaptive budget mode)
-        # Predicts per-sample token fraction from TPN's cross-attention context.
-        # ~25K params. Only active when adaptive_budget=True.
+        # 3. Budget Predictor (adaptive budget mode)
+        # v1: takes 384-d cross-attention context from TPN.
+        # v3: takes 256-d (or configured d_h) global-mean context from TokenScorerV3.
         if adaptive_budget:
-            d_model = tpn_config.get("d_model", 384)
+            if is_v3:
+                bp_d_model = tpn_config.get("d_h", 256)
+            else:
+                bp_d_model = tpn_config.get("d_model", 384)
             N = tpn_config.get("N", 576)
             self.budget_predictor = BudgetPredictor(
-                d_model=d_model, k_min=k_min, k_max=k_max, N=N,
+                d_model=bp_d_model, k_min=k_min, k_max=k_max, N=N,
             )
         else:
             self.budget_predictor = None
 
-        # 4. Unselected token pooler (Phase 1.5: orthogonal soft recycling)
-        # Compresses N-k background tokens into 4 summary vectors injected as
-        # a prefix before the k selected tokens. Zero params in stub mode.
-        if not use_stub_llm:
+        # 4. Unselected token pooler (Phase 1.5 legacy — not used in v3 or Phase 1 Final)
+        if not use_stub_llm and not is_v3:
             self.unsel_pooler = UnselectedPooler(d_model=1024, n_slots=4, n_heads=4)
         else:
             self.unsel_pooler = None
@@ -538,41 +552,55 @@ class TCViTokModel(nn.Module):
         # Dispatch: cached path (pre-computed features) vs full pipeline
         use_cached = v_coarse is not None and q_embed is not None
 
-        if not use_cached:
-            # Full pipeline: run frozen encoders
-            v_coarse = self.coarse_encoder(images_coarse)  # [B, 49, 384]
-            q_embed = self.text_encoder(questions)  # [B, 512]
+        if self.tpn_version == "v3":
+            # v3 path: TPN scores CLIP-L tokens directly. Need v_full first.
+            if v_full is None:
+                if self.full_encoder is None:
+                    raise RuntimeError(
+                        "v3 forward requires full_encoder or pre-computed v_full."
+                    )
+                v_full = self.full_encoder(images_full)  # [B, 576, 1024]
 
-        # Zero-query mode: replace text embedding with zeros so TPN selects
-        # purely from visual structure. Validated empirically by E3 (image-only
-        # eval gives +0.4 VQAv2 / +0.33 GQA vs query-conditioned baseline).
-        if self.zero_query:
-            q_embed = torch.zeros_like(q_embed)
+            idx, s_N, mask_ste, k_effective = self.tpn(
+                v_full=v_full,
+                k=self.k,
+                tau=tau,
+                training=self.training,
+                adaptive_budget=self.adaptive_budget,
+                budget_predictor=self.budget_predictor,
+                k_min=self.k_min,
+                k_max=self.k_max,
+            )
+            q_embed = None  # not used in v3
+        else:
+            # v1 path: cross-attention TPN with DINOv2 + CLIP text.
+            if not use_cached:
+                v_coarse = self.coarse_encoder(images_coarse)  # [B, 49, 384]
+                q_embed = self.text_encoder(questions)  # [B, 512]
 
-        # Step 1: TPN produces top-k gather indices
-        # During training, TPN also returns mask_ste for STE gradient routing.
-        # In adaptive mode, also returns k_effective (differentiable expected count).
-        idx, s_N, mask_ste, k_effective = self.tpn(
-            v_coarse=v_coarse,
-            q_embed=q_embed,
-            k=self.k,
-            tau=tau,
-            training=self.training,
-            adaptive_budget=self.adaptive_budget,
-            budget_predictor=self.budget_predictor,
-            k_min=self.k_min,
-            k_max=self.k_max,
-        )  # idx: [B, k] or [B, k_max_batch], s_N: [B, N], mask_ste: [B, N] or None
-           # k_effective: [B] (adaptive) or None (fixed)
+            # Zero-query mode: replace text embedding with zeros (E3-motivated).
+            if self.zero_query:
+                q_embed = torch.zeros_like(q_embed)
 
-        # Step 2: Extract full visual features (frozen CLIP ViT-L/14)
-        if v_full is None:
-            if self.full_encoder is None:
-                raise RuntimeError(
-                    "forward() requires full_encoder but load_encoders=False. "
-                    "Either initialize with load_encoders=True or pre-compute v_full."
-                )
-            v_full = self.full_encoder(images_full)  # [B, 576, 1024]
+            idx, s_N, mask_ste, k_effective = self.tpn(
+                v_coarse=v_coarse,
+                q_embed=q_embed,
+                k=self.k,
+                tau=tau,
+                training=self.training,
+                adaptive_budget=self.adaptive_budget,
+                budget_predictor=self.budget_predictor,
+                k_min=self.k_min,
+                k_max=self.k_max,
+            )
+
+            if v_full is None:
+                if self.full_encoder is None:
+                    raise RuntimeError(
+                        "forward() requires full_encoder but load_encoders=False. "
+                        "Either initialize with load_encoders=True or pre-compute v_full."
+                    )
+                v_full = self.full_encoder(images_full)  # [B, 576, 1024]
 
         # Step 3: GATHER selected tokens (real compression!)
         if self.adaptive_budget:
@@ -1089,15 +1117,26 @@ class TCViTokModel(nn.Module):
                         Shape: [B, k, 1024] (fixed) or [B, k_max_batch, 1024] (adaptive)
             k_per_sample: Per-sample valid token count [B] (adaptive) or None (fixed)
         """
-        v_coarse = self.coarse_encoder(images_coarse)
-        q_embed = self.text_encoder(questions)
-        idx, s_N, _, k_effective = self.tpn(
-            v_coarse=v_coarse, q_embed=q_embed, k=self.k, tau=0.1, training=False,
-            adaptive_budget=self.adaptive_budget,
-            budget_predictor=self.budget_predictor,
-            k_min=self.k_min, k_max=self.k_max,
-        )
         v_full = self.full_encoder(images_full)
+
+        if self.tpn_version == "v3":
+            idx, s_N, _, k_effective = self.tpn(
+                v_full=v_full, k=self.k, tau=0.1, training=False,
+                adaptive_budget=self.adaptive_budget,
+                budget_predictor=self.budget_predictor,
+                k_min=self.k_min, k_max=self.k_max,
+            )
+        else:
+            v_coarse = self.coarse_encoder(images_coarse)
+            q_embed = self.text_encoder(questions)
+            if self.zero_query:
+                q_embed = torch.zeros_like(q_embed)
+            idx, s_N, _, k_effective = self.tpn(
+                v_coarse=v_coarse, q_embed=q_embed, k=self.k, tau=0.1, training=False,
+                adaptive_budget=self.adaptive_budget,
+                budget_predictor=self.budget_predictor,
+                k_min=self.k_min, k_max=self.k_max,
+            )
 
         if self.adaptive_budget:
             # Per-sample variable k — use _gather_adaptive
@@ -1150,6 +1189,14 @@ class TCViTokModel(nn.Module):
         """
         self.eval()
         with torch.no_grad():
+            if self.tpn_version == "v3":
+                # v3: need v_full (CLIP features). Caller must provide images_full
+                # separately; for this debug path we re-derive it on the fly via
+                # CLIP_TRANSFORM upstream — here we just assert v_full path.
+                raise NotImplementedError(
+                    "get_selection_info is the v1 visualization helper. "
+                    "For v3, score CLIP features directly via forward(return_idx=True)."
+                )
             v_coarse = self.coarse_encoder(images_coarse)
             q_embed = self.text_encoder(questions)
             idx, s_N, _, __ = self.tpn(

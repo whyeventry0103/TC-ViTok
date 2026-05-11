@@ -355,6 +355,129 @@ class TextVQADataset(Dataset):
         }
 
 
+class LLaVAInstructDataset(Dataset):
+    """LLaVA visual instruction tuning data (e.g., llava_instruct_150k.json).
+
+    The official LLaVA-1.5 SFT mixture includes ~150K conversational
+    instruction-tuning samples grounded on COCO images. Most published
+    token-compression methods on LLaVA-1.5-7B include this mixture; training
+    on VQAv2+GQA alone makes our raw VQAv2/POPE numbers lag the literature.
+
+    Format (liuhaotian/LLaVA-Instruct-150K):
+        [
+          {
+            "id": "000000033471",
+            "image": "coco/train2017/000000033471.jpg",
+            "conversations": [
+              {"from": "human", "value": "<image>\\nQuestion?"},
+              {"from": "gpt",   "value": "Answer."},
+              ...
+            ]
+          },
+          ...
+        ]
+
+    This loader takes the FIRST human/gpt turn pair from each conversation as
+    a single (question, answer) example. Multi-turn conversations are not
+    exposed — TC-ViTok's training signal is single-turn VQA.
+
+    Image resolution: the JSON references `coco/train2017/...`. If only
+    train2014 is available locally, the loader tries multiple candidate paths
+    and skips samples whose image cannot be located (with retry).
+
+    Args:
+        json_path: Path to llava_instruct_150k.json (or compatible LLaVA SFT JSON)
+        image_dir: Root directory for COCO images. The loader tries
+                   {image_dir}/<filename>, {image_dir}/train2017/<filename>,
+                   {image_dir}/train2014/<filename>, and the raw path verbatim.
+        max_samples: Optional cap on the number of samples.
+    """
+
+    def __init__(
+        self,
+        json_path: str,
+        image_dir: str,
+        max_samples: Optional[int] = None,
+    ):
+        self.image_dir = Path(image_dir)
+
+        with open(json_path) as f:
+            data = json.load(f)
+
+        self.samples: List[Dict[str, Any]] = []
+        for entry in data:
+            convs = entry.get("conversations", [])
+            if len(convs) < 2:
+                continue
+            human = next((c for c in convs if c.get("from") == "human"), None)
+            gpt = next((c for c in convs if c.get("from") == "gpt"), None)
+            if human is None or gpt is None:
+                continue
+
+            question = (human.get("value") or "").replace("<image>", "").strip()
+            answer = (gpt.get("value") or "").strip()
+            if not question or not answer:
+                continue
+
+            self.samples.append({
+                "image_path": entry.get("image", ""),
+                "question": question,
+                "answer": answer,
+                "id": entry.get("id", ""),
+            })
+
+        if max_samples is not None:
+            self.samples = self.samples[:max_samples]
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        # Retry across adjacent samples to absorb missing-image errors gracefully
+        # (LLaVA-Instruct references train2017; if user only has train2014, some
+        # images won't be found — skip rather than crash).
+        for attempt in range(10):
+            try:
+                return self._load_item((idx + attempt) % len(self.samples))
+            except Exception:
+                continue
+        raise RuntimeError(
+            f"LLaVAInstructDataset: failed to load any sample near idx={idx}"
+        )
+
+    def _load_item(self, idx: int) -> Dict[str, Any]:
+        sample = self.samples[idx]
+        rel_path = sample["image_path"]
+        filename = Path(rel_path).name
+
+        candidates = [
+            self.image_dir / rel_path,
+            self.image_dir / filename,
+            self.image_dir / "train2017" / filename,
+            self.image_dir / "train2014" / filename,
+        ]
+        img_path = next((c for c in candidates if c.exists()), None)
+        if img_path is None:
+            raise FileNotFoundError(
+                f"LLaVA-Instruct image not found: {filename} "
+                f"(tried {[str(c) for c in candidates]})"
+            )
+
+        image = Image.open(img_path).convert("RGB")
+        images_coarse = DINO_TRANSFORM(image)
+        images_full = CLIP_TRANSFORM(image)
+
+        return {
+            "images_coarse": images_coarse,
+            "images_full": images_full,
+            "questions": sample["question"],
+            "answer_str": sample["answer"],
+            "answers": [sample["answer"]],
+            "question_id": sample["id"] or str(idx),
+            "image_id": filename,
+        }
+
+
 class POPEDataset(Dataset):
     """POPE dataset for object hallucination evaluation.
 
