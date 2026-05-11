@@ -70,7 +70,7 @@ training:
   T_warmup: 5000
 
 data:
-  datasets: ["vqav2", "gqa", "textvqa", "llava_instruct"]
+  datasets: ["vqav2", "gqa", "llava_instruct"]
 
   # TextVQA training paths (already downloaded on server)
   textvqa_train_annotations: "${data.data_root}/textvqa/TextVQA_0.5.1_train.json"
