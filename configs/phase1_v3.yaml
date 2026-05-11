@@ -40,9 +40,9 @@ model:
   merge_tau: 0.1
 
   lora:
-    rank: 64
-    alpha: 128
-    targets: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"]
+    rank: 32                 # matches working baseline (v3 ref: 0.3334); rank 64 + FFN = too much co-adaptation capacity
+    alpha: 64
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]  # attention only — FFN targets accelerate LoRA-TPN oscillation
     dropout: 0.05
 
 training:
@@ -56,19 +56,19 @@ training:
   lambda_budget: 0.0         # fixed-k mode — no BudgetPredictor
 
   budget_warmup_steps: 0     # fixed-k mode — no BudgetPredictor
-  lora_warmfreeze_steps: 3000
+  lora_warmfreeze_steps: 8000  # TPN needs 8k steps to learn from scratch (baseline had Phase 0 pre-warmup)
 
   lr_tpn: 1e-3               # was 3e-3 in v1 — smaller TPN, safer LR
-  lr_lora: 1e-4
+  lr_lora: 5e-5              # half of baseline — conservative LoRA to prevent oscillation with TPN
   lr_mlp: 5e-4
   lr_budget: 1e-3
 
   tau_max: 1.0
-  tau_min: 0.3
+  tau_min: 0.1               # match baseline — sharp selections at end improves accuracy
 
-  max_grad_norm: 5.0         # was 1.0 — 1.0 is unusually aggressive
+  max_grad_norm: 1.0         # standard for LLM training; 5.0 caused oscillation at step 15k
   weight_decay: 0.01
-  warmup_steps: 3000         # was 1000 — 100k steps deserves longer warmup
+  warmup_steps: 3000
   T_warmup: 5000
 
 data:
