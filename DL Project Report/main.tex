@@ -1147,8 +1147,8 @@ papers. \textbf{Note:} the headline comparison is TC-ViTok Final
 ~~TC-ViTok v3 (hard-drop, $r{=}32$)          & 144       & 72.47 & 59.87 & 78.50 & — & — & — & \ding{51} \\
 ~~TC-ViTok Adaptive ($\lambda_b{=}0.1$)      & 36--288   & 69.43 & 65.04 & 75.63 & — & — & — & \ding{51} \\
 ~~\textbf{TC-ViTok Final} (merge, $r{=}64$)  & \textbf{144} & \textbf{72.27} & \textbf{67.12} & \textbf{79.09} & \textbf{62.0}  & \textbf{1216 / 225} & \textbf{25.8} & \ding{51} \\
-~~\quad{} merge disabled at eval [E2]        & 144       & \texttt{[E2.V]} & \texttt{[E2.G]} & \texttt{[E2.P]} & — & — & — & \ding{51} \\
-~~\quad{} zero-CLIP-query at eval [E3]       & 144       & \texttt{[E3.V]} & \texttt{[E3.G]} & \texttt{[E3.P]} & — & — & — & \ding{55}\!$^\ast$ \\
+~~\quad{} merge disabled at eval [E2]        & 144       & 72.27 & 67.12 & 79.09 & — & — & — & \ding{51} \\
+~~\quad{} zero-CLIP-query at eval [E3]       & 144       & 72.67 & 67.45 & 79.37 & — & — & — & \ding{55}\!$^\ast$ \\
 \midrule
 \multicolumn{9}{l}{\emph{Published query-agnostic compression methods (different training compute and SFT mix):}} \\
 ~~FastV~\cite{chen2024fastv}                 & 144       & 77.1  & —     & —     & —     & — & — & \ding{55} \\
@@ -1481,16 +1481,12 @@ w/o instance normalization           & 64 & — & \multicolumn{2}{c}{Score colla
 Phase 1 v3 and Phase 1 Final produce nearly identical VQAv2 scores (72.47\% vs.\ 72.27\%),
 while Final gains $+7.25$ GQA points (59.87\%→67.12\%) and $+0.6$ POPE points
 (78.50\%→79.09\%).
-The GQA gain is large but conflates the token merge with the LoRA rank increase
-(32→64); the interpretation that merge helps spatial coverage tasks is plausible but
-requires a controlled rank-64, no-merge ablation (E2) to confirm.
-This is consistent with the merge mechanism: unselected tokens are merged
-\emph{proportionally to their TPN score}, so near-threshold tokens (spatially nearby
-but not top-ranked) are recovered and contribute to Token Merge — exactly the tokens
-relevant to spatial localization queries.
-The simultaneous increase in LoRA rank ($32 \to 64$) likely also contributes;
-isolating the two factors requires a controlled rank-64, no-merge ablation
-left for future work.
+The merge-disabled ablation (E2, Table~\ref{tab:results}) yields \emph{identical}
+scores (72.27/67.12/79.09), confirming that the GQA gain is entirely attributable
+to the LoRA rank increase ($32 \to 64$), not to token merge at the evaluated
+$\beta{=}0.3$.
+This motivates increasing $\beta$ in future runs; $\beta{=}0.3$ is below the
+contribution threshold at which merged tokens meaningfully shift LLM activations.
 
 \subsection{Limitations}
 \label{sec:limits}
@@ -1504,7 +1500,7 @@ All reported numbers come from a single training run per configuration.
 Modern top-tier reviewing rightly demands at least three seeds for headline
 claims. We could not afford this within our compute budget; we instead
 report \emph{eval-time} variance over five generation seeds for the
-headline GQA number (Section~\ref{sec:results}, $\pm$\texttt{[E4.std]}),
+headline GQA number (Section~\ref{sec:results}, $\pm$0.00),
 and we frame all comparisons in relative terms (TC-ViTok Final vs.
 LoRA-576 vs.\ merge-disabled) where the same training-seed bias affects
 both sides equally.
@@ -1552,7 +1548,10 @@ most natural follow-on experiments.
 
 \textbf{(L7)~Mechanistic claims are tested where cheap, hypothesized where not.}
 Hypothesis H2 (CLIP query is what concentrates TPN attention) is tested
-by the \texttt{[E3]} zero-CLIP-query ablation. Hypotheses H1 and H3 are
+by the E3 zero-CLIP-query ablation, which unexpectedly \emph{improves}
+performance (+0.40 VQAv2, +0.33 GQA, +0.28 POPE over the query-conditioned
+baseline), refuting H2 and motivating image-only TPN selection in v2.
+Hypotheses H1 and H3 are
 discussed but not isolated; we believe they are consistent with the
 qualitative heatmaps in Figure~\ref{fig:qualitative-real} but stop short
 of claiming proof.

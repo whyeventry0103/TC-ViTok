@@ -202,6 +202,7 @@ def load_model(
     adaptive_budget: bool = False,
     k_min: int = 36,
     k_max: int = 288,
+    zero_query: bool = False,
 ) -> TCViTokModel:
     """Load TCViTokModel from Phase 1 checkpoint.
 
@@ -273,6 +274,7 @@ def load_model(
         adaptive_budget=adaptive_budget,
         k_min=k_min,
         k_max=k_max,
+        zero_query=zero_query,
     )
 
     print(f"[load_model] Backbone loaded in {time.time()-t0:.1f}s")
@@ -851,6 +853,10 @@ def parse_args():
     parser.add_argument("--k-min", type=int, default=36)
     parser.add_argument("--k-max", type=int, default=288)
     parser.add_argument(
+        "--zero-query", action="store_true",
+        help="Zero out CLIP text embedding before TPN (use for v2 checkpoint trained with zero_query=True).",
+    )
+    parser.add_argument(
         "--n-eval-seeds", type=int, default=1,
         help=(
             "Number of generation seeds to average over for eval-time variance. "
@@ -924,6 +930,7 @@ def main():
         adaptive_budget=args.adaptive_budget,
         k_min=args.k_min,
         k_max=args.k_max,
+        zero_query=args.zero_query,
     )
 
     results = {

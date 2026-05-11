@@ -355,6 +355,7 @@ class TCViTokModel(nn.Module):
         adaptive_budget: bool = False,
         k_min: int = 36,
         k_max: int = 288,
+        zero_query: bool = False,
     ):
         super().__init__()
 
@@ -365,6 +366,7 @@ class TCViTokModel(nn.Module):
         self.adaptive_budget = adaptive_budget
         self.k_min = k_min
         self.k_max = k_max
+        self.zero_query = zero_query
 
         # 1. Coarse visual encoder (DINOv2-S, frozen)
         # When load_encoders=False (e.g., testing with stub), use None and
@@ -540,6 +542,12 @@ class TCViTokModel(nn.Module):
             # Full pipeline: run frozen encoders
             v_coarse = self.coarse_encoder(images_coarse)  # [B, 49, 384]
             q_embed = self.text_encoder(questions)  # [B, 512]
+
+        # Zero-query mode: replace text embedding with zeros so TPN selects
+        # purely from visual structure. Validated empirically by E3 (image-only
+        # eval gives +0.4 VQAv2 / +0.33 GQA vs query-conditioned baseline).
+        if self.zero_query:
+            q_embed = torch.zeros_like(q_embed)
 
         # Step 1: TPN produces top-k gather indices
         # During training, TPN also returns mask_ste for STE gradient routing.

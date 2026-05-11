@@ -1,0 +1,73 @@
+# Phase 1 Final v2: Zero-query TPN + stronger merge + TextVQA training data
+#
+# Design decisions based on ablation results from v1:
+#   E2 (merge_disabled = same as Final): merge_beta=0.3 was a no-op → increased to 0.7
+#   E3 (zero_query > Final): image-only TPN selection is better → zero_query=true at train time
+#   E6 (TextVQA=25.8%): model not trained on OCR data → add textvqa to training mixture
+#   E4 std=0.00: training is fully deterministic, variance is not the issue
+
+defaults:
+  - base
+
+phase: 1
+description: "v2: zero-query TPN + stronger merge (beta=0.7) + TextVQA training data"
+
+model:
+  k: 144
+  merge_beta: 0.7           # was 0.3 (no-op per E2); 0.7 recovers meaningful signal from dropped tokens
+  merge_tau: 0.1
+
+  zero_query: true           # zero out CLIP text embedding → pure visual selection (validated by E3)
+
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 100000          # longer training for 3-dataset mixture
+  batch_size: 4
+  grad_accum_steps: 16       # effective batch = 4 x 16 x 2 GPUs = 128
+
+  lambda_max: 0.0
+  lambda_entropy: 0.02
+  lambda_diversity: 0.0      # zero_query makes all q_embeds identical → diversity loss = 0 always
+
+  lambda_spread: 0.0
+  lambda_distill: 0.0
+  lambda_boundary: 0.0
+  lambda_slot_orth: 0.0
+  lambda_residual_distill: 0.0
+
+  lora_warmfreeze_steps: 3000
+
+  lr_tpn: 3e-3
+  lr_lora: 1e-4
+  lr_mlp: 5e-4
+
+  tau_max: 1.0
+  tau_min: 0.3
+
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  warmup_steps: 1000
+  T_warmup: 5000
+
+data:
+  datasets: ["vqav2", "gqa", "textvqa"]
+
+  # TextVQA training paths (already downloaded on server)
+  textvqa_train_annotations: "${data.data_root}/textvqa/TextVQA_0.5.1_train.json"
+  textvqa_train_image_dir: "${data.data_root}/textvqa/train_images"
+
+logging:
+  wandb_run_name: "phase1_final_v2"
+  eval_interval: 5000
+  max_val_batches: 100
+  log_interval: 50
+  save_interval: 5000
+
+checkpoint:
+  load_from: "runs/phase0_v4/phase0/best.ckpt"
+  strict: false

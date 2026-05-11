@@ -29,7 +29,7 @@ from omegaconf import OmegaConf
 from tc_vitok.models.tc_vitok_model import TCViTokModel
 from torch.utils.data import ConcatDataset
 from tc_vitok.data.datasets import (
-    DummyVQADataset, VQAv2Dataset, GQADataset, collate_fn,
+    DummyVQADataset, VQAv2Dataset, GQADataset, TextVQADataset, collate_fn,
 )
 from tc_vitok.data.caching import CachedFeatureDataset, cached_collate_fn
 from tc_vitok.training.trainer import TCViTokTrainer
@@ -176,6 +176,12 @@ def build_loaders(data_config, batch_size, num_workers, args, is_ddp: bool = Fal
                 return GQADataset(
                     questions_path=data_config["gqa_train_questions"],
                     image_dir=data_config["gqa_train_image_dir"],
+                    max_samples=data_config.get("max_samples"),
+                )
+            elif name == "textvqa":
+                return TextVQADataset(
+                    annotations_path=data_config["textvqa_train_annotations"],
+                    image_dir=data_config["textvqa_train_image_dir"],
                     max_samples=data_config.get("max_samples"),
                 )
             else:
@@ -363,6 +369,7 @@ def main():
     adaptive_budget = config_dict.get("model", {}).get("adaptive_budget", False)
     k_min = config_dict.get("model", {}).get("k_min", 36)
     k_max = config_dict.get("model", {}).get("k_max", 288)
+    zero_query = config_dict.get("model", {}).get("zero_query", False)
 
     model = TCViTokModel(
         k=k,
@@ -375,6 +382,7 @@ def main():
         adaptive_budget=adaptive_budget,
         k_min=k_min,
         k_max=k_max,
+        zero_query=zero_query,
     )
 
     # Log param count on ALL ranks for DDP debugging
