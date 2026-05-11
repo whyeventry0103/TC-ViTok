@@ -46,6 +46,7 @@ def gumbel_sigmoid_ste(
     if not training:
         # Inference: deterministic hard top-k, no gradients needed
         idx = scores.topk(k, dim=-1).indices
+        idx = idx.sort(dim=-1).values  # spatial order
         mask = torch.zeros_like(scores)
         mask.scatter_(-1, idx, 1.0)
         return mask, idx
@@ -64,8 +65,11 @@ def gumbel_sigmoid_ste(
     # Step 3: Soft mask via Gumbel-Sigmoid with temperature
     m_soft = torch.sigmoid(noisy_scores / tau)
 
-    # Step 4: Hard top-k on NOISY scores — ensures per-sample diversity
+    # Step 4: Hard top-k on NOISY scores — ensures per-sample diversity.
+    # Sort indices ascending so token order matches LLaVA's spatial (row-major)
+    # expectation; without this, LoRA wastes capacity learning a permutation.
     idx = noisy_scores.topk(k, dim=-1).indices
+    idx = idx.sort(dim=-1).values  # spatial order: ascending index = row-major
     m_hard = torch.zeros_like(scores)
     m_hard.scatter_(-1, idx, 1.0)
 

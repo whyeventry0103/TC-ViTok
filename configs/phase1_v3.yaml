@@ -28,8 +28,10 @@ model:
     dropout: 0.1
     N: 576
 
-  # Adaptive per-sample budget — the headline experimental contribution.
-  adaptive_budget: true
+  # Adaptive budget disabled for v3 Phase 1 — BudgetPredictor saturates when
+  # VQA gradient dominates (k_eff=288 always → TPN gets no learning signal).
+  # Re-enable after TPN converges with fixed k=144.
+  adaptive_budget: false
   k_min: 36                  # 6.25% of 576
   k_max: 288                 # 50% of 576
 
@@ -51,9 +53,9 @@ training:
   lambda_max: 0.0
   lambda_entropy: 0.02       # spatial diversity (validated in v1 v3)
   lambda_diversity: 0.0      # no text query → no diversity loss
-  lambda_budget: 0.05        # budget pressure for adaptive Pareto curve
+  lambda_budget: 0.0         # fixed-k mode — no BudgetPredictor
 
-  budget_warmup_steps: 5000  # freeze BudgetPredictor for first 5k steps
+  budget_warmup_steps: 0     # fixed-k mode — no BudgetPredictor
   lora_warmfreeze_steps: 3000
 
   lr_tpn: 1e-3               # was 3e-3 in v1 — smaller TPN, safer LR
@@ -88,5 +90,5 @@ logging:
   save_interval: 5000
 
 checkpoint:
-  load_from: "runs/phase0_v3/phase0/best.ckpt"
+  load_from: null            # Phase 0 v3 only ran 2k steps — essentially random; train from scratch
   strict: false
