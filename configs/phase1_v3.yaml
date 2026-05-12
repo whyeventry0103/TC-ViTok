@@ -56,7 +56,7 @@ training:
   lambda_budget: 0.0         # fixed-k mode — no BudgetPredictor
 
   budget_warmup_steps: 0     # fixed-k mode — no BudgetPredictor
-  lora_warmfreeze_steps: 3000  # Phase 0 already warmed TPN; short freeze lets TPN/LoRA sync up
+  lora_warmfreeze_steps: 8000  # mm_proj trains alone for 8k steps — teaches mm_proj to handle compressed tokens, which creates a real TPN gradient before LoRA joins
 
   lr_tpn: 1e-3               # was 3e-3 in v1 — smaller TPN, safer LR
   lr_lora: 5e-5              # half of baseline — conservative LoRA to prevent oscillation with TPN
@@ -90,5 +90,5 @@ logging:
   save_interval: 5000
 
 checkpoint:
-  load_from: "runs/phase0_v3/phase0/best.ckpt"
+  load_from: null  # Phase 0 provides no useful init (frozen LLaVA → near-zero TPN gradient); train from scratch
   strict: false
