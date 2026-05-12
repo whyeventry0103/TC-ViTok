@@ -44,9 +44,11 @@ def gumbel_sigmoid_ste(
         idx: Top-k indices, Shape: [B, k] — used for gather
     """
     if not training:
-        # Inference: deterministic hard top-k, no gradients needed
+        # Inference: deterministic hard top-k, no gradients needed.
+        # NOTE: tokens delivered in score-descending order (no spatial sort).
+        # This matches the successful adaptive run (commit 273b52a, val_vqa=0.31772).
+        # Adding sort changes the order LoRA was trained on → breaks loaded checkpoints.
         idx = scores.topk(k, dim=-1).indices
-        idx = idx.sort(dim=-1).values  # spatial order
         mask = torch.zeros_like(scores)
         mask.scatter_(-1, idx, 1.0)
         return mask, idx
@@ -66,10 +68,10 @@ def gumbel_sigmoid_ste(
     m_soft = torch.sigmoid(noisy_scores / tau)
 
     # Step 4: Hard top-k on NOISY scores — ensures per-sample diversity.
-    # Sort indices ascending so token order matches LLaVA's spatial (row-major)
-    # expectation; without this, LoRA wastes capacity learning a permutation.
+    # Tokens in score-descending order (no sort). This matches the successful
+    # adaptive run (commit 273b52a, val_vqa=0.31772 at step 40k). LoRA was trained
+    # with this ordering — adding a sort would invalidate the loaded checkpoint.
     idx = noisy_scores.topk(k, dim=-1).indices
-    idx = idx.sort(dim=-1).values  # spatial order: ascending index = row-major
     m_hard = torch.zeros_like(scores)
     m_hard.scatter_(-1, idx, 1.0)
 

@@ -1,0 +1,92 @@
+# Phase 1 Adaptive v2: extend the successful adaptive run.
+#
+# Provenance: the phase1_adaptive run at commit 273b52a achieved
+# val_vqa = 0.31772 at step 40k (beats Phase 1 v3 baseline of 0.3334).
+# That run trained on VQAv2 + GQA only and was cut at 40k.
+#
+# This config builds on it:
+#   - Loads from phase1_adaptive/phase1/best.ckpt (the 0.31772 checkpoint)
+#   - Adds TextVQA + LLaVA-Instruct-150K (the standard LLaVA-1.5 SFT mixture)
+#   - Trains to 100k total (60k more steps from step 40k)
+#   - Same hyperparameters that worked
+#   - Slightly lower LoRA LR (1e-4 vs 2e-4) since we're continuing — prevents
+#     destabilizing the converged weights when new data shifts the distribution.
+
+defaults:
+  - base
+
+phase: 1
+description: "Adaptive v2: extend 0.31772 run with full SFT mixture + longer training"
+
+model:
+  k: 144
+  adaptive_budget: true
+  k_min: 36
+  k_max: 288
+  merge_beta: 0.3
+  merge_tau: 0.1
+
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+training:
+  # Continue training from step 40k to 100k. Same-phase resume (ckpt_phase=1,
+  # ckpt_step=40000 < max_steps=100000) restores optimizer state and continues.
+  max_steps: 100000
+  batch_size: 4
+  grad_accum_steps: 16
+
+  lambda_max: 0.0
+  lambda_entropy: 0.02
+  lambda_diversity: 0.1      # query diversity — v1 TPN has text query, this fires
+  lambda_budget: 0.1          # budget penalty — proven to work in v1 (saturated only in v3)
+
+  lambda_spread: 0.0
+  lambda_distill: 0.0
+  lambda_boundary: 0.0
+  lambda_slot_orth: 0.0
+  lambda_residual_distill: 0.0
+
+  # No warm-freeze on resume — LoRA already trained, no need to re-freeze
+  lora_warmfreeze_steps: 0
+  budget_warmup_steps: 0      # BudgetPredictor already trained too
+
+  lr_tpn: 5e-4               # half of original (1e-3) — gentler on converged TPN
+  lr_lora: 1e-4              # half of original (2e-4) — prevents destabilization with new data
+  lr_mlp: 2.5e-4             # half of original (5e-4)
+  lr_budget: 5e-4            # half of original (1e-3)
+
+  tau_max: 1.0
+  tau_min: 0.3               # same as original
+
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  warmup_steps: 500
+  T_warmup: 2000
+
+data:
+  # Full LLaVA-1.5 SFT mixture: VQAv2 + GQA + TextVQA + LLaVA-Instruct-150K.
+  # Adding TextVQA and llava_instruct broadens domain coverage so the model
+  # generalizes beyond VQAv2/GQA-style questions.
+  datasets: ["vqav2", "gqa", "textvqa", "llava_instruct"]
+  train_samples: null
+
+  textvqa_train_annotations: "${data.data_root}/textvqa/TextVQA_0.5.1_train.json"
+  textvqa_train_image_dir: "${data.data_root}/textvqa/train_images"
+
+  llava_instruct_json: "${data.data_root}/llava_instruct/llava_instruct_150k.json"
+  llava_instruct_image_dir: "${data.data_root}/coco"
+
+logging:
+  wandb_run_name: "phase1_adaptive_v2"
+  eval_interval: 2000
+  max_val_batches: 100
+  log_interval: 50
+  save_interval: 2000
+
+checkpoint:
+  load_from: "runs/phase1_adaptive/phase1/best.ckpt"
+  strict: false
