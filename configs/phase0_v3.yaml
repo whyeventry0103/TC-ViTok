@@ -23,28 +23,26 @@ model:
   adaptive_budget: false
 
 training:
-  max_steps: 30000
-  batch_size: 8
-  grad_accum_steps: 4       # effective batch = 32 per GPU, ~32 single-GPU Phase 0
+  max_steps: 15000
+  batch_size: 4
+  grad_accum_steps: 8        # effective batch = 32 per GPU (single-GPU Phase 0)
 
-  # Sparsity + entropy regularization for warmup
-  lambda_max: 0.01           # mild L1 (instance norm makes this near-useless but harmless)
-  lambda_entropy: 0.01       # spatial diversity
-  lambda_diversity: 0.0      # no text query → no query diversity term
+  lambda_max: 0.0
+  lambda_entropy: 0.02       # spatial diversity — prevent TPN collapse during warmup
+  lambda_diversity: 0.0
 
-  lr_tpn: 1e-3               # v3 TPN is smaller; safer LR than v1's 3e-3
+  lr_tpn: 1e-3
 
   tau_max: 1.0
-  tau_min: 0.3               # don't anneal too sharp — preserve STE gradient
+  tau_min: 0.1               # anneal fully — sharp selections give cleaner Phase 1 init
 
-  max_grad_norm: 5.0
+  max_grad_norm: 1.0         # same as Phase 1; 5.0 caused instability
   weight_decay: 0.01
   warmup_steps: 1000
-  T_warmup: 5000
+  T_warmup: 3000
 
 data:
-  datasets: ["vqav2", "gqa"]
-  train_samples: null
+  datasets: ["vqav2"]        # VQAv2 only — cleaner single-turn gradient signal for TPN warmup
 
 logging:
   wandb_run_name: "phase0_v3"
