@@ -1,0 +1,112 @@
+# Phase 1 Stage 1: Monotonic Foundation Run for ICONIP'26
+#
+# GOAL: Achieve smooth, monotonic val_vqa decline from ~0.45 toward <0.32 over
+# 100k steps with deterministic, oscillation-free convergence.
+#
+# DESIGN RATIONALE
+# Based on Phase 1 v3 (the ONLY run in our history that converged monotonically):
+#   v3: image-only TPN + fixed k=144 + no merge + rank 32/64 LoRA + 50k steps
+#   v3 trajectory: 0.44 (5k) → 0.41 (10k) → 0.36 (20k) → 0.33 (50k)
+#   v3 was still trending down at step 50k when killed.
+#
+# Three measured upgrades to v3:
+#   1. v1 TPN (cross-attention with text query) — better selection quality
+#      than v3's image-only. Original phase1_adaptive used v1 and hit 0.3177.
+#   2. LoRA rank 64/128 instead of 32/64 — more capacity for fine-tuning.
+#   3. 100k steps instead of 50k, tau cools to 0.05 instead of 0.1 — sharper
+#      final selections, more time for cosine LR decay to find a good minimum.
+#
+# WHAT IS INTENTIONALLY OFF
+#   - adaptive_budget=false: BudgetPredictor's moving per-sample k creates
+#     instability in LoRA training. Off here, added in Stage 2 after convergence.
+#   - merge_beta=0.0: token merge shifts content based on TPN scores, creating
+#     a moving target for LoRA. Off here, added in Stage 2.
+#   - All Phase 1.5 losses (boundary, slot_orth, residual_distill, spread,
+#     distill): off. They were for the abandoned UnselectedPooler experiments.
+
+defaults:
+  - base
+
+phase: 1
+description: "Stage 1: v1 TPN + fixed k=144 + no merge + no adaptive — monotonic foundation, 100k steps"
+
+model:
+  k: 144
+  tpn_version: "v1"
+
+  # Fixed k — removes oscillation source #1 (BudgetPredictor moving target)
+  adaptive_budget: false
+  k_min: 36
+  k_max: 288
+
+  # No merge — removes oscillation source #2 (content shift from score changes)
+  merge_beta: 0.0
+  merge_tau: 0.1
+
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 100000
+  batch_size: 4
+  grad_accum_steps: 16        # effective batch = 4 × 16 × 2 GPUs = 128
+
+  # Sparsity (L1 on scores) disabled — top-k provides compression
+  lambda_max: 0.0
+
+  # Regularizers proven in v3 + v1 TPN's diversity benefit
+  lambda_entropy: 0.02
+  lambda_diversity: 0.1       # v1 TPN has text query — within-batch diversity fires
+  lambda_budget: 0.0          # adaptive budget disabled
+
+  # All Phase 1.5 losses disabled
+  lambda_spread: 0.0
+  lambda_distill: 0.0
+  lambda_boundary: 0.0
+  lambda_slot_orth: 0.0
+  lambda_residual_distill: 0.0
+
+  # mm_projector adapts alone for first 8k steps before LoRA joins.
+  # This was the v3 stability ingredient that prevented LoRA-TPN co-adaptation.
+  lora_warmfreeze_steps: 8000
+  budget_warmup_steps: 0      # no BudgetPredictor
+
+  # v3-proven learning rates (very conservative)
+  lr_tpn: 1e-3
+  lr_lora: 5e-5               # critical for monotonic convergence
+  lr_mlp: 5e-4
+  lr_budget: 1e-3             # unused
+  lr_pooler: 0.0              # unsel_pooler exists but never used in forward; explicit 0 prevents AdamW drift
+
+  # Tau schedule: warmer than v3 to allow exploration, sharper at end
+  tau_max: 1.0
+  tau_min: 0.05               # sharper than v3's 0.1 — decisive final selections
+
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  warmup_steps: 3000          # longer LR warmup (vs base 1000) for stable start
+  T_warmup: 5000
+
+data:
+  # Full LLaVA-1.5 SFT mixture (proven combination that v3 converged on)
+  datasets: ["vqav2", "gqa", "textvqa", "llava_instruct"]
+
+  textvqa_train_annotations: "${data.data_root}/textvqa/TextVQA_0.5.1_train.json"
+  textvqa_train_image_dir: "${data.data_root}/textvqa/train_images"
+
+  llava_instruct_json: "${data.data_root}/llava_instruct/llava_instruct_150k.json"
+  llava_instruct_image_dir: "${data.data_root}/coco"
+
+logging:
+  wandb_run_name: "phase1_stage1"
+  eval_interval: 2000
+  max_val_batches: 100
+  log_interval: 50
+  save_interval: 2000
+
+checkpoint:
+  load_from: null              # train from scratch — no resume
+  strict: false

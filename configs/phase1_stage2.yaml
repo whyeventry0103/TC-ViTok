@@ -1,0 +1,109 @@
+# Phase 1 Stage 2: Add adaptive budget + merge as fine-tuning layer
+#
+# GOAL: Push from Stage 1's converged baseline (~0.31) down toward 0.28-0.29
+# by enabling the adaptive budget specialization and merge enrichment that
+# the original phase1_adaptive run used to hit 0.3177.
+#
+# WHY THIS STAGE WORKS WHERE adaptive_v2 FAILED
+# adaptive_v2 failed because it tried to do adaptive+merge while LoRA was
+# STILL learning from a major data distribution change. Stage 2 starts from
+# a LoRA that's already converged to a stable mapping (Stage 1's best.ckpt).
+# Adaptive budget then adjusts k per sample on top of stable selections.
+#
+# CRITICAL: phase=2 triggers CROSS-PHASE checkpoint load in trainer.py:
+#   - Loads model weights (TPN, LoRA, mm_proj) from Stage 1's best.ckpt
+#   - DOES NOT load optimizer state (Stage 1 had 3 param groups, Stage 2 has 4)
+#   - Resets global_step to 0 (fresh tau schedule for fine-tuning)
+#   - BudgetPredictor is initialized fresh (Stage 1 didn't have one)
+# set_training_phase(phase=2) does the same thing as phase=1 internally (trains
+# TPN + LoRA + mm_proj + BudgetPredictor). The phase=2 label is purely to
+# trigger cross-phase load semantics.
+#
+# RISK: if Stage 2 oscillates, kill it. Stage 1's best.ckpt is the fallback.
+
+defaults:
+  - base
+
+phase: 2                       # cross-phase load: fresh optimizer + reset step
+description: "Stage 2: enable adaptive budget + merge on top of Stage 1's stable base, 50k steps"
+
+model:
+  k: 144
+  tpn_version: "v1"
+
+  # Enable adaptive budget — BudgetPredictor learns per-sample k
+  adaptive_budget: true
+  k_min: 36
+  k_max: 288
+
+  # Enable merge — informative token merge enriches selected with unselected
+  merge_beta: 0.3
+  merge_tau: 0.1
+
+  lora:
+    rank: 64
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 50000             # focused fine-tuning, not full training
+  batch_size: 4
+  grad_accum_steps: 16
+
+  lambda_max: 0.0
+
+  lambda_entropy: 0.02
+  lambda_diversity: 0.1
+  lambda_budget: 0.05          # gentler than original adaptive (0.1) — soft pressure
+
+  lambda_spread: 0.0
+  lambda_distill: 0.0
+  lambda_boundary: 0.0
+  lambda_slot_orth: 0.0
+  lambda_residual_distill: 0.0
+
+  # LoRA already trained — no warm-freeze needed
+  lora_warmfreeze_steps: 0
+  # BudgetPredictor frozen for first 3k steps so TPN + new merge path stabilize
+  # before budget pressure starts. Critical: prevents BudgetPredictor from
+  # converging to k_min while TPN is still adjusting to merge dynamics.
+  budget_warmup_steps: 3000
+
+  # Halved LRs vs Stage 1 — fine-tuning regime, not learning from scratch
+  lr_tpn: 5e-4
+  lr_lora: 2.5e-5              # half of Stage 1's 5e-5 — minimal disruption
+  lr_mlp: 2.5e-4
+  lr_budget: 1e-4              # 10x smaller than original adaptive (1e-3) — gentle
+  lr_pooler: 0.0               # pooler frozen by merge_beta>0 logic; explicit defensive 0
+
+  # Tau range: slight warmth (0.1) for BudgetPredictor to learn from soft mask,
+  # cool back to sharp 0.05. Stage 1 ended at 0.05, so this is a small +0.05
+  # warmth jump — acceptable perturbation.
+  tau_max: 0.1
+  tau_min: 0.05
+
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  warmup_steps: 1000           # short — model already trained
+  T_warmup: 2000
+
+data:
+  datasets: ["vqav2", "gqa", "textvqa", "llava_instruct"]
+
+  textvqa_train_annotations: "${data.data_root}/textvqa/TextVQA_0.5.1_train.json"
+  textvqa_train_image_dir: "${data.data_root}/textvqa/train_images"
+
+  llava_instruct_json: "${data.data_root}/llava_instruct/llava_instruct_150k.json"
+  llava_instruct_image_dir: "${data.data_root}/coco"
+
+logging:
+  wandb_run_name: "phase1_stage2"
+  eval_interval: 2000
+  max_val_batches: 100
+  log_interval: 50
+  save_interval: 2000
+
+checkpoint:
+  load_from: "runs/phase1_stage1/phase1/best.ckpt"
+  strict: false
