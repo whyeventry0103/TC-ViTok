@@ -674,9 +674,18 @@ class TCViTokTrainer:
                   f"phase {self.phase} max {self.max_steps}): "
                   f"loaded model weights, reset step/epoch/optimizer to 0")
         else:
-            # Same-phase: restore full training state
+            # Same-phase: restore full training state.
+            # Save initial_lr values set from config BEFORE load_state_dict overwrites them
+            # (PyTorch copies all param_group fields including initial_lr from the checkpoint,
+            # which would restore the old run's LRs instead of the new config's LRs).
+            configured_initial_lrs = [
+                pg.get("initial_lr", pg["lr"]) for pg in self.optimizer.param_groups
+            ]
             try:
                 self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                # Restore configured initial_lr so LR schedule uses the new config's values
+                for pg, initial_lr in zip(self.optimizer.param_groups, configured_initial_lrs):
+                    pg["initial_lr"] = initial_lr
             except (ValueError, RuntimeError) as e:
                 print(f"WARNING: Could not load optimizer state: {e}")
                 print("Continuing with fresh optimizer state.")
