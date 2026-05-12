@@ -220,9 +220,9 @@ class TCViTokTrainer:
             print(f"\n{'='*60}")
             print(f"Phase {self.phase} Training Complete")
             print(f"{'='*60}\n")
-            # Always save a final checkpoint at the end of training
-            # Save as best.ckpt too — Phase 1 loads this for resumption
-            self.save_checkpoint(is_best=True)
+            # Save final checkpoint (NOT as best — best.ckpt is managed by validate()
+            # and should only reflect the actual best validation loss, not the final step)
+            self.save_checkpoint(is_best=False)
         if self.is_ddp:
             dist.barrier()  # sync all ranks before returning
 
