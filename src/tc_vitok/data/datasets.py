@@ -333,12 +333,33 @@ class TextVQADataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        for attempt in range(5):
+            try:
+                return self._load_item((idx + attempt) % len(self.samples))
+            except Exception:
+                continue
+        raise RuntimeError(f"TextVQADataset: failed to load any sample near idx={idx}")
+
+    def _load_item(self, idx: int) -> Dict[str, Any]:
         sample = self.samples[idx]
         image_id = sample["image_id"]
 
-        img_path = self.image_dir / f"{image_id}.jpg"
-        if not img_path.exists():
-            img_path = self.image_dir / f"{image_id}.png"
+        # TextVQA image IDs are Open Images IDs (hex strings). Images are stored as
+        # {image_id}.jpg directly in train_images/. Strip any path prefix that may
+        # appear in some annotation versions (e.g. "train/XXXXX" → "XXXXX").
+        filename = Path(image_id).name
+        candidates = [
+            self.image_dir / f"{image_id}.jpg",
+            self.image_dir / f"{image_id}.png",
+            self.image_dir / f"{filename}.jpg",
+            self.image_dir / f"{filename}.png",
+        ]
+        img_path = next((c for c in candidates if c.exists()), None)
+        if img_path is None:
+            raise FileNotFoundError(
+                f"TextVQA image not found for id={image_id} "
+                f"(tried {[str(c) for c in candidates]})"
+            )
         image = Image.open(img_path).convert("RGB")
 
         images_coarse = DINO_TRANSFORM(image)
