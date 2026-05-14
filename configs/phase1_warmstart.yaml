@@ -1,0 +1,105 @@
+# Phase 1 Warmstart: gentle fine-tune from the 0.3177 checkpoint to push <0.30
+#
+# WHY THIS APPROACH
+# Both Stage 1 attempts (v1 TPN and v3 TPN from scratch) oscillated and failed
+# to reach the 0.3177 already achieved by phase1_adaptive. The diagnosis is that
+# co-adapting TPN + LoRA + projector from random init is the failure mode — not
+# which TPN variant. The 0.3177 run only worked because it was warm-started from
+# a fully converged phase1_final checkpoint.
+#
+# Rather than try to reproduce that 80k+40k training chain, this config fine-tunes
+# directly from the best checkpoint we already have (0.3177) with:
+#   - phase=2 to trigger cross-phase load (fresh optimizer + reset step + fresh
+#     tau schedule starting at tau_max=0.30, not 1.0)
+#   - LRs 5–20× smaller than the original adaptive run — minimal disruption
+#   - tau capped at 0.30 — NO reheat from the checkpoint's end state (tau≈0.3)
+#   - lambda_budget cut from 0.1 → 0.03 so k_effective can drift higher toward
+#     k_max=288, trading compression for accuracy in pursuit of <0.30 val_vqa
+#   - vqav2 + gqa ONLY — no TextVQA/LLaVA-Instruct (the v2 plateau was caused
+#     by the LLaVA-Instruct conversational distribution shift)
+#
+# ARCHITECTURE — MUST MATCH THE LOADED CHECKPOINT EXACTLY
+#   v1 TPN (default, no tpn_version key), rank 64/128 LoRA on attention only,
+#   merge_beta=0.3, adaptive=true, k_min=36, k_max=288
+#
+# WHAT WE EXPECT
+#   - Step 0 val_vqa should be ~0.3177 (checkpoint reload sanity check)
+#   - First few k steps: small regression as optimizer warms up — acceptable
+#     IF it recovers within 4k steps. If val_vqa > 0.36 at step 4k → KILL.
+#   - Target: val_vqa < 0.30 within 20k steps
+
+defaults:
+  - base
+
+phase: 2                       # cross-phase load: fresh optimizer, fresh schedules, step→0
+description: "Warmstart fine-tune from phase1_adaptive 0.3177 ckpt, push <0.30, 20k steps"
+
+model:
+  k: 144                       # midpoint; adaptive overrides per-sample
+  # tpn_version omitted → defaults to "v1" (matches checkpoint)
+
+  adaptive_budget: true
+  k_min: 36
+  k_max: 288
+
+  merge_beta: 0.3
+  merge_tau: 0.1
+
+  lora:
+    rank: 64                   # must match checkpoint
+    alpha: 128
+    targets: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    dropout: 0.05
+
+training:
+  max_steps: 20000
+  batch_size: 4
+  grad_accum_steps: 16
+
+  lambda_max: 0.0
+
+  lambda_entropy: 0.02
+  lambda_diversity: 0.04       # active (v1 has q_embed); gentler than original 0.1
+  lambda_budget: 0.03          # cut from 0.1 — let k_effective drift toward k_max
+
+  lambda_spread: 0.0
+  lambda_distill: 0.0
+  lambda_boundary: 0.0
+  lambda_slot_orth: 0.0
+  lambda_residual_distill: 0.0
+
+  # Short warm-freezes — model is already trained, brief settling is enough
+  lora_warmfreeze_steps: 2000
+  budget_warmup_steps: 1000
+
+  # Low LRs — fine-tune regime, NOT learn-from-scratch
+  lr_tpn: 2e-4                 # 5× smaller than original adaptive
+  lr_lora: 1e-5                # 20× smaller — minimal LoRA disruption
+  lr_mlp: 1e-4                 # 5× smaller
+  lr_budget: 5e-5              # 20× smaller — BudgetPredictor barely moves
+  lr_pooler: 0.0
+
+  # CRITICAL: tau schedule does NOT reheat. Original adaptive ended at tau≈0.3.
+  # Starting tau_max=0.30 means selections stay sharp from step 0.
+  tau_max: 0.30
+  tau_min: 0.20
+
+  max_grad_norm: 1.0
+  weight_decay: 0.01
+  warmup_steps: 500            # short LR warmup
+  T_warmup: 1000
+
+data:
+  # vqav2 + gqa ONLY — no distribution shift to hurt VQAv2 val
+  datasets: ["vqav2", "gqa"]
+
+logging:
+  wandb_run_name: "phase1_warmstart"
+  eval_interval: 1000          # frequent eval — catch divergence early
+  max_val_batches: 500         # more val batches for stable val_vqa estimate
+  log_interval: 50
+  save_interval: 1000
+
+checkpoint:
+  load_from: "runs/phase1_adaptive/phase1/best.ckpt"  # the 0.3177 winner
+  strict: false
