@@ -134,22 +134,47 @@ def load_model_with_final_config(
     return model
 
 
-def overlay_heatmap(pil_image: Image.Image, scores_24x24: np.ndarray) -> Image.Image:
-    """Render a transparent jet overlay of TPN scores on the raw image."""
+def overlay_heatmap(
+    pil_image: Image.Image,
+    scores_24x24: np.ndarray,
+    mask_24x24: np.ndarray,
+) -> Image.Image:
+    """Render top-k selection overlay: only selected tokens are highlighted,
+    with score-modulated alpha. Unselected regions show the raw image."""
     import matplotlib.cm as cm
 
     img = pil_image.convert("RGB").resize((336, 336))
-    s = scores_24x24
-    # Min-max normalize per image for visualization (raw scores are post-instance-norm).
-    s = (s - s.min()) / (s.max() - s.min() + 1e-8)
-    s = np.kron(s, np.ones((14, 14)))  # upsample 24x24 → 336x336
-    cmap = cm.get_cmap("inferno")
-    rgba = (cmap(s) * 255).astype(np.uint8)
-    overlay = Image.fromarray(rgba)
+    base = np.array(img).astype(np.float32) / 255.0  # (336, 336, 3)
 
-    base = img.convert("RGBA")
-    overlay.putalpha(140)  # alpha
-    return Image.alpha_composite(base, overlay).convert("RGB")
+    # Per-image score normalization on selected tokens only (for color contrast).
+    sel = scores_24x24 * mask_24x24
+    if sel.max() > sel.min():
+        sel_norm = (sel - sel[mask_24x24 > 0].min()) / (sel.max() - sel[mask_24x24 > 0].min() + 1e-8)
+        sel_norm = np.clip(sel_norm, 0.0, 1.0) * mask_24x24
+    else:
+        sel_norm = mask_24x24.astype(np.float32)
+
+    # Upsample to 336x336.
+    sel_full = np.kron(sel_norm, np.ones((14, 14)))
+    mask_full = np.kron(mask_24x24, np.ones((14, 14)))
+
+    # Color the SELECTED tokens with a warm overlay (red-yellow), modulated by score.
+    cmap = cm.get_cmap("YlOrRd")
+    color = cmap(sel_full)[..., :3]  # (336, 336, 3)
+    # Alpha: 0 for unselected; ramp 0.35 -> 0.75 for selected (modulated by score).
+    alpha = np.where(mask_full > 0, 0.35 + 0.40 * sel_full, 0.0)[..., None]
+
+    blended = base * (1.0 - alpha) + color * alpha
+    blended = np.clip(blended * 255.0, 0, 255).astype(np.uint8)
+
+    # Optional thin grid lines at every 14px to expose the patch structure.
+    out = Image.fromarray(blended)
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(out)
+    for k in range(0, 337, 14):
+        draw.line([(k, 0), (k, 336)], fill=(255, 255, 255, 32), width=1)
+        draw.line([(0, k), (336, k)], fill=(255, 255, 255, 32), width=1)
+    return out
 
 
 def main() -> None:
@@ -251,7 +276,7 @@ def main() -> None:
         if args.render_overlays and raw_image_path and raw_image_path.exists():
             try:
                 pil = Image.open(raw_image_path)
-                ov = overlay_heatmap(pil, scores)
+                ov = overlay_heatmap(pil, scores, mask)
                 ov.save(out / f"sample_{n_dumped:04d}_overlay.png")
             except Exception as e:
                 print(f"  [warn] overlay failed for sample {n_dumped}: {e}")

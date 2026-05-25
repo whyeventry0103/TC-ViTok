@@ -3,44 +3,44 @@ Capacity: max_strings=200000, hash_size=200000, hash_prime=170003
 The top-level auxiliary file: main.aux
 The style file: icml2021.bst
 Database file #1: main.bib
-You've used 21 entries,
+You've used 24 entries,
             2773 wiz_defined-function locations,
-            677 strings with 8813 characters,
-and the built_in function-call counts, 11634 in all, are:
-= -- 868
-> -- 1092
-< -- 4
-+ -- 367
-- -- 345
-* -- 1011
-:= -- 1885
-add.period$ -- 63
-call.type$ -- 21
-change.case$ -- 172
-chr.to.int$ -- 20
-cite$ -- 42
-duplicate$ -- 468
-empty$ -- 778
-format.name$ -- 371
-if$ -- 2355
+            689 strings with 9280 characters,
+and the built_in function-call counts, 12868 in all, are:
+= -- 965
+> -- 1171
+< -- 5
++ -- 394
+- -- 369
+* -- 1102
+:= -- 2077
+add.period$ -- 72
+call.type$ -- 24
+change.case$ -- 189
+chr.to.int$ -- 23
+cite$ -- 48
+duplicate$ -- 535
+empty$ -- 890
+format.name$ -- 398
+if$ -- 2614
 int.to.chr$ -- 2
 int.to.str$ -- 1
-missing$ -- 21
-newline$ -- 113
-num.names$ -- 84
-pop$ -- 398
+missing$ -- 24
+newline$ -- 128
+num.names$ -- 96
+pop$ -- 441
 preamble$ -- 1
-purify$ -- 151
+purify$ -- 165
 quote$ -- 0
-skip$ -- 370
+skip$ -- 414
 stack$ -- 0
-substring$ -- 42
-swap$ -- 36
+substring$ -- 48
+swap$ -- 41
 text.length$ -- 0
 text.prefix$ -- 0
 top$ -- 0
-type$ -- 231
+type$ -- 264
 warning$ -- 0
-while$ -- 63
+while$ -- 72
 width$ -- 0
-write$ -- 259
+write$ -- 295

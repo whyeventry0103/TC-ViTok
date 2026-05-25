@@ -19,11 +19,13 @@ Paper reference: Section 7 (Training Procedure)
 import argparse
 import os
 from pathlib import Path
+import random
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.utils.data import DistributedSampler
 import wandb
+import numpy as np
 from omegaconf import OmegaConf
 
 from tc_vitok.models.tc_vitok_model import TCViTokModel
@@ -103,6 +105,15 @@ def parse_args():
         action="store_true",
         help="Disable WandB logging",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Override config seed for reproducible multi-seed runs. "
+            "If omitted, uses config field `seed` when present."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -131,6 +142,19 @@ def detect_device(local_rank: int = -1) -> str:
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+
+def set_reproducibility(seed: int, deterministic: bool = False) -> None:
+    """Set process-level RNG state for reproducible training launches."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 def build_loaders(data_config, batch_size, num_workers, args, is_ddp: bool = False):
@@ -345,6 +369,11 @@ def main():
     config_path = Path(args.config)
     phase = config_dict.get("phase", 1)
 
+    seed = args.seed if args.seed is not None else int(config_dict.get("seed", 42))
+    deterministic = bool(config_dict.get("deterministic", False))
+    config_dict["seed"] = seed
+    set_reproducibility(seed, deterministic=deterministic)
+
     # Apply --max-steps override (useful for dry runs: --max-steps 1)
     if args.max_steps is not None:
         config_dict["training"]["max_steps"] = args.max_steps
@@ -355,6 +384,7 @@ def main():
         print(f"Loaded config from {args.config}")
         print(f"Phase: {phase}")
         print(f"Device: {device}")
+        print(f"Seed: {seed} (deterministic={deterministic})")
         if is_ddp:
             print(f"DDP enabled — local_rank={local_rank}, world_size={dist.get_world_size()}")
         if args.max_steps is not None:

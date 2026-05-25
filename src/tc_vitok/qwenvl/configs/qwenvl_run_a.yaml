@@ -1,0 +1,19 @@
+model_name: Qwen/Qwen2-VL-7B-Instruct
+eta_selector: 5.0e-4
+eta_lora: 2.0e-5
+batch_size: 1
+grad_accum: 128
+eval_batch_size: 1
+steps: 12000
+log_every: 500
+save_every: 2000
+seed: 42
+k: 144
+d_model: 384
+tau_max: 1.0
+tau_min: 0.3
+num_workers: 2
+train_samples_per_dataset: null
+eval_samples: 500
+eval_max_batches: null
+

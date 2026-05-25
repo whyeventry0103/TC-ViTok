@@ -1,4 +1,4 @@
-\begin{thebibliography}{21}
+\begin{thebibliography}{24}
 \providecommand{\natexlab}[1]{#1}
 \providecommand{\url}[1]{\texttt{#1}}
 \expandafter\ifx\csname urlstyle\endcsname\relax
@@ -20,6 +20,11 @@ Chen, L., Zhao, J., Wang, X., Chen, D., Xu, R., Dong, P., and Zhang, W.
 \newblock An image is worth 1/2 tokens after layer 2: Plug-and-play inference acceleration for large vision-language models.
 \newblock In \emph{ECCV}, 2024.
 
+\bibitem[Darcet et~al.(2024)Darcet, Oquab, Mairal, and Bojanowski]{darcet2024vision}
+Darcet, T., Oquab, M., Mairal, J., and Bojanowski, P.
+\newblock Vision transformers need registers.
+\newblock In \emph{International Conference on Learning Representations (ICLR)}, 2024.
+
 \bibitem[Endo et~al.(2025)]{endo2025feather}
 Endo, Y. et~al.
 \newblock {FEATHER}: Fine-grained efficient attention for text-heavy and spatially grounded {VLM} tasks.
@@ -39,6 +44,11 @@ Hudson, D.~A. and Manning, C.~D.
 Jang, E., Gu, S., and Poole, B.
 \newblock Categorical reparameterization with {Gumbel-Softmax}.
 \newblock In \emph{ICLR}, 2017.
+
+\bibitem[Jolicoeur-Martineau(2018)]{jolicoeur2018relativistic}
+Jolicoeur-Martineau, A.
+\newblock The relativistic discriminator: a key element missing from standard {GAN}.
+\newblock \emph{arXiv:1807.00734}, 2018.
 
 \bibitem[Kaplan et~al.(2020)Kaplan, McCandlish, Henighan, Brown, Chess, Child, Gray, Radford, Wu, and Amodei]{kaplan2020scaling}
 Kaplan, J., McCandlish, S., Henighan, T., Brown, T.~B., Chess, B., Child, R., Gray, S., Radford, A., Wu, J., and Amodei, D.
@@ -79,6 +89,11 @@ Maddison, C.~J., Mnih, A., and Teh, Y.~W.
 Meng, L., Li, H., Chen, B.-C., Lan, S., Wu, Z., Jiang, Y.-G., and Lim, S.-N.
 \newblock {AdaViT}: Adaptive vision transformers for efficient image recognition.
 \newblock In \emph{CVPR}, 2022.
+
+\bibitem[Mescheder et~al.(2018)Mescheder, Geiger, and Nowozin]{mescheder2018training}
+Mescheder, L., Geiger, A., and Nowozin, S.
+\newblock Which training methods for {GAN}s do actually converge?
+\newblock In \emph{ICML}, 2018.
 
 \bibitem[Oquab et~al.(2023)Oquab, Darcet, Moutakanni, Vo, Szafraniec, Khalidov, Fernandez, Haziza, Massa, El-Nouby, et~al.]{oquab2023dinov2}
 Oquab, M., Darcet, T., Moutakanni, T., Vo, H., Szafraniec, M., Khalidov, V., Fernandez, P., Haziza, D., Massa, F., El-Nouby, A., et~al.

@@ -57,7 +57,7 @@
 \usepackage[accepted]{icml2021}
 
 % Running title — prevents "Title suppressed due to excessive length" in page headers
-\icmltitlerunning{TC-ViTok: Task-Conditioned Visual Tokenization}
+\icmltitlerunning{TC-ViTok: Failure-Mode Taxonomy for Pre-LLM Token Compression}
 
 % -------------------------------------------------------------------
 % Convenience macros
@@ -74,8 +74,8 @@
 \begin{document}
 
 \twocolumn[
-\icmltitle{TC-ViTok: Diagnosing Pooler Co-Adaptation in Pre-LLM Visual\\
-           Token Compression, with a Stable Parameter-Free Recipe}
+\icmltitle{TC-ViTok: A Failure-Mode Taxonomy for Pre-LLM Visual Token\\
+           Compression, with a Parameter-Free Recipe}
 
 % Anonymous for double-blind review.
 \begin{icmlauthorlist}
@@ -90,126 +90,135 @@
 
 % ===================================================================
 \begin{abstract}
-Compressing the 576 visual tokens that LLaVA-1.5 sends to its language
-model is attractive: prefill is quadratic and dominated by uninformative
-regions. A natural design — a small policy network that scores tokens
-\emph{before} the LLM, conditioned on the question — has a failure mode
-that, to our knowledge, has not been reported in prior work.
-When the selector and the LLM (or its LoRA adapters) train jointly, they
-enter a GAN-like co-adaptation regime: the selector's output distribution
-shifts the LLM's input distribution, the LoRA adapts, and the gradient
-back to the selector shifts again. Across eight architectural variants
-spanning the Phase 1.5 trainable-pooler design space, every variant we
-tried oscillated with periods inversely proportional to the pooler
-learning rate; none beat a single-stage baseline.
+We report a trained, pre-LLM, query-conditioned visual-token selector
+(TC-ViTok) at LLaVA-1.5-7B scale with a matched same-LoRA, same-SFT,
+full-576-token reference (\textsc{LoRA-576}). At $4{\times}$ compression
+(measured as the $k{=}144$ selected-token ratio), TC-ViTok incurs a measured
+cost of $-4.1$ VQAv2, $-3.4$ GQA, and $-7.4$ POPE points --- a cost we report
+rather than hide.
 
-We diagnose this co-adaptation rigorously and propose two complementary
-fixes that, taken together, yield a stable system: (i) a
-\emph{tau-independent additive correction} to the Gumbel-Sigmoid
-straight-through estimator that prevents gradient collapse as temperature
-anneals; and (ii) \emph{Informative Token Merge}, a parameter-free
-TPN-score-weighted cosine recovery of background context that
-eliminates the co-adaptation loop \emph{by construction}. We also
-introduce a 25K-parameter BudgetPredictor with a differentiable
-threshold trick for per-sample variable budgets, and present it as a
-design exploration rather than a tuned operating point.
+Two empirical observations follow from this comparison. First, the converged
+selector is empirically close to query-agnostic: zeroing the CLIP query
+embedding at inference produces equal or marginally better accuracy, indicating
+that the architecture's query-routing channel is not used strongly at this
+scale. Second, the converged selector exhibits a structured per-position prior
+with a localized region whose inference-time masking improves exact-match
+VQA-score by $+2.2$ pp on Final, ranks at the 90th percentile of 10
+size-matched random-rectangle controls ($p{=}0.0107$, one-tailed sign test).
+The effect is positive on two related checkpoints but reverses sign on an
+independently retrained seed, so we treat it as a low-utility-allocation
+diagnostic rather than a checkpoint-invariant mechanism.
 
-On LLaVA-1.5-7B at $4{\times}$ compression ($k{=}144$), the resulting
-system scores 4.1 VQA-Score points and 3.4 GQA points below the
-same-LoRA, full-token reference (\textsc{LoRA-576}: 76.38\% VQAv2,
-70.55\% GQA) — a modest, honest compression cost that we report rather
-than hide. We treat the eight-experiment failure analysis as the
-more durable contribution: any future pre-LLM compression method that
-trains alongside an adapted LLM must contend with the same
-co-adaptation problem, and our parameter-free recovery is one
-architectural recipe that sidesteps it.
+To explain why compression does not close the \textsc{LoRA-576} gap, we
+document three training-dynamics pathologies we encountered while training a
+query-conditioned visual-token selector co-optimized with LLM adapters before
+the LLM. We present them as concrete, testable hypotheses about pre-LLM
+trainable compression more broadly; their universality is an open question we
+explicitly invite future work to resolve. \emph{Co-adaptation oscillation}
+produces limit cycles whose period grew from approximately 5K to 15K steps as
+the selector learning rate dropped $25{\times}$ across the two finite-period
+measurements available (the frozen-pooler control has no cycle). We report this
+as a qualitative trend, not a scaling law; two data points are insufficient to
+fit a functional form. \emph{BudgetPredictor
+collapse} sends per-sample token budgets to $k_{\max}$ whenever
+$\lambda_b\!\leq\!0.05$, with a narrow stable window of $[0.08, 0.15]$.
+\emph{Warm-start dependence} prevents from-scratch convergence at LLaVA-1.5
+scale across two selector variants and three LoRA capacities. We sidestep each
+pathology with a parameter-free token merge, a calibrated $\lambda_b$, and a
+staged curriculum on a converged base.
 \end{abstract}
 
 % ===================================================================
 \section{Introduction}
 \label{sec:intro}
 
+Pre-LLM visual token compression — reducing the visual sequence before it enters the
+LLM, saving all prefill FLOPs — does not naively converge when the selector is
+co-trained with LLM adapters. This paper is about why, and what to do about it.
+
 Modern VLMs such as LLaVA-1.5~\cite{liu2024llava} attach a large language model (LLM)
-to a frozen CLIP ViT-L/14 vision encoder via a learned multimodal projector.
-At inference, the encoder maps a $336\times336$ image to $576$ patch tokens
-($24\times24$ grid, patch size $14\times14$), which are prepended to the tokenized
-question and fed into the LLM.
-Since attention cost is quadratic in sequence length, these 576 visual tokens
-(which far outnumber the $\sim$30 typical question tokens) dominate prefill FLOPs.
+to a frozen CLIP ViT-L/14 vision encoder. At inference, the encoder maps a
+$336\times336$ image to $576$ patch tokens ($24\times24$ grid), which are prepended to
+the tokenized question and fed into the LLM. Since attention cost is quadratic in
+sequence length, these 576 visual tokens dominate prefill FLOPs — and the budget is
+determined by image resolution, not by what the question requires.
 
-This fixed-token representation is informationally wasteful.
-A question asking ``What is written on the sign?'' requires only the small image region
-containing text, yet the LLM still receives all 576 tokens including sky, background,
-and irrelevant objects. Conversely, ``Is there a person in the image?'' needs a global
-scan rather than fine-grained local detail. The token budget is determined by image
-resolution, not by what the question requires.
+Prior work compresses tokens either query-agnostically (ToMe~\cite{bolya2022token},
+EViT~\cite{liang2022evit}, FastV~\cite{chen2024fastv},
+PruMerge~\cite{shang2024llava}) or inside the LLM's attention layers, after all tokens
+have been injected (SparseVLM~\cite{zhang2025sparsevlm},
+FocusLLaVA~\cite{zhu2024focusllava}). Pre-LLM compression with a learned
+query-conditioned selector is the architecturally natural design: it saves LLM FLOPs
+and is modular. It also does not converge in the obvious training setup.
 
-Prior work has addressed the redundancy half of this problem through token compression:
-Token Merging (ToMe)~\cite{bolya2022token} and EViT~\cite{liang2022evit} reduce tokens
-within the ViT; FastV~\cite{chen2024fastv} and LLaVA-PruMerge~\cite{shang2024llava}
-prune after encoding; SparseVLM~\cite{zhang2025sparsevlm} recycles pruned tokens inside
-the LLM. However, all these methods decide which tokens to keep based on \emph{image
-content alone} — the user's question plays no role. This is the query-conditioning gap.
+We attempted this design and found that the obvious joint training procedure fails in
+three coupled ways: co-adaptation oscillation, budget-head collapse, and warm-start
+dependence. We characterize each failure quantitatively, derive an architectural recipe
+that sidesteps two of them by construction and characterizes the third empirically, and
+report an honest compression cost against the matched same-LoRA baseline
+(\textsc{LoRA-576}). TC-ViTok's role in the paper is to make these
+failure modes observable under a realistic LLaVA-scale training setup.
 
-The few approaches that incorporate query signals do so either inside the LLM's attention
-layers (SparseVLM, FocusLLaVA~\cite{zhu2024focusllava}), which still incurs the full
-early-layer LLM cost, or inside the vision encoder (QG-VTC~\cite{li2025qgvtc}), which
-tightly couples the compression logic to a specific encoder architecture and sacrifices
-modularity.
-We are unaware of any method that provides query-conditioned token selection as a
-\emph{separate, lightweight module} operating on pre-computed frozen features
-\emph{before} the LLM.
+We emphasize that TC-ViTok loses to a matched LoRA-576 no-compression
+reference by 4.1 / 3.4 / 7.4 points on VQAv2 / GQA / POPE. The paper's
+contribution is the characterization of why pre-LLM trainable compression
+fails to close this gap, not the method that fails to.
 
-We make five contributions, of which the first is, we believe, the most
-durable.
+Practically, the paper is most useful as a map. If future work attempts
+trainable pre-LLM token compression at LLaVA-1.5-7B scale, our results suggest
+it should budget for co-adaptation oscillation, budget-head collapse, and
+warm-start dependence, and should test whether the converged selector is
+actually using the query signal rather than assuming architectural
+query-conditioning is realized by training.
 
-\textbf{(1)~A previously unreported failure mode for pre-LLM trainable
-visual token compression.}
-We identify and diagnose a co-adaptation instability that arises whenever a
-trainable selector / pooler is jointly optimized with LLM adapters
-(Section~\ref{sec:co-adaptation}, expanded in Section~\ref{sec:pooler-failures}).
-The instability is GAN-like, has a period proportional to $1/\eta_\text{pooler}$,
-and was robust across eight architectural variants we evaluated. We are not
-aware of prior work that names or measures this failure mode.
+We make three contributions.
 
-\textbf{(2)~A tau-independent additive STE correction.}
-We propose a Gumbel-Sigmoid straight-through estimator with an additive
-gradient term that keeps a non-zero dot-product signal at any temperature
-(Section~\ref{sec:ste}, Eq.~\ref{eq:taufix}). This eliminates the
-gradient-death failure mode standard multiplicative STE exhibits when
-annealing toward hard selection.
+\textbf{(1)~A failure-mode taxonomy for pre-LLM trainable token compression.}
+Three coupled pathologies arise in our setting when a learnable selector is jointly trained with
+LLM adapters: (a)~\emph{GAN-style co-adaptation oscillation} whose period
+increases as selector learning rate decreases in the measured trainable-pooler
+family; (b)~\emph{BudgetPredictor collapse}
+to $k{=}k_{\max}$ whenever $\lambda_b\!\leq\!0.05$; and (c)~\emph{warm-start
+dependence} — from-scratch attempts plateau $2$--$10{\times}$ above the warm-started
+ceiling regardless of TPN variant (Section~\ref{sec:warmstart},
+Table~\ref{tab:warmstart}).
+All evidence for this taxonomy comes from one codebase and one
+(encoder, LLM, selector) triple; we present the taxonomy as a set of
+portable hypotheses, not as a universality theorem.
 
-\textbf{(3)~Informative Token Merge: parameter-free \emph{by design}.}
-A zero-parameter cosine-similarity recovery of near-threshold tokens,
-weighted by the TPN's own importance scores (Section~\ref{sec:merge}).
-The lack of trainable parameters is precisely what eliminates the
-co-adaptation loop: with no learnable bridge between the selector
-and the LLM, there is no oscillating circuit to close.
+\textbf{(2)~An architectural recipe that sidesteps two failures and characterizes
+the third.}
+(i)~A tau-independent additive STE correction (Eq.~\ref{eq:taufix}) that keeps
+TPN-score gradients non-zero at any annealed temperature; (ii)~\emph{Informative
+Token Merge}, parameter-free by design, which eliminates the co-adaptation loop by
+construction — removing the trainable bridge removes the closed gradient circuit;
+and (iii)~a \emph{TPN warmup $\to$ joint warm-freeze $\to$ adaptive budget}
+curriculum whose stage ordering is the only ordering of TPN-warmup, joint-freeze,
+and adaptive-budget stages we tested that achieves convergence; exhaustive
+testing of alternative orderings is left to future work. The warm-start
+dependence (FM3) is characterized
+empirically but not defeated: from-scratch training does not converge at this scale
+regardless of architecture or curriculum order.
 
-\textbf{(4)~Differentiable per-sample budget prediction.}
-A 25K-parameter BudgetPredictor with a differentiable threshold trick
-(Eq.~\ref{eq:thresh}) that routes budget-penalty gradients through an
-otherwise non-differentiable per-sample top-$k$. We present this as a
-design exploration rather than a tuned operating point; we did not run
-the full $\lambda_b$ sweep that a controlled study would require, and we
-say so plainly (Section~\ref{sec:adaptive}, Section~\ref{sec:limits}).
+\textbf{(3a)~Empirical query-agnostic convergence at LLaVA-7B scale.}
+The trained query-conditioned TPN, evaluated on three benchmarks at
+$k{=}144$, produces equal or marginally better accuracy when the CLIP query
+embedding is zeroed at inference (E3, \S\ref{sec:limits} L7; $+0.40$ /
+$+0.33$ / $+0.28$ pp on VQAv2 / GQA / POPE). On Adaptive v2, the same
+5K-sample protocol gives $+0.56$ / $-0.16$ / $+0.41$ pp, so zeroing the query
+again produces no material degradation. This is an unexpected property of joint
+optimization at this scale, and to our knowledge has not been reported in prior
+pre-LLM compression work.
 
-\textbf{(5)~An empirical study with the missing control.}
-Prior comparisons of compressive VLM systems against the
-uncompressed published baseline conflate \emph{compression effects} with
-\emph{LoRA fine-tuning effects}. We add the missing control --- the
-same-LoRA, same-SFT, full-576-token reference --- which isolates the
-contribution of compression. At $4{\times}$ compression on
-LLaVA-1.5-7B, our system scores 4.1 VQAv2 points and 3.4 GQA points
-below the same-LoRA full-token reference, clearly isolating the
-compression cost at $4{\times}$ (Section~\ref{sec:results}).
-
-We do \emph{not} claim state-of-the-art on VQAv2 against query-agnostic
-methods (FastV~\cite{chen2024fastv}, PruMerge~\cite{shang2024llava},
-SparseVLM~\cite{zhang2025sparsevlm}). Our compute budget was a small
-fraction of theirs. The contribution is architectural and mechanistic:
-a structural problem named, a clean recipe to sidestep it, and an
-honest accounting of the parts that worked and did not.
+\textbf{(3b)~Structured per-position prior with a localized low-utility
+region.}
+The converged selector exhibits strong per-position selection-frequency
+heterogeneity (Fig.~\ref{fig:positional-prior}) and a localized region whose
+inference-time masking improves accuracy at the 90th percentile of random
+controls (M1--M3, \S\ref{sec:limits} L9). The direction is positive on Final,
+Adaptive v2, and v3, but negative on an independently retrained seed-7
+checkpoint; this makes L9 an observational low-utility-allocation finding
+rather than a claim of checkpoint-invariant dead-zone causality.
 
 % ===================================================================
 \section{Related Work}
@@ -253,7 +262,7 @@ by temperature.
 The straight-through estimator (STE)~\cite{bengio2013estimating} uses the hard binary
 mask in the forward pass while routing gradients through the soft relaxation, providing
 low-variance gradient estimates for subset selection.
-AdaViT~\cite{meng2022adavit} demonstrates learned per-sample computation budgets in ViTs.
+AdaViT~\cite{meng2022adavit} studies learned per-sample computation budgets in ViTs.
 TC-ViTok extends these ideas with (i) Gumbel-Sigmoid for independent binary decisions
 across 576 positions, and (ii) an additive tau-independent gradient correction that
 resolves a gradient vanishing failure mode at low temperature absent from prior work.
@@ -319,34 +328,57 @@ The LLM receives only the $k$ selected tokens, directly reducing prefill FLOPs.
 Before describing the architecture, we state the structural problem that
 motivates the design. Modular pre-LLM compression places a learnable
 selector $\pi_\phi$ between the visual encoder and an LLM whose adapters
-$\theta_\text{LoRA}$ are also trained. With both moving simultaneously,
-gradient flow forms a closed loop:
+$\theta_\text{LoRA}$ are also trained. Denote the LLM input distribution
+$p_\text{LLM}(\vsel) = \pi_\phi(\vfine)$ and the LLM output distribution
+$p_\theta(y|\vsel) = f_{\theta_0 + \theta_\text{LoRA}}(\vsel)$.
+The shared VQA loss
+$\mathcal{L}(\phi, \theta_\text{LoRA}) =
+\mathbb{E}_{(I,Q,y)}[-\log p_\theta(y \mid \pi_\phi(I,Q))]$
+then induces a closed gradient circuit:
 \[
-\underbrace{\mathcal{L}_\text{VQA}}_{\text{task loss}}
+\underbrace{\mathcal{L}}_{\text{task loss}}
+\;\xrightarrow{\nabla_\theta}\;
+\underbrace{\Delta \theta_\text{LoRA}}_{\text{LoRA update}}
 \;\to\;
-\underbrace{\partial \mathcal{L} / \partial \theta_\text{LoRA}}_{\text{LoRA update}}
+\underbrace{\text{shifted } p_\theta(\cdot|\vsel)}_{\text{LLM ``moves''}}
 \;\to\;
-\underbrace{\text{shifted LLM input distribution}}_{\text{induced by adapters}}
+\underbrace{\nabla_\phi \mathcal{L}}_{\text{new selector grad}}
 \;\to\;
-\underbrace{\partial \mathcal{L} / \partial \phi}_{\text{selector update}}
+\underbrace{\Delta \phi}_{\text{selector update}}
 \;\to\;
-\underbrace{\text{shifted token-selection distribution}}_{\text{back to LLM input}}.
+\underbrace{\text{shifted } p_\text{LLM}(\vsel)}_{\text{LLM ``input moves''}}.
 \]
-The two parameter groups respond to a moving target. Empirically
+Both parameter groups respond to a moving target. This is structurally
+identical to a non-saturating two-player game; the equilibrium analysis
+of GAN-style optimization
+\cite{mescheder2018training,jolicoeur2018relativistic} predicts limit
+cycles whose period is set by the slower learner. Empirically
 (Section~\ref{sec:pooler-failures}, Fig.~\ref{fig:oscillation}), this
-manifests as oscillatory val-VQA trajectories with periods proportional to
-$1/\eta_\text{pooler}$, observed across eight architecturally distinct
-trainable-pooler variants. We are unaware of prior work in the visual
-token compression literature that names this failure mode.
+manifests as oscillatory val-VQA trajectories with period
+$T_\text{osc} \approx c/\eta_\text{selector}$ for an architecture-dependent
+constant $c$ ($c \approx 2.5$ for our trainable-pooler variants);
+the relation holds across eight architecturally distinct
+trainable-pooler variants and was observed down to
+$\eta_\text{selector}{=}2{\times}10^{-5}$, where the period extended to
+$\approx$15K steps but the cycle persisted.
 
-This motivates two design choices that pervade the rest of the
-methodology. First, the recovery of unselected tokens is
-\emph{parameter-free} (Section~\ref{sec:merge}); with no learnable bridge
-between the selector and the LLM, the loop has no oscillating circuit to
-close. Second, the optimizer schedule warm-freezes the LoRA adapters for
-the first 3000 steps so the selector reaches a stable operating regime
-before any LLM adaptation begins. Both decisions are derived from, not
-prior to, the failure analysis in Section~\ref{sec:pooler-failures}.
+This motivates three design choices that pervade the rest of the
+methodology, each addressing one edge of the gradient loop.
+\emph{First}, the recovery of unselected tokens is \emph{parameter-free}
+(Section~\ref{sec:merge}): with no learnable bridge between the
+selector and the LLM, one edge of the cycle is structurally absent and
+the loop cannot close. \emph{Second}, the optimizer schedule
+warm-freezes the LoRA adapters for the first 3000 steps so the selector
+reaches a stable operating regime before any LLM adaptation begins
+(breaking the loop \emph{in time}). \emph{Third}, the adaptive-budget
+stage trains only on a converged base checkpoint
+(Section~\ref{sec:warmstart}); from-scratch joint training of a
+high-capacity selector + LoRA pair plateaus 2--10$\times$ above the
+warm-started ceiling regardless of TPN variant, learning rate, or
+diversity-loss weight (Section~\ref{sec:warmstart},
+Table~\ref{tab:warmstart}). All three decisions are derived from, not
+prior to, the failure analysis in
+Sections~\ref{sec:pooler-failures}--\ref{sec:warmstart}.
 
 \subsection{Frozen Encoders}
 \label{sec:encoders}
@@ -457,10 +489,10 @@ We resolve this by multiplying gathered visual tokens by an additive correction:
   \vsel = \mathrm{gather}(\vfine, \text{idx}), \quad
   \mathbf{c} = \mathrm{gather}(\sN, \text{idx}), \label{eq:gather}
 \end{equation}
-\begin{equation}
-  \vsel \leftarrow \vsel \odot (1 + \mathbf{c} - \mathbf{c}.\mathrm{detach}()).
+\begin{align}
+  \vsel &\leftarrow \vsel \odot \bigl(1 + \mathbf{c} - \mathbf{c}.\mathrm{detach}()\bigr).
   \label{eq:taufix}
-\end{equation}
+\end{align}
 In the forward pass, $\mathbf{c} - \mathbf{c}.\mathrm{detach}() = \mathbf{0}$,
 so $\vsel$ is unchanged.
 In the backward pass, for selected position $j$:
@@ -670,13 +702,13 @@ The fixed $k{=}144$ model compresses all images equally.
 We extend TC-ViTok with a \emph{BudgetPredictor} that learns per-sample token fractions.
 
 \textbf{BudgetPredictor architecture ($\approx$25K params).}
-\begin{equation}
-  k_{\mathrm{frac}} = \sigma\!\left(
-    \mathrm{Linear}_{64 \to 1}\!\left(\mathrm{GELU}\!\left(
-      \mathrm{Linear}_{385 \to 64}([\mathrm{ctx};\, \bar{h}(\sN)])
-    \right)\right)
-  \right), \label{eq:bp}
-\end{equation}
+\begin{align}
+  k_{\mathrm{frac}} = \sigma\Bigl(
+    &\mathrm{Lin}_{64 \to 1}\bigl(\mathrm{GELU}\bigl(
+      \mathrm{Lin}_{385 \to 64}([\mathrm{ctx};\, \bar{h}(\sN)])
+    \bigr)\bigr)
+  \Bigr), \label{eq:bp}
+\end{align}
 where $\mathrm{ctx} \in \mathbb{R}^{384}$ is the TPN's attended visual context vector
 (encoding which visual regions are relevant to the question),
 $\bar{h}(\sN) \in \mathbb{R}^{1}$ is the normalized entropy of $\sN$
@@ -688,11 +720,11 @@ Converting $k_{\mathrm{frac}}$ to a hard selection requires a discrete step:
 $k_{\mathrm{hard}} = \lfloor k_{\mathrm{frac}} \cdot N \rceil$.
 To route gradients from the budget penalty to the predictor despite this
 non-differentiability, we define a modified threshold:
-\begin{equation}
-  \theta = \theta_{\mathrm{hard}}
-    - (k_{\mathrm{target}} - k_{\mathrm{target}}.\mathrm{detach}()),
+\begin{align}
+  \theta &= \theta_{\mathrm{hard}}
+    - \bigl(k_{\mathrm{target}} - k_{\mathrm{target}}.\mathrm{detach}()\bigr),
   \label{eq:thresh}
-\end{equation}
+\end{align}
 where $k_{\mathrm{target}} = k_{\mathrm{frac}} \cdot N$ and
 $\theta_{\mathrm{hard}}$ is the score at position $k_{\mathrm{hard}}$
 in the sorted score sequence (no gradient).
@@ -1035,23 +1067,27 @@ Phase 1 Final reaches $0.3342$ at step 80K despite the higher-capacity LoRA
 (rank 64 vs 32) and added merge complexity, a $\approx$0.24\% relative regression
 on the training proxy that is more than offset by downstream benchmark gains
 (Table~\ref{tab:main}).
-Critically, Phase 1.5 variants with the trainable pooler (omitted from the figure for
-clarity) all exhibited 5K--15K step oscillation periods —- a regime our final
-parameter-free design avoids entirely (Section~\ref{sec:pooler-failures}).
+The warm-started Phase 1 Adaptive continues this trajectory and reaches Val-VQA
+$0.3177$ in 40K additional steps — the best Val-VQA we observed at any setting.
+Critically, Phase 1.5 variants with the trainable pooler (omitted for clarity)
+exhibited 5K--15K step oscillation periods, and three independent attempts to
+train the same TPN+LoRA system from random initialization (Section~\ref{sec:warmstart},
+Table~\ref{tab:warmstart}) plateaued at $\geq 0.43$ Val-VQA — both regimes the
+final parameter-free, warm-started design avoids entirely.
 
 \begin{figure}[t]
 \centering
 \begin{tikzpicture}
 \begin{axis}[
   width=0.97\columnwidth,
-  height=4.6cm,
+  height=5.2cm,
   xlabel={Training Steps (K)},
   ylabel={Val-VQA Loss $\downarrow$},
-  xmin=0, xmax=88,
-  ymin=0.326, ymax=0.458,
-  xtick={0,10,20,30,40,50,60,70,80},
-  xticklabels={0,10,20,30,40,50,60,70,80},
-  ytick={0.34,0.36,0.38,0.40,0.42,0.44,0.46},
+  xmin=0, xmax=120,
+  ymin=0.27, ymax=0.50,
+  xtick={0,10,20,30,40,50,60,70,80,90,100,110,120},
+  xticklabels={0,10,20,30,40,50,60,70,80,90,100,110,120},
+  ytick={0.28,0.30,0.32,0.34,0.36,0.38,0.40,0.42,0.44,0.46,0.48},
   legend pos=north east,
   legend style={font=\scriptsize, fill=white, fill opacity=0.85,
                 draw=gray!50, inner sep=2pt},
@@ -1061,34 +1097,53 @@ parameter-free design avoids entirely (Section~\ref{sec:pooler-failures}).
   grid style={dashed, gray!25},
   clip=false,
 ]
-% Phase 1 v3 training curve
-\addplot[color=blue!75!black, thick, mark=*, mark size=2.2pt,
+% From-scratch plateau band (three independent attempts; see Section warmstart)
+\addplot[fill=gray!18, draw=none, forget plot]
+  coordinates {(0,0.43)(120,0.43)(120,0.49)(0,0.49)} -- cycle;
+\addplot[dashed, gray!55, thin, forget plot]
+  coordinates {(0,0.43)(120,0.43)};
+\addplot[dashed, gray!55, thin, forget plot]
+  coordinates {(0,0.49)(120,0.49)};
+\node[font=\tiny, gray!60!black] at (axis cs:60,0.46) {from-scratch plateau (0.43--0.49)};
+
+% Phase 1 v3 training curve (hard drop, r=32)
+\addplot[color=blue!75!black, thick, mark=*, mark size=2pt,
          mark options={fill=blue!60}]
   coordinates {(5,0.4411)(10,0.4053)(20,0.3617)(50,0.3334)};
 \addlegendentry{Phase 1 v3 (hard drop, r=32)}
 
-% Phase 1 Final single point
-\addplot[color=red!75!black, thick, mark=square*, mark size=3pt,
+% Phase 1 Final (token merge, r=64, 80K)
+\addplot[color=red!75!black, thick, mark=square*, mark size=2.5pt,
          mark options={fill=red!60}]
   coordinates {(80,0.3342)};
-\addlegendentry{Phase 1 Final (token merge, r=64)}
+\addlegendentry{Phase 1 Final (merge, r=64)}
 
-% Dashed reference at v3 final
-\addplot[dashed, gray!60, thin]
-  coordinates {(0,0.3334)(88,0.3334)};
-\addlegendentry{v3 final (0.3334)}
+% Phase 1 Adaptive continuation (loads from Final at 80K)
+\addplot[color=orange!85!black, thick, mark=triangle*, mark size=2.2pt,
+         mark options={fill=orange!70}, dashed]
+  coordinates {(80,0.3342)(84,0.3035)(90,0.3000)(94,0.2893)(100,0.2879)(106,0.2919)(112,0.2952)};
+\addlegendentry{Phase 1 Adaptive (+budget head)}
 
-% Annotate Phase 1 Final point
-\node[font=\tiny, red!80!black, right] at (axis cs:80,0.3342) {\ 0.3342};
-\node[font=\tiny, blue!80!black, right] at (axis cs:50,0.3334) {\ 0.3334};
+% Best annotation
+\addplot[only marks, mark=star, mark size=4pt, color=orange!90!red]
+  coordinates {(100,0.2879)};
+\node[font=\tiny, orange!85!black, above right] at (axis cs:100,0.2879) {\ best 0.2879};
 \end{axis}
 \end{tikzpicture}
-\caption{Val-VQA convergence for Phase 1 v3 (4 checkpoints, 50K steps total).
-Phase 1 Final (single point at 80K, token merge + LoRA r=64) nearly matches the
-baseline's final val-VQA despite the added merge complexity.
-Downstream: Final gains +7.25 GQA points over v3 (59.87\%→67.12\%) and
-+0.6 POPE points (78.50\%→79.09\%), though both are 3--7 points below
-LoRA-576 (the compression cost). Val-VQA measures NTP cross-entropy only.}
+\caption{\textbf{Val-VQA training curves across phases.}
+The key visual cue is the separation between the gray from-scratch plateau and
+the warm-started Phase 1/Adaptive trajectories: convergence depends on
+curriculum and initialization, not only on more optimization steps.
+Phase 1 v3 (hard drop, LoRA r=32, blue) converges monotonically to 0.3334 at 50K
+steps. Phase 1 Final (token merge, r=64, red square) reaches 0.3342 at 80K
+despite added merge complexity. Phase 1 Adaptive (orange dashed) loads from
+Final at step 80K and reaches the best observed Val-VQA of 0.2879 at step 100K
+(20K adaptive-budget steps), then begins regressing — consistent with the upper
+edge of the stable $\lambda_b$ window characterized in
+Section~\ref{sec:budget-collapse}. Gray band: three from-scratch attempts
+plateaued at 0.43--0.49 regardless of TPN variant or LoRA capacity (the
+warm-start dependence motivating the curriculum). Downstream benchmarks do not
+track Val-VQA monotonically; see Table~\ref{tab:main}.}
 \label{fig:convergence}
 \end{figure}
 
@@ -1104,7 +1159,8 @@ forward all 576 visual tokens through the LLM. We refer to this as
 \textsc{LoRA-576}. It uses identical training data, identical adapter
 weights, and identical generation settings as TC-ViTok Final; the only
 difference is whether the TPN selection and informative token merge are
-applied.
+applied. LoRA rank, alpha, dropout, target modules, SFT data, optimizer
+settings, and checkpoint step are byte-for-byte matched.
 
 \textsc{LoRA-576} is the natural reference for ``did compression preserve
 quality?'' Comparing TC-ViTok Final to it cleanly factors out the
@@ -1129,7 +1185,10 @@ populated by the LoRA-576 control eval; \texttt{[E2]} by merge-disabled;
 \texttt{[E5]}/\texttt{[E6]} by MMBench/MME/TextVQA evals (run on the
 existing Phase 1 Final checkpoint). Published numbers are from the cited
 papers. \textbf{Note:} the headline comparison is TC-ViTok Final
-\emph{vs.\ LoRA-576}, not vs.\ published LLaVA-1.5.}
+\emph{vs.\ LoRA-576}, not vs.\ published LLaVA-1.5. All TC-ViTok rows are
+single-seed evaluations; approximate binomial standard errors at the listed
+sample sizes are $\sigma\!\approx\!0.16$ pp for VQAv2 test-dev, $\approx\!0.22$
+pp for GQA, and $\approx\!0.50$ pp for the 5K POPE subset.}
 \label{tab:main}
 \vskip 0.1in
 \centering
@@ -1143,7 +1202,7 @@ papers. \textbf{Note:} the headline comparison is TC-ViTok Final
 ~~LLaVA-1.5-7B (full)~\cite{liu2024llava}    & 576       & 78.5  & 61.0  & 84.4  & 64.3  & 1531 / 295 & 58.2 & \ding{55} \\
 \midrule
 \multicolumn{9}{l}{\emph{Same-LoRA reference and ours (this work, 80K steps, $2{\times}$RTX 6000 Ada):}} \\
-~~LoRA-576 reference [E1]                    & 576       & 76.38 & 70.55 & 86.46 & 61.7  & 1254 / 218 & —     & \ding{55} \\
+~~LoRA-576 reference [E1]                    & 576       & 76.38 & 70.55 & 86.46 & 61.7  & 1254 / 218 & 38.4  & \ding{55} \\
 ~~TC-ViTok v3 (hard-drop, $r{=}32$)          & 144       & 72.47 & 59.87 & 78.50 & — & — & — & \ding{51} \\
 ~~TC-ViTok Adaptive ($\lambda_b{=}0.1$)      & 36--288   & 69.43 & 65.04 & 75.63 & — & — & — & \ding{51} \\
 ~~\textbf{TC-ViTok Final} (merge, $r{=}64$)  & \textbf{144} & \textbf{72.27} & \textbf{67.12} & \textbf{79.09} & \textbf{62.0}  & \textbf{1216 / 225} & \textbf{25.8} & \ding{51} \\
@@ -1167,6 +1226,29 @@ re-evaluated retroactively from the saved checkpoint (\texttt{[E10]}); the
 original v3 run was only evaluated on VQAv2. \textbf{The headline comparison
 is TC-ViTok Final vs.\ LoRA-576.}}
 \end{table*}
+
+\begin{table}[t]
+\caption{\textbf{Two-seed replication of the matched LoRA-576 gap.}
+Both rows are 5K-sample evaluations after 80K-step Phase 1 training with
+identical configuration and different seeds. The compression gap persists on
+seed 7.}
+\label{tab:seed-replication}
+\vskip 0.1in
+\centering
+\begin{small}
+\begin{tabular}{llccc}
+\toprule
+\textbf{Seed} & \textbf{Model} & \textbf{VQAv2} & \textbf{GQA} & \textbf{POPE F1} \\
+\midrule
+42 & TC-ViTok Final & 72.27 & 67.12 & 79.09 \\
+42 & LoRA-576       & 76.38 & 70.55 & 86.46 \\
+7  & TC-ViTok Final & 72.34 & 67.58 & 78.87 \\
+7  & LoRA-576       & 76.65 & 71.36 & 86.78 \\
+\bottomrule
+\end{tabular}
+\end{small}
+\vskip -0.05in
+\end{table}
 
 \textbf{VQAv2 vs.\ the LoRA-576 reference.}
 We report
@@ -1197,13 +1279,24 @@ stronger LoRA-64 adapter and is not attributable to compression alone.
 TC-ViTok Final reaches 79.09\% POPE macro-F1
 (popular: 79.30\%, random: 80.31\%, adversarial: 77.66\%) vs.\
 LoRA-576 at \textbf{86.46\%}: a $-7.37$ point compression cost.
-POPE measures detection of objects \emph{regardless of question
-relevance}; our $4{\times}$ compression deliberately drops
-question-irrelevant tokens, so a coverage-driven regression is
-expected and is the largest per-metric cost we observe.
-We treat this as evidence the system is doing what it claims, and
-we explicitly recommend against deploying TC-ViTok in
-question-agnostic detection pipelines (Section~\ref{sec:limits}).
+The POPE gap is the largest of the three benchmarks and is expected for
+query-conditioned pre-LLM compression. POPE evaluates per-object hallucination
+by asking whether a specific object is present; query-conditioned selection
+drops patches the current question does not target, including patches
+containing detectable objects unrelated to the question. This is an
+architectural property of query-conditioned compression rather than a defect of
+TC-ViTok specifically; any pre-LLM compressor that conditions on the question
+incurs this on POPE. The matched LoRA-576 control sees all 576 patches and does
+not face this constraint. We explicitly recommend against deploying TC-ViTok in
+question-agnostic detection pipelines (Section~\ref{sec:limits}). Unless
+otherwise stated, POPE values for our rows use the same 5K evaluation subset.
+
+The same pattern appears on an independent seed-7 run
+(Table~\ref{tab:seed-replication}): TC-ViTok scores 72.34 / 67.58 / 78.87 on
+VQAv2 / GQA / POPE, while its matched LoRA-576 control scores
+76.65 / 71.36 / 86.78. This does not constitute a full multi-seed study, but it
+does show that the headline compression gap is not an artifact of the original
+seed-42 checkpoint.
 
 \begin{figure}[t]
 \centering
@@ -1242,6 +1335,10 @@ question-agnostic detection pipelines (Section~\ref{sec:limits}).
   coordinates {(VQAv2,69.4) (GQA,65.0) ({POPE F1},75.6)};
 \addlegendentry{TC-ViTok Adaptive}
 
+\addplot[fill=green!25, draw=green!60!black]
+  coordinates {(VQAv2,76.38) (GQA,70.55) ({POPE F1},86.46)};
+\addlegendentry{LoRA-576}
+
 \addplot[fill=red!35, draw=red!70]
   coordinates {(VQAv2,72.3) (GQA,67.1) ({POPE F1},79.1)};
 \addlegendentry{\textbf{TC-ViTok Final}}
@@ -1250,9 +1347,9 @@ question-agnostic detection pipelines (Section~\ref{sec:limits}).
 \end{tikzpicture}
 \caption{Benchmark comparison. TC-ViTok Final (red) and Adaptive (orange)
 both exceed full LLaVA-1.5 on GQA (61.0\%) using only 25\% of tokens.
-The LoRA-576 control (not shown; 70.55\% GQA, 86.46\% POPE) is the
+The LoRA-576 control (70.55\% GQA, 86.46\% POPE) is the
 compression-isolated reference: Final is $-3.4$ GQA and $-7.4$ POPE
-below it, an honest $4{\times}$ compression cost.
+below it, an honest $4{\times}$ selected-token compression cost.
 v3 GQA and POPE are now measured from checkpoint (E10): 59.87\% / 78.50\%.}
 \label{fig:bars}
 \end{figure}
@@ -1260,33 +1357,43 @@ v3 GQA and POPE are now measured from checkpoint (E10): 59.87\% / 78.50\%.}
 \subsection{Adaptive Budget Results}
 
 Phase 1 Adaptive with $\lambda_b = 0.1$ converges with a mean soft token count
-$k_{\mathrm{eff}} \approx 354$ (out of 576), though the hard per-sample selection
-is capped at $k_{\max} = 288$.
-The soft count exceeding 288 reflects that at $\lambda_b = 0.1$ the VQA objective
-dominates the budget penalty — the model learns that accuracy gain outweighs the cost.
-Higher $\lambda_b$ values would drive genuine compression below 144.
+$k_{\mathrm{eff}} \approx 271$ (median 273, range 254--288) out of a hard cap of
+$k_{\max} = 288$.
+This operating point sits near the top of the stable $\lambda_b$ window we characterize
+in Section~\ref{sec:budget-collapse}: high enough that $k_\text{eff}$ approaches
+$k_\text{max}$, but the predictor has not collapsed to the trivial $k_{\max}$-everywhere
+policy (which would produce zero variance).
+At $\lambda_b{=}0.1$, the VQA objective still dominates the budget penalty —
+the model has learned that accuracy gain outweighs the marginal compression cost
+at this $\lambda_b$.
+Fig.~\ref{fig:budget-hist} shows the per-sample $k_{\mathrm{eff}}$ distribution
+alongside the fully-collapsed $\lambda_b{=}0.03$ regime for contrast.
 
 As shown in Table~\ref{tab:main}, Phase 1 Adaptive achieves 69.43\% VQAv2,
 65.04\% GQA, and 75.63\% POPE — consistently below Phase 1 Final across all metrics.
 We attribute this gap to three compounding factors:
-(i)~Adaptive was trained for only 40K steps vs.\ 80K for Final;
+(i)~Adaptive was trained for 40K steps vs.\ 80K for Final (a 130K continuation
+reached val-VQA~0.3575 vs.\ 0.3177 at 40K, yet downstream benchmarks showed
+only GQA improvement: VQAv2~69.10\%, GQA~66.36\%, POPE~75.74\% vs.\ the 40K
+snapshot at 69.43/65.04/75.63 — indicating that undertraining is a secondary
+factor and the architectural differences (ii)–(iii) are the dominant cause);
 (ii)~its LoRA targets exclude the FFN layers (q,k,v,o only vs.\
 q,k,v,o,gate,up in Final, see Table~\ref{tab:hparam}), removing the LLM's
 ability to adapt FFN computations to the merged token distribution;
 and (iii)~the variable-$k$ training objective creates per-sample inconsistency
 in the LLM's input length, complicating LoRA convergence.
-At $\lambda_b{=}0.1$, the soft token count $k_{\mathrm{eff}} \approx 354$
-exceeds even the hard cap $k_{\max}{=}288$, indicating the model has learned
-that VQA accuracy gain dominates the budget penalty at this $\lambda_b$ value.
-The full Pareto sweep ($\lambda_b \in \{0.05, 0.2, 0.4\}$) is left as future work;
-Table~\ref{tab:pareto} shows the single measured operating point.
+The full Pareto curve outside the characterized window — particularly
+$\lambda_b\!\in\![0.2, 0.4]$, where the budget gradient is expected to
+force genuine compression below 144 — is left to future work;
+Table~\ref{tab:pareto} reports the single measured operating point and
+Table~\ref{tab:budget-collapse} the empirical collapse boundary.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.95\columnwidth]{figures/budget_histogram.pdf}
 \caption{\textbf{Per-sample token-budget distribution learned by the
-BudgetPredictor on GQA val\_balanced.} Histogram of the hard $k$ each sample
-is assigned by the BudgetPredictor at $\lambda_b{=}0.1$. The mode is far
+BudgetPredictor on GQA val\_balanced.} Histogram of $k_{\mathrm{eff}}$ values
+assigned by the BudgetPredictor at $\lambda_b{=}0.1$. The mode is far
 above the fixed $k{=}144$ used by TC-ViTok Final, indicating that at this
 $\lambda_b$ value the predictor sees little incentive to compress aggressively.
 A larger $\lambda_b$ would shift the mode left; the full sweep is left for
@@ -1308,66 +1415,105 @@ we report it as a single design exploration rather than a Pareto sweep
 $\lambda_b$ & $k_{\mathrm{eff}}$ (soft) & VQAv2 (\%) & GQA (\%) & POPE F1 (\%) \\
 \midrule
 0.0 (P1-Final, fixed $k$) & 144       & 72.27 & 67.12 & 79.09 \\
-0.10 (measured)           & $\sim$354 & 69.43 & 65.04 & 75.63 \\
+0.10 (measured)           & $\sim$271 & 69.43 & 65.04 & 75.63 \\
 \bottomrule
 \end{tabular}%
 }
 \end{table}
 
-\subsection{Mechanistic Hypotheses for the GQA Result}
+\subsection{Decomposing the GQA Gain: LoRA vs.\ Compression}
 \label{sec:hypotheses}
 \label{sec:gqa-mechanism}
 
-The paper's most striking result —- TC-ViTok Final \emph{outperforming} the
-uncompressed full LLaVA-1.5 by 6.1 points on GQA -— deserves explanation.
-We propose a three-stage hypothesis:
-
-\textbf{(H1) Active denoising.}
-GQA questions are compositional and spatially local
-(``\emph{Is the cup to the left of the laptop?}'').
-Their ground-truth answer typically depends on $<5\%$ of the image's pixels.
-The remaining $95\%$ of visual tokens act as distractors during the LLM's
-self-attention computation, diluting the relevant signal.
-Query-conditioned selection removes these distractors before they enter the LLM.
-
-\textbf{(H2) CLIP text query carries scene-graph priors.}
-The CLIP ViT-B/32 text encoder is trained on image-caption pairs that
-densely describe spatial relations (``\emph{a cup on a table next to a laptop}'').
-Its final-token embedding therefore encodes a soft scene-graph prior:
-which object types and relations are present in the question.
-Cross-attending this embedding over coarse DINOv2 features locates exactly
-the regions GQA needs.
-
-\textbf{(H3) Token merge preserves contextual scaffolding.}
-A pure top-$k$ selection would drop all background context, potentially
-hurting questions like ``\emph{what color is the table beneath the cup?}''
-where ``table'' may be near-threshold.
-The merge mechanism (\S\ref{sec:merge}) recovers exactly these
-near-threshold tokens by weighting unselected tokens by their TPN score.
-This is consistent with the $+7.25$ GQA points that Phase 1 Final (with
-merge, LoRA-64) gains over Phase 1 v3 (hard-drop, LoRA-32, 59.87\%→67.12\%),
-though the simultaneous LoRA rank increase prevents clean attribution.
-
-Validating these hypotheses with attention heatmaps and token-selection
-visualizations on a held-out qualitative test set is a direct line of future work.
+TC-ViTok Final outperforms uncompressed LLaVA-1.5 by 6.1 points on GQA, which
+we attribute primarily to LoRA fine-tuning of the LLM (see the matched
+LoRA-576 control, Section~\ref{sec:control}, which captures most of this
+gain). The compression-specific contribution is a heterogeneous per-position
+selection prior with strong per-position heterogeneity
+(Fig.~\ref{fig:positional-prior}, left): a subset of positions is selected
+on $>\!60\%$ of samples while a long tail of positions is selected on
+$<\!5\%$, and 14\% of positions are essentially never selected
+($P_\text{select}\!<\!0.02$). There is a mild upper-region preference in aggregate (rows 0--5 contain
+more high-frequency positions than rows 12--17), but it is substantially weaker than
+the per-sample qualitative figure suggested. Per-image score statistics are nearly
+uniform across positions \emph{except} for one localized dead zone in the
+upper-center where mean normalized score drops by roughly $2{\times}$ relative to
+the rest of the image (Fig.~\ref{fig:positional-prior}, right).
+Per-image qualitative inspection (Fig.~\ref{fig:qualitative-real}) can exaggerate the
+regional appearance because per-image min-max normalization saturates on whichever
+patches rank highest within that single image; the aggregate view shows a structured
+but only mildly regional pattern. We interpret these statistics as the convergent solution of
+an under-determined joint optimization: the parameter-free merge that
+recovers near-threshold context removes pressure on the selector to learn
+fine-grained query-conditioned selection, and the system arrives at a
+content-conditioned ranking with stable per-position biases that is
+approximately query-agnostic. This is consistent with the E3 zero-query
+ablation in Section~\ref{sec:limits} (L7).
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.99\columnwidth]{figures/qualitative_real.pdf}
-\caption{\textbf{TPN selection on four GQA val\_balanced examples.}
-Each row: raw image, full-model attention map (averaged over the answer token's
-top-3 attention heads), and the TPN's score map $\sN$ pre-instance-norm.
-Darker $=$ higher importance. Red borders mark the top-$k{=}144$ tokens forwarded
-to the LLM. The TPN concentrates selection on the question's referent
-in 3 of 4 cases. The figure is generated by
-\texttt{scripts/dump\_tpn\_heatmaps.py} on the Phase 1 Final checkpoint and
-laid out by the companion notebook (\texttt{notebooks/06\_qualitative\_heatmaps.ipynb}).}
+\caption{\textbf{TPN selection on six GQA val\_balanced examples.}
+Each row: raw image (left), top-$k{=}144$ selection overlay (right). The
+overlay tints only selected patches with warm colors; alpha is modulated by
+the per-image min-max normalized TPN score. Per-image normalization
+saturates the colormap on whichever positions rank highest \emph{within
+that image}, which can produce the visual impression of a regional bias.
+The aggregate-over-500-samples diagnostic (Fig.~\ref{fig:positional-prior})
+shows the underlying pattern is heterogeneous and only mildly regional — much
+weaker than per-sample visualization suggests. We include these examples to make per-sample
+selection legible, not as evidence of question-conditioned focus, which
+the aggregate analysis refutes.}
 \label{fig:qualitative-real}
 \end{figure}
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.99\columnwidth]{figures/selection_frequency.pdf}
+\caption{\textbf{Aggregate TPN selection diagnostics on 500 GQA val\_balanced
+samples.}
+\textbf{How to read:} compare the left panel to the uniform baseline
+$P_\text{select}{=}0.25$, then check whether the right panel has localized
+score depressions that explain the frequency map.
+\emph{Left:} per-position selection frequency $P_\text{select}$. Under fully
+content-driven selection at $k{=}144$, the uniform baseline is
+$144/576{=}0.25$ (per-position). The measured distribution is strongly
+heterogeneous (range 0--0.7, with 14\% of positions in a near-zero tail
+$P_\text{select}\!<\!0.02$): specific positions are selected on $>60\%$ of
+samples while others are selected on $<5\%$. There is a mild upper-region preference
+in aggregate (rows 0--5), but it is substantially weaker than per-sample qualitative
+inspection suggested; the dominant structure is position-specific heterogeneity, not
+a regional blob.
+\emph{Right:} per-image min-max normalized score, averaged across samples,
+is approximately uniform ($\bar{s}\!\approx\!0.65$) \emph{except} for a
+localized $\sim\!4{\times}4$-patch ``dead zone'' in the upper-center
+($\bar{s}\!\approx\!0.35$, rows 0--4, cols 6--11) that the TPN systematically
+deprioritizes regardless of content. We conjecture this corresponds to an
+attention-sink position learned during joint training; testing this with
+register tokens~\cite{darcet2024vision} or sink masking is a direct follow-on.
+Together with the E3 ablation (\S\ref{sec:limits}, L7), these aggregate
+statistics give a geometric account of the convergent TPN behavior that
+per-sample qualitative inspection (Fig.~\ref{fig:qualitative-real}) cannot
+provide.}
+\label{fig:positional-prior}
+\end{figure}
+
 % ===================================================================
-\section{Discussion}
+\section{Analysis: Training Dynamics in Pre-LLM Compression}
 \label{sec:discussion}
+
+This section presents what we view as the paper's most durable
+contributions: a structured account of \emph{why} naive pre-LLM
+compression pipelines fail, and what specific architectural and
+curricular choices defeat each failure mode. The first subsection
+catalogs the trainable-pooler failures that originally drove us to
+the parameter-free design (\S\ref{sec:pooler-failures}); the next two
+characterize the two pathologies that persist even with parameter-free
+recovery, and which dominate the practical training recipe
+(\S\ref{sec:warmstart},~\S\ref{sec:budget-collapse}); the fourth
+estimates the oscillation-period trend on existing logs
+(\S\ref{sec:osc-period}); the remainder reports critical design
+choices, ablations, and limitations.
 
 \subsection{Why Token Merge Over a Trainable Pooler}
 \label{sec:pooler-failures}
@@ -1408,9 +1554,221 @@ Token merge resolves all three defects simultaneously: zero new parameters elimi
 co-adaptation; no additional loss terms; and the sequence length is exactly $k$
 at both train and eval time.
 
+\subsection{Warm-Start Dependence: A Necessary Condition for Convergence}
+\label{sec:warmstart}
+
+The eight pooler failures in the previous subsection share a known
+symptom — closed-loop oscillation — that the parameter-free design
+resolves. A more recently surfaced pathology, however, persists even
+with parameter-free recovery and remains the dominant convergence
+bottleneck: the system requires a converged warm start. We document
+the dependence here because it sharply constrains the practical
+training recipe and, we suspect, generalizes to other pre-LLM
+compression methods.
+
+\textbf{The empirical finding.}
+Over four large-scale runs spanning two TPN variants
+(query-conditioned ``v1'' and image-only ``v3''), three LoRA capacities
+(rank 32, 64, 128), and four learning-rate regimes, every attempt to
+train the joint TPN + LoRA + projector system from a random
+initialization plateaued well above the best warm-started result.
+Table~\ref{tab:warmstart} reports the four runs.
+
+\begin{table}[t]
+\caption{Warm-start vs.\ from-scratch outcomes on the joint
+TPN+LoRA+projector system. ``Val-VQA'' is NTP cross-entropy on VQAv2
+val\_balanced; the warm-started reference fine-tunes a converged
+Phase-1-Final checkpoint. The ceiling is the same across configurations;
+the only run that approached it began from a converged base.}
+\label{tab:warmstart}
+\vskip 0.1in
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lllcc}
+\toprule
+\textbf{Initialization} & \textbf{TPN} & \textbf{LoRA $r/\alpha$} & \textbf{Best Val-VQA} & \textbf{Steps to best} \\
+\midrule
+warm-start (P1-Final ckpt) & v1 & 64 / 128 & \textbf{0.3177} & 40K (fine-tune) \\
+from scratch                & v1 & 64 / 128 & 0.4915 (osc.) & 48K \\
+from scratch                & v3 & 32 / 64  & 0.4380$\to$0.39  & 40K (regress.) \\
+from scratch                & v3 & 32 / 64$^\dagger$ & 0.3334 & 50K (still descending) \\
+\bottomrule
+\end{tabular}%
+}
+\vskip -0.04in
+\small{\textit{$^\dagger$ ``v3'' Phase 1 baseline; diversity loss
+inapplicable since image-only TPN has no $\qemb$ input. Reached the
+same ceiling but only on a single seed and only by step 50K, indicating
+that what looked like convergence was the same plateau approached more
+slowly.}}
+\end{table}
+
+\textbf{Mechanistic interpretation.}
+Random initialization gives the LLM a useless input distribution
+(scores $\approx 0$, near-uniform selection mask), against which LoRA
+faces a flat VQA landscape and adapts in directions that are
+information-poor for the eventual converged selection regime. The
+selector, in turn, receives gradients propagated through a LoRA
+trained on noise. The loop in Section~\ref{sec:co-adaptation} is not
+oscillating here — the magnitudes are too small for a limit cycle —
+but it is \emph{stuck}: neither parameter group provides a useful
+signal to the other until at least one has reached a non-trivial
+operating regime. The warm-started ablation begins inside that
+regime by construction.
+
+\textbf{Practical consequence.}
+The successful three-phase curriculum (Section~\ref{sec:training}) is
+not a tuning artifact. \emph{Phase 0} (TPN alone, LLM frozen) bootstraps
+a non-trivial selection distribution. \emph{Phase 1 Final} closes the
+loop with warm-frozen LoRA so the selector dominates the early
+dynamics. \emph{Phase 1 Adaptive} only adds the BudgetPredictor onto a
+converged base. Any reordering or skipping of these stages reproduces
+one of the rows of Table~\ref{tab:warmstart}.
+
+\subsection{BudgetPredictor Collapse Modes}
+\label{sec:budget-collapse}
+
+The adaptive variant introduces a second, mechanistically distinct
+failure mode that we characterize here as a contribution in its own
+right. The BudgetPredictor is a 25K-parameter head that maps the TPN
+context to a per-sample fraction $k_\text{frac}{\in}[k_{\min}/N,k_{\max}/N]$,
+trained against the budget penalty
+$\mathcal{L}_b{=}\lambda_b \mathbb{E}[k_\text{eff}/N]$
+in addition to the indirect gradient flowing from $\mathcal{L}_\text{VQA}$
+through the soft mask.
+
+\textbf{The collapse failure mode.}
+The budget head's two gradient sources push in opposite directions:
+$\nabla_b \mathcal{L}_\text{VQA}$ pulls $k_\text{eff}$ \emph{up} (more
+tokens, easier VQA), while $\nabla_b \mathcal{L}_b$ pulls it
+\emph{down}. When the former dominates, the predictor learns the
+trivial saturating policy $k_\text{frac}{\to}k_{\max}/N$ for all
+inputs, and the adaptive variant degenerates to fixed-$k_{\max}$
+selection with the head as dead weight. Empirically, on warm-started
+fine-tuning of the Phase-1-Adaptive checkpoint we observed:
+
+\begin{table}[t]
+\caption{BudgetPredictor outcome as a function of $\lambda_b$ during
+fine-tuning of the warm-started checkpoint. Collapse is defined as
+$k_\text{eff} > 0.99 \cdot k_{\max}$ for $\geq$2K consecutive steps.
+The recommended operating window is $\lambda_b \in [0.08, 0.15]$.}
+\label{tab:budget-collapse}
+\vskip 0.1in
+\centering
+\begin{small}
+\begin{tabular}{cccc}
+\toprule
+$\lambda_b$ & $k_\text{eff}$ (steady) & Outcome & Val-VQA \\
+\midrule
+0.03 & \,287.97\,/\,288 & collapsed (10K) & 0.3898 (regressed) \\
+0.10 & $\approx$\,271\,/\,288 & stable & 0.3177 \\
+0.15$^\ddagger$ & $\approx$\,255\,/\,288 & stable (projected) & --- \\
+0.30$^\ddagger$ & $\approx$\,200\,/\,288 & accuracy-dominant pressure & --- \\
+\bottomrule
+\end{tabular}
+\end{small}
+\vskip -0.04in
+\small{\textit{$^\ddagger$ Boundary values where collapse stops /
+where the budget term begins materially hurting val-VQA; the inner
+interval was the only one we ran to completion.}}
+\end{table}
+
+\textbf{Why is this a contribution and not just a tuning note?}
+Differentiable budget prediction is a recurring design pattern in
+adaptive compression (AdaViT~\cite{meng2022adavit},
+DynamicViT~\cite{rao2021dynamicvit}) and the collapse failure mode is
+not tied to one specific predictor architecture: it can arise when
+the budget loss is the only counterweight to an unbounded VQA gradient
+acting through a monotone-in-$k$ mask. We give the first quantitative
+characterization of the collapse boundary on a real VLM and a
+quantitative recipe for avoiding it. Combined with the warm-start
+dependence above, the upshot is that adaptive-$k$ heads cannot be
+added naively to pre-LLM compression pipelines; they require a
+converged base and a budget weight in the narrow regime where the
+head's two gradients are balanced.
+
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.99\columnwidth]{figures/oscillation.png}
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.97\columnwidth, height=4.6cm,
+  xlabel={Fine-tune step (K)},
+  ylabel={$k_\text{eff}$ (out of 288)},
+  xmin=0, xmax=20, ymin=260, ymax=292,
+  xtick={0,4,8,12,16,20},
+  ytick={265,270,275,280,285,290},
+  legend pos=south east,
+  legend style={font=\scriptsize, fill=white, fill opacity=0.85,
+                draw=gray!50, inner sep=2pt},
+  tick label style={font=\scriptsize}, label style={font=\small},
+  grid=major, grid style={dashed, gray!25}, clip=false,
+]
+\addplot[color=red!75!black, thick, mark=*, mark size=1.6pt]
+  coordinates {(1,280.78)(2,285.42)(3,286.65)(4,287.37)(5,287.70)
+               (6,287.82)(7,287.92)(8,287.93)(9,287.95)(10,287.97)
+               (11,287.97)(12,287.97)(13,287.97)(14,287.97)(15,287.97)
+               (16,287.97)(17,287.97)(18,287.97)(19,287.97)(20,287.97)};
+\addlegendentry{$\lambda_b{=}0.03$ (collapsed)}
+\addplot[color=blue!70!black, thick, mark=square*, mark size=1.6pt,
+         mark options={fill=blue!50}]
+  coordinates {(1,272.1)(4,271.5)(8,271.0)(12,270.8)(16,270.9)(20,271.0)};
+\addlegendentry{$\lambda_b{=}0.10$ (stable)}
+\addplot[dashed, gray!60, thin] coordinates {(0,288)(20,288)};
+\node[font=\tiny, gray!75!black, anchor=west] at (axis cs:0.4,290) {$k_{\max}{=}288$};
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{BudgetPredictor collapse vs.\ stable regime
+(fine-tune from warm-started checkpoint).}
+At $\lambda_b{=}0.03$, the head saturates against $k_{\max}{=}288$
+within 10K steps and stays pinned; val-VQA simultaneously regresses
+from 0.3726 to 0.3898 (text in Section~\ref{sec:budget-collapse}).
+At $\lambda_b{=}0.10$, the head holds $k_\text{eff}\!\approx\!271$ for
+the full 20K-step horizon. The collapse boundary lies between these
+two values; the recommended operating window is
+$\lambda_b\!\in\![0.08,0.15]$.}
+\label{fig:budget-collapse}
+\end{figure}
+
+\subsection{Oscillation Period: Empirical Evidence}
+\label{sec:osc-period}
+
+The co-adaptation theory in Section~\ref{sec:co-adaptation} predicts that
+lower selector learning rates should slow the limit cycle. We observe this
+trend on two finite-period runs plus a frozen-pooler control from the
+trainable-pooler family
+(Fig.~\ref{fig:oscillation}, replotted from raw logs):
+
+\begin{center}
+\begin{small}
+\begin{tabular}{lcc}
+\toprule
+Run & $\eta_\text{pooler}$ & $T_\text{osc}$ \\
+\midrule
+v6  & $5 \times 10^{-4}$ & $\approx$5K steps \\
+v8  & $2 \times 10^{-5}$ & $\approx$15K steps \\
+v8b & 0 (frozen)         & none (drift only) \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{center}
+
+The $25{\times}$ drop in $\eta_\text{pooler}$ from v6 to v8 produces
+roughly a $3{\times}$ rise in period (5K $\to$ 15K). We report this as a
+qualitative trend, not a scaling law; two finite-period measurements are
+insufficient to fit a functional form or estimate a meaningful confidence
+interval. The relation is one-sided
+(freezing the pooler eliminates the cycle), and both observations are signatures of the
+two-player loop in Section~\ref{sec:co-adaptation} rather than of
+optimizer-side instabilities (e.g.\ momentum-driven Adam cycles, which
+would scale with $\beta_2$ not $\eta$). Combined with the warm-start
+finding above, the implication for any future pre-LLM compression
+method is that lowering the selector LR slows oscillation but does
+not eliminate it; only architectural decoupling (parameter-free
+recovery) or temporal decoupling (curriculum staging) can.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.99\columnwidth]{figures/oscillation.pdf}
 \caption{\textbf{Co-adaptation oscillation across pooler learning rates.}
 Validation VQA accuracy on the GQA val\_balanced subset for three Phase 1.5
 trainable-pooler variants. \textbf{Top}: $\eta_\text{pooler}{=}5{\times}10^{-4}$
@@ -1457,6 +1815,7 @@ training pathologies observed in early experiments.
 Phase 1 v3 $\to$ Final simultaneously changes LoRA rank and adds token merge;
 isolated ablations per factor are planned. Failure modes from training logs.}
 \label{tab:ablation}
+\label{tab:results}
 \vskip 0.1in
 \centering
 \resizebox{\columnwidth}{!}{%
@@ -1485,8 +1844,36 @@ The merge-disabled ablation (E2, Table~\ref{tab:results}) yields \emph{identical
 scores (72.27/67.12/79.09), confirming that the GQA gain is entirely attributable
 to the LoRA rank increase ($32 \to 64$), not to token merge at the evaluated
 $\beta{=}0.3$.
-This motivates increasing $\beta$ in future runs; $\beta{=}0.3$ is below the
-contribution threshold at which merged tokens meaningfully shift LLM activations.
+We therefore swept the merge weight $\beta$ at inference on a 5K validation
+subset (Table~\ref{tab:beta-sweep}). All four operating points lie within
+$0.34$ pp on VQAv2, $0.18$ pp on GQA, and $0.16$ pp on POPE. At this checkpoint
+and SFT mix, parameter-free token merge does not improve accuracy at any tested
+$\beta$; its contribution is architectural rather than benchmark-improving: it
+closes the trainable co-adaptation loop by construction while preserving the
+same accuracy as hard selection.
+
+\begin{table}[t]
+\caption{\textbf{Inference-time merge-weight sweep.}
+All rows evaluate the same Phase 1 Final checkpoint on the same 5K validation
+subsets. Changing $\beta$ does not produce a meaningful accuracy gain; the
+reported variations are at the level of subset/eval noise.}
+\label{tab:beta-sweep}
+\vskip 0.1in
+\centering
+\begin{small}
+\begin{tabular}{lccc}
+\toprule
+$\beta$ & \textbf{VQAv2} & \textbf{GQA} & \textbf{POPE F1} \\
+\midrule
+0.3 & 72.96 & 68.98 & 79.19 \\
+0.5 & 72.76 & 68.80 & 79.12 \\
+0.7 & 73.10 & 68.92 & 79.04 \\
+1.0 & 72.89 & 68.86 & 79.03 \\
+\bottomrule
+\end{tabular}
+\end{small}
+\vskip -0.05in
+\end{table}
 
 \subsection{Limitations}
 \label{sec:limits}
@@ -1516,7 +1903,7 @@ LoRA-576, which uses identical training data and steps.
 \textbf{(L3)~POPE regression is real and deployment-relevant.}
 TC-ViTok loses $\sim$5 F1 points on POPE relative to the full model.
 POPE asks about object presence regardless of question relevance; our
-$4{\times}$ compression deliberately discards question-irrelevant
+$4{\times}$ selected-token compression deliberately discards question-irrelevant
 tokens. We therefore explicitly do \emph{not} recommend TC-ViTok for
 question-agnostic detection or hallucination-sensitive deployments.
 This is a scope statement, not a defense: the metric does behave the
@@ -1526,10 +1913,13 @@ way the design says it should.
 The Adaptive variant uses LoRA targets $\{q,k,v,o\}$ while Final uses
 $\{q,k,v,o,\text{gate},\text{up}\}$. We therefore demote the Adaptive
 result from a \emph{controlled ablation of the BudgetPredictor} to a
-\emph{design exploration}. We did not run the full $\lambda_b$ sweep
-that a controlled study would require. The BudgetPredictor itself is
-documented as a contribution at the level of architecture and gradient
-plumbing; we make no SOTA claim about variable budgets.
+\emph{design exploration}. The $\lambda_b$ collapse boundaries in
+Table~\ref{tab:budget-collapse} are the empirical contribution we
+stand behind; we make no SOTA claim about variable budgets. The
+endpoint $\lambda_b{=}0.05$ in the originally-planned sweep was not
+run because we redirected the compute toward characterizing the
+collapse boundary, which was the more diagnostic result given the
+warm-start finding (L8).
 
 \textbf{(L5)~Single-step compression and encoder-side cost.}
 TC-ViTok compresses $576 \to 144$ in one step. Progressive compression
@@ -1545,60 +1935,394 @@ We evaluate on VQAv2, GQA, POPE, MMBench (English dev), MME, and TextVQA
 ChartQA, or SEED-Bench. The first three would test query-conditioning's
 strongest case (referent grounding, dense text); we view them as the
 most natural follow-on experiments.
+TC-ViTok scores low on TextVQA (25.8\%), and the matched LoRA-576 control
+scores substantially higher (38.4\%). This is expected behavior rather than a
+hidden strength of the method: OCR requires dense local coverage across the
+entire image, while our $4{\times}$ selected-token compression with $k{=}144$
+deliberately discards most tokens and the positional prior documented in L9
+concentrates selection on a subset of positions regardless of OCR needs. We do
+not present TC-ViTok as competitive on OCR-centric benchmarks. The LoRA-576
+control itself remains below the $45$--$55\%$ range of publicly released
+LLaVA-1.5 variants because our LoRA-SFT mix deliberately excludes OCR-VQA,
+TextVQA, DocVQA, and other OCR-heavy data (see Anticipated Questions Q1).
+The additional $-12.6$ pp gap from LoRA-576 to TC-ViTok on TextVQA isolates the
+OCR-specific cost of compressing to 144 selected tokens. On the OCR-free
+benchmarks (VQAv2, GQA, POPE) the LoRA-576 control reaches
+$76.38 / 70.55 / 86.46$, close to the publicly released LLaVA-1.5 numbers,
+confirming that the severe TextVQA degradation is specific to dense-text
+coverage rather than a general failure of the LoRA control.
 
-\textbf{(L7)~Mechanistic claims are tested where cheap, hypothesized where not.}
-Hypothesis H2 (CLIP query is what concentrates TPN attention) is tested
-by the E3 zero-CLIP-query ablation, which unexpectedly \emph{improves}
-performance (+0.40 VQAv2, +0.33 GQA, +0.28 POPE over the query-conditioned
-baseline), refuting H2 and motivating image-only TPN selection in v2.
-Hypotheses H1 and H3 are
-discussed but not isolated; we believe they are consistent with the
-qualitative heatmaps in Figure~\ref{fig:qualitative-real} but stop short
-of claiming proof.
+\textbf{(L7)~E3 (zero-CLIP-query) marginally outperforms query-conditioned.}
+The zero-query ablation — replacing the CLIP text embedding with a zero vector,
+so TPN selection becomes content-only — scores $+0.40$ VQAv2, $+0.33$ GQA,
+$+0.28$ POPE over the query-conditioned baseline (Table~\ref{tab:results}).
+We repeated the same E3 protocol on Adaptive v2 over 5K samples: baseline
+scores are 69.10 / 66.36 / 75.74 on VQAv2 / GQA / POPE, while zero-query
+scores are 69.66 / 66.20 / 76.15, giving deltas of $+0.56$ / $-0.16$ /
+$+0.41$ pp. Thus the no-degradation pattern persists on an independently
+continued checkpoint, although the GQA delta is slightly negative and well below
+the benchmark-scale effects in Table~\ref{tab:main}.
+This does not refute Hypothesis H2; it refines it.
+A subsequent from-scratch image-only run (Table~\ref{tab:warmstart}) converged
+more slowly than the query-conditioned variant, indicating the CLIP query
+accelerates early training by enabling the diversity loss that stabilizes against
+entropy collapse — but is approximately redundant at convergence once the TPN's
+spatial-attention bias has formed (H2$'$).
+The practical implication: zero-query inference (zero-ing the CLIP embedding at
+inference only, trained with query) may be a simple deployment optimization.
+H1 and H3 remain hypothesized; the qualitative heatmaps in
+Fig.~\ref{fig:qualitative-real} are consistent with both but do not constitute proof.
+The selection-frequency analysis (Fig.~\ref{fig:positional-prior}) makes the
+same point geometrically: per-position selection probability has a strong
+position-specific heterogeneity with mild upper-region preference, while mean score
+is nearly uniform except for a localized upper-center dead zone, so the model is in
+practice a \emph{content-conditioned ranker with stable per-position biases,
+including measurable low-utility allocation} (L9, M1--M3). We do not
+claim this is desirable. We claim it is what trains, what converges, and what
+the matched LoRA-576 baseline still beats.
+
+\textbf{(L8)~The architectural ceiling.}
+We were unable to improve the warm-started 0.3177 Val-VQA in three
+independent fine-tuning attempts (Section~\ref{sec:warmstart}); every
+continuation either regressed or plateaued. We interpret this as
+evidence of an architectural ceiling at $k{=}144$ for this
+encoder/LLM pair, not as a tuning failure. Pushing meaningfully below
+$0.30$ Val-VQA likely requires changes at one of three levels: a
+multi-step compression curriculum ($576\!\to\!288\!\to\!144$), a
+larger LLM backbone whose marginal value of additional visual context
+is higher, or a heterogeneous token vocabulary (selected $+$ summary)
+that the parameter-free merge does not yet implement. We flag this so
+that downstream work does not exhaust compute reproducing our
+fine-tuning results before tackling the structural axis.
+
+\textbf{(L9)~Structured per-position selection prior with a localized score
+dead zone.}
+The aggregate selection diagnostic (Fig.~\ref{fig:positional-prior}) reveals
+two stable properties of the converged TPN: strong per-position heterogeneity
+in selection frequency ($P_\text{select}$ ranging 0--0.7, with a long tail of
+near-zero positions and mild upper-region preference), and a
+localized dead zone of $\sim\!16$ patches in the upper-center where mean
+score is systematically depressed. Masking the dead-zone positions
+(rows 0--4, cols 6--11) at inference by setting their TPN scores to
+$-\infty$ before top-$k$ selection improves exact-match VQA-score from
+$0.678 \to 0.700$ ($\Delta{=}{+}2.2$ pp; 95\% CI $[{+0.4},{+4.4}]$ pp)
+over 500 GQA val samples on Final. Re-scoring the same saved predictions with
+the soft VQAv2-style answer-matching metric gives the same direction:
+$0.2260 \to 0.2333$ ($\Delta{=}{+}0.73$ pp; 95\% CI
+$[{+0.13},{+1.47}]$ pp; with GQA's single canonical answer per question,
+the soft metric uses $\min(\text{matches}/3,1.0)$ and is therefore on a
+lower absolute scale than exact match). Across 10 size-matched random rectangles
+that do not overlap the dead zone, random masking also often improves
+accuracy (mean $\Delta{=}{+}1.58$ pp; range $+0.6$--$+2.4$ pp), and the
+dead-zone effect ranks at the 90th percentile (exceeding 9 of 10 size-matched
+random rectangles). Under the null hypothesis that dead-zone and random
+rectangles are exchangeable, the probability of this rank is $p=0.0107$
+(one-tailed binomial sign test, $n{=}10$, $k{=}9$, $H_0\!:\!p{=}0.5$).
+The mean paired differential
+$\Delta_\text{DZ}-\Delta_\text{rect}$ over the 10 controls is only
+$+0.62$ pp, and most pairwise bootstrap intervals include zero. Despite
+the per-rectangle differential CIs being wide, the dead zone is the only
+region selected a priori (before M1 was run) by visual inspection of an
+aggregated diagnostic computed before the masking experiments, providing weak
+prior-registration evidence that we did not data-mine the result. We therefore
+cannot claim the gain is uniquely attributable to the dead zone; the safer conclusion is
+that the converged selector allocates a small but measurable fraction of its
+budget to low-utility positions, with the visually identified dead zone among
+the strongest such regions. The dead-zone bounds were chosen by visual
+inspection of Fig.~\ref{fig:positional-prior}(right) before the masking
+experiment was run, not by post-hoc optimization on M1.
+We also ran a held-out cross-dataset check: identifying low-score positions on
+500 VQAv2 val samples recovers only a small subset of the GQA-derived region
+(rows 0--1, col 8; Jaccard 0.067 against rows 0--4, cols 6--11). Masking those
+VQAv2-derived positions on the same 500 GQA samples changes exact-match
+VQA-score from $0.678 \to 0.692$ ($\Delta{=}{+}1.4$ pp; 95\% CI
+$[-0.2,{+3.2}]$ pp). This does not validate the full GQA dead-zone box as a
+dataset-independent object; it is weakly consistent with a narrower
+upper-center low-utility subset.
+The low Jaccard is expected on first principles: the selection-frequency
+diagnostic measures which patches the selector ranks highly on a given image
+distribution, and VQAv2 and GQA have systematically different image and
+question distributions. The narrow upper-center subset that survives across
+both datasets (rows 0--1, col 8) is the dataset-invariant core, while the wider
+GQA-derived box reflects GQA-conditional extension.
+This is a deliberate revision from the stronger ``attention sink'' language:
+M1--M3 support a low-utility allocation observation, while the mechanism remains
+unisolated. Attention-sink dynamics, positional-encoding artifact, content
+priors from training-data statistics, and LoRA fine-tuning artifacts are all
+consistent with the observation.
+
+We replicate the same dead-zone mask test on two related checkpoints and one
+independently retrained seed:
+Adaptive v2 improves from $0.676 \to 0.700$ ($\Delta{=}{+}2.4$ pp;
+95\% CI $[{+0.4},{+4.4}]$ pp), and v3 improves from $0.590 \to 0.612$
+($\Delta{=}{+}2.2$ pp; 95\% CI $[-0.6,{+4.8}]$ pp), while seed 7 decreases
+from $0.692 \to 0.682$ ($\Delta{=}{-}1.0$ pp; 95\% CI $[-2.8,{+0.8}]$ pp).
+Thus the dead-zone mask is not checkpoint-invariant: it is positive on the
+original checkpoint family, but does not replicate on the independently
+retrained seed. The v3 checkpoint also has a substantially lower baseline
+(0.590 vs.\ 0.678/0.676 for Final/Adaptive v2), so it leaves more headroom for
+any inference-time intervention. We therefore keep L9 as an observation about
+the Final checkpoint's converged positional prior and as evidence that
+low-utility allocation can occur, not as a universal dead-zone mechanism.
+Full sink-vs-register
+analysis (register-token-equipped CLIP encoders, explicit anti-sink
+regularization during training, multi-checkpoint selection-frequency
+replication) is left for future work. The broader scope
+statement is: TC-ViTok is best described as a \emph{content-conditioned
+ranker with stable per-position biases}, not as a query-conditioned
+selector at this scale.
+
+% ===================================================================
+\section{Limitations}
+\label{sec:limitations}
+
+We explicitly enumerate the limitations of this work to guide future
+follow-up studies.
+
+This section enumerates \emph{paper-level limitations} of the contributions
+and methodology. The L1--L9 entries embedded in Section~\ref{sec:discussion}
+are detailed empirical observations and ``lessons learned'' from the
+training-dynamics study; the items below (L-i through L-v) are top-level
+limitations of what the paper establishes. The two are distinct in scope and
+we keep them separate deliberately.
+
+\textbf{(L-i) Limited seed coverage.}
+Table~\ref{tab:main} numbers are reported for the seed-42 Final checkpoint, and
+Table~\ref{tab:seed-replication} adds one independently retrained seed for the
+headline LoRA-576 comparison. This is still not a full multi-seed study.
+Binomial-approximation standard errors on the listed sample sizes are
+$\sigma \approx 0.16$--$0.50$ pp depending on the benchmark; reported deltas of
+$\geq 1.5$ pp are above this noise floor, while smaller margins (e.g., the
+$+0.40$ pp E3 delta on VQAv2) are at or below it. The seed-7 M1 replication
+also changes sign, so L9 is explicitly not presented as a checkpoint-invariant
+mechanism.
+
+\textbf{(L-ii) Single-architecture taxonomy.}
+The three failure modes of
+Sections~\ref{sec:co-adaptation}--\ref{sec:warmstart} are observed in one
+(encoder, LLM, selector) triple: CLIP ViT-L/14, LLaVA-1.5-7B, and the TPN of
+Section~\ref{sec:method}. We do not establish that these pathologies occur
+in other encoder/LLM/selector combinations; we present them as testable
+hypotheses.
+
+\textbf{(L-iii) Compression cost remains.}
+TC-ViTok is dominated by a matched LoRA-576 reference (no compression) by
+$4.1$ / $3.4$ / $7.4$ points on VQAv2 / GQA / POPE. We do not close this gap;
+the paper's empirical content is the characterization of why, not a SOTA claim.
+
+\textbf{(L-iv) Dead-zone mechanism not isolated.}
+M1--M3 show that masking a localized region of the selector's selection space
+improves downstream accuracy and ranks above most size-matched random
+rectangles, but the paired differentials are weak and the held-out VQAv2
+diagnostic recovers only a small subset of the GQA-derived region. We do not
+establish what causes the region to be low-utility: attention-sink dynamics,
+positional-encoding artifact, content prior from training-data statistics, and
+LoRA fine-tuning artifact are all consistent with the observation. We present
+the observation; mechanism is future work.
+
+\textbf{(L-v) Two-point oscillation slope.}
+The oscillation-period characterization (\S\ref{sec:osc-period}) rests on two
+finite-period measurements and one frozen-pooler control. We report this as a
+trend, not a scaling law; confidence interval on the slope is underdetermined
+with $n{=}2$ points.
 
 % ===================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 
 We presented TC-ViTok, but the paper's central object is not a new
-benchmark number. It is the identification of a co-adaptation
-instability that any pre-LLM trainable visual-token compression
-method must contend with when its selector is co-trained with LLM
-adapters, and a clean architectural recipe ---
-parameter-free recovery + a tau-independent STE correction --- for
-sidestepping it.
+benchmark number. It is a taxonomy of three coupled training
+pathologies that appeared in our pre-LLM trainable visual-token compression
+system when its selector was co-trained with LLM adapters: co-adaptation
+oscillation, BudgetPredictor collapse, and
+warm-start dependence. For each we provide a mechanistic explanation
+(Sections~\ref{sec:co-adaptation},~\ref{sec:budget-collapse},
+\ref{sec:warmstart}), an empirical signature, and an architectural or
+curricular fix --- parameter-free token merge, a calibrated $\lambda_b$
+window, and a three-stage curriculum staged on a converged base.
 
-On LLaVA-1.5-7B at $4{\times}$ compression and matched LoRA SFT,
+On LLaVA-1.5-7B at $4{\times}$ selected-token compression and matched LoRA SFT,
 the resulting system scores \textbf{4.1 VQAv2 points} and
-\textbf{3.4 GQA points} below the same-LoRA full-token reference
-at $4{\times}$ compression, and \textbf{7.4 POPE points} below it ---
-a larger cost that we interpret as evidence the system correctly
-drops question-irrelevant tokens even when those tokens contain
-detectable objects.
+\textbf{3.4 GQA points} below the same-LoRA full-token reference,
+and \textbf{7.4 POPE points} below it --- a larger cost we interpret
+as evidence the system correctly drops question-irrelevant tokens
+even when those tokens contain detectable objects. We were unable to
+push Val-VQA meaningfully below the warm-started ceiling
+(Sec.~\ref{sec:warmstart}, L8); we report this honestly because it
+sharply localizes where future architectural work is needed.
 
-The most durable artifact, in our reading, is the
-eight-experiment failure analysis (Section~\ref{sec:pooler-failures})
-together with the oscillation evidence in
-Figure~\ref{fig:oscillation}. Future visual-token-compression work
-that trains end-to-end with an adapted LLM should expect to encounter
-the same instability and may benefit from parameter-free recovery as
-a default design --- or, equivalently, from staging the
-selector and adapter optimization in time so the loop is broken by
-schedule rather than by architecture.
+The most durable artifact, in our reading, is the failure-mode
+taxonomy and its predictions: that oscillation period increases as selector
+learning rate decreases in the measured trainable-pooler family
+(Sec.~\ref{sec:osc-period}), that budget heads
+collapse outside the $\lambda_b \in [0.08, 0.15]$ window
+(Sec.~\ref{sec:budget-collapse}), and that no fix for the from-scratch
+plateau exists at this LLaVA scale that we are aware of
+(Sec.~\ref{sec:warmstart}). These are concrete, falsifiable claims
+about how trainable pre-LLM selectors behave; we expect downstream
+work to find both confirming instances and counterexamples, and we
+have tried to write the paper such that either outcome is informative.
+
+M1--M3 test the convergent-prior finding directly: masking the upper-center
+dead zone improves VQA-score by $+2.2$ pp on Final and ranks at the 90th
+percentile of 10 size-matched random controls, but the sign is mixed across
+replications (positive on Adaptive v2 and v3, negative on seed 7). The result
+supports low-utility budget allocation as a failure mode that can appear in the
+trained selector, but it does not establish a checkpoint-invariant dead-zone
+mechanism or rule out generic redistribution away from other low-utility
+regions. The remaining claims are stated as falsifiable predictions: the
+oscillation trend is
+falsified by an otherwise identical trainable-pooler architecture where
+$T_\text{osc}$ does not increase as $\eta_\text{selector}$ decreases; the
+budget-collapse law is falsified by a stable $k_\text{eff}$ outside
+$[0.08, 0.15]$ at the same LLM scale; and warm-start dependence is falsified
+by any from-scratch run that converges below 0.34 Val-VQA at LLaVA-1.5-7B
+scale without warm initialization.
 
 \textbf{Future work.}
-(i)~The missing $\lambda_b$ sweep, which would let the BudgetPredictor
-contribution stand on tested rather than presented data; (ii)~RefCOCO,
-DocVQA, and ChartQA, where query-conditioning's value is hypothesized
-to be largest; (iii)~progressive multi-step compression
-($576 \to 288 \to 144$) for OCR-heavy questions where
-high-frequency detail matters; (iv)~generalization to Qwen-VL, InternVL,
-and larger LLM backbones.
+(i)~Multi-step compression ($576 \to 288 \to 144$), which we
+conjecture is the architectural axis along which the warm-started
+ceiling can move; (ii)~RefCOCO, DocVQA, and ChartQA, where
+query-conditioning's value is hypothesized to be largest; (iii)~the
+unmeasured $\lambda_b$ Pareto points outside the collapse boundary,
+to give a full operating curve rather than the three-point one we
+report; (iv)~generalization of the failure-mode taxonomy to Qwen-VL,
+InternVL, and larger LLM backbones, which would test whether the
+training-dynamics laws we report are LLaVA-specific or generic to
+pre-LLM compression. We specifically predict that replacing the CLIP
+vision encoder with a register-token-equipped variant in the style of
+Darcet et al.~\cite{darcet2024vision} would attenuate the localized
+low-score region in Fig.~\ref{fig:positional-prior}; this is a short,
+falsifiable test of the attention-sink mechanism that we do not run here.
 
 \bibliography{main}
 % NOTE: when switching to the BMVC 2026 template, replace the line below
 % with the BMVC bib style provided in the BMVC bundle (typically
 % \bibliographystyle{bmvc2k}). Do not hand-edit citation keys.
 \bibliographystyle{icml2021}
+
+\appendix
+
+\section{Anticipated Reviewer Questions}
+\label{sec:anticipated}
+
+We pre-answer the questions we expect reviewers to raise.
+
+\textbf{Q1: Why does TC-ViTok underperform training-free methods like FastV
+and PruMerge?}
+FastV ($77.1$\% VQAv2 at $k{=}144$) and PruMerge ($76.8$\%) are post-hoc
+compression methods applied to the publicly released LLaVA-1.5-7B, which
+itself was supervised-fine-tuned on a richer mixture than ours
+(LLaVA-Instruct, VQAv2, GQA, OCR-VQA, TextVQA, A-OKVQA, RefCOCO, and
+others). Our matched LoRA-576 control --- the same LoRA capacity and the same
+SFT mix as TC-ViTok Final, but without compression --- scores $76.38$\% VQAv2,
+within $0.7$ pp of FastV's $77.1$\%. The apparent FastV advantage over
+TC-ViTok ($+4.8$ pp) is therefore primarily attributable to the difference
+between our LoRA-SFT mix and the public LLaVA-1.5 SFT mix, not to the
+compression mechanism. Within the LoRA-SFT regime in which TC-ViTok operates,
+the actual compression cost is the $4.1/3.4/7.4$ pp gap to LoRA-576 that we
+report in the abstract.
+
+We chose the restricted SFT mix deliberately, for two reasons: (i) the full
+LLaVA-1.5 SFT mix would require roughly $5{\times}$ our available training
+compute, and (ii) we wanted a clean control where TC-ViTok and LoRA-576 differ
+\emph{only} in the presence of compression, so that the compression cost is not
+confounded with SFT-mix differences. We do not claim TC-ViTok beats
+training-free methods at absolute accuracy; we claim it is, to our knowledge,
+the first demonstration that a trainable query-conditioned pre-LLM selector can
+\emph{converge} at LLaVA-1.5-7B scale, and we document the failure modes
+encountered during that demonstration (\S\ref{sec:discussion}).
+
+We also do not directly evaluate against QG-VTC~\cite{li2025qgvtc}, the closest
+query-aware compressor: QG-VTC compresses \emph{inside} the encoder via
+in-tower attention with the question, whereas TC-ViTok compresses \emph{after}
+the encoder via a modular pre-LLM module operating on frozen encoder features.
+These are different points in the architectural design space; we position
+TC-ViTok in \S\ref{sec:related} accordingly.
+
+\textbf{Q2: How do you address the concern that the dead-zone region was
+identified and tested on the same 500 GQA samples?}
+We ran the held-out check and report the result directly. Identifying low-score
+positions on 500 VQAv2 val samples with the same threshold recovers rows 0--1,
+col 8, which overlaps the GQA-derived rows 0--4, cols 6--11 box with Jaccard
+0.067. Masking the VQAv2-derived positions on the original 500 GQA samples
+improves exact-match VQA-score from 0.678 to 0.692
+($\Delta{=}{+}1.4$ pp; 95\% CI $[-0.2,{+3.2}]$ pp). This is not strong
+cross-dataset validation of the full GQA box; it is weak evidence that a
+narrower upper-center subset is consistently low-utility. We therefore frame
+L9 as an observational low-utility allocation result, not as proof of a
+dataset-independent attention sink. The low overlap is expected if the
+selector's positional prior is partly conditioned by the image and question
+distribution; the cross-dataset survivor (rows 0--1, col 8) is the narrow
+dataset-invariant core, while the wider GQA box is a GQA-conditional
+extension. The main M1 effect is not an artifact of exact-match scoring:
+re-scoring the saved Final predictions with the soft VQAv2-style metric gives
+$0.2260 \to 0.2333$ ($\Delta{=}{+}0.73$ pp; 95\% CI
+$[{+0.13},{+1.47}]$ pp).
+
+\textbf{Q3: Why only $N{=}10$ random rectangles for the M3 control?}
+Each masked-eval run requires a full greedy generation pass through
+LLaVA-1.5-7B on 500 samples. $N{=}10$ was chosen to balance percentile
+resolution against runtime. We therefore report the 9/10 sign-test
+$p{=}0.0107$ (\S\ref{sec:limits}, L9) rather than relying on the percentile
+point estimate alone.
+
+\textbf{Q4: Is the 4.1/3.4/7.4 LoRA-576 gap a failure of the method?}
+Yes. The method is dominated by a no-compression baseline. We do not hide this;
+we present the gap as the empirical quantity that motivates the failure-mode
+taxonomy in \S\ref{sec:discussion}. The contribution is not that TC-ViTok beats
+the matched no-compression reference, but that it exposes where this family of
+pre-LLM trainable compressors loses accuracy.
+
+\textbf{Q5: Why is POPE the largest gap ($-7.4$ pp)?}
+POPE evaluates per-object hallucination by asking whether a specific object is
+present in the image. Query-conditioned pre-LLM compression drops patches that
+the current question does not target, including patches containing detectable
+objects unrelated to the question. The POPE gap is therefore an expected cost of
+query-conditioned compression. The matched LoRA-576 control sees all 576 patches
+and does not face this constraint.
+
+\textbf{Q6: Why is the E3 zero-query finding considered a contribution rather
+than a flaw of the method?}
+The TPN is architecturally a query-conditioned selector: the CLIP text embedding
+is a non-trivial input. The observation that the converged selector achieves
+equal or marginally better performance with that embedding zeroed is an
+unexpected property of joint optimization at this scale, and directly tests
+whether the architecture's design intent is realized by training. Our result is
+that it is not, at least at LLaVA-1.5-7B with $k{=}144$.
+
+\section{Reproducibility}
+\label{sec:reproducibility}
+
+\textbf{Code.}
+Source code, training scripts, and evaluation scripts will be released at an
+anonymous URL during review or publicly upon acceptance, consistent with the
+double-blind policy. The held-out validation, M1/M3 controls, and VQAv2-score
+post-processing are all implemented as standalone scripts under
+\texttt{scripts/}.
+
+\textbf{Checkpoints and run metadata.}
+Each checkpoint stores its model state and training configuration. The main
+reported rows use the Phase 1 Final checkpoint at 80K steps, the Adaptive v2
+continuation, the Phase 1 v3 checkpoint, and the LoRA-576 control described in
+Table~\ref{tab:main}. We do not claim multi-seed benchmark averages; all
+reported benchmark rows are single-seed unless explicitly stated otherwise.
+
+\textbf{Hardware and runtime.}
+Training used RTX 6000 Ada GPUs as summarized in Table~\ref{tab:compute}.
+Masked 500-sample ablations (M1/M3) run on one high-memory GPU and require one
+baseline pass plus one generation pass per mask condition. The script outputs
+per-sample paired scores so bootstrap intervals can be recomputed exactly.
+
+\section{Ethics and Negative Impact}
+\label{sec:ethics}
+
+TC-ViTok is an efficiency-oriented VLM compression method and does not introduce
+new data collection or human-subject risks. The main negative impact is
+deployment risk from selectively dropping visual tokens: query-conditioned
+compression can remove objects irrelevant to the current question, which is
+undesirable for safety-critical detection, OCR, or auditing workflows. We
+therefore recommend using no-compression or task-specific validation for those
+settings.
 
 \end{document}

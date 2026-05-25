@@ -44,6 +44,7 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import argparse
 import json
+import random
 import re
 import time
 from pathlib import Path
@@ -94,6 +95,83 @@ class RandomDropModel(TCViTokModel):
             torch.randperm(N, device=v_full.device)[:self.k]
             for _ in range(B)
         ])
+        return gather_tokens(v_full, idx), None
+
+
+class UniformGridModel(TCViTokModel):
+    """Baseline: deterministic uniform-grid selection at fixed k.
+
+    Selects evenly spaced positions from the CLIP-L/14 24x24 patch sequence,
+    bypassing the learned TPN. This preserves broad spatial coverage while
+    keeping all downstream components identical to the evaluated checkpoint.
+    """
+
+    def _select_tokens(self, images_coarse, images_full, questions):
+        if self.adaptive_budget:
+            raise NotImplementedError(
+                "UniformGridModel does not support adaptive budget; "
+                "use --baseline none for adaptive eval."
+        )
+        v_full = self.full_encoder(images_full)
+        B, N, _ = v_full.shape
+        if self.k > N:
+            raise ValueError(f"UniformGridModel expects k <= N; got N={N}, k={self.k}")
+        if N % self.k == 0:
+            stride = N // self.k
+            idx = torch.arange(0, N, stride, device=v_full.device)[: self.k]
+        else:
+            idx = torch.linspace(0, N - 1, steps=self.k, device=v_full.device).round().long()
+        idx = idx.unsqueeze(0).expand(B, -1).contiguous()
+        return gather_tokens(v_full, idx), None
+
+
+class CLSAttentionModel(TCViTokModel):
+    """Baseline: CLIP last-layer CLS-to-patch attention top-k selection.
+
+    Uses the frozen CLIP ViT-L/14 vision encoder's final-layer attention from
+    the CLS token to patch tokens as a query-agnostic importance prior.
+    Computes attention weights manually because SDPA attention may not return
+    them even when output_attentions=True.
+    """
+
+    def _select_tokens(self, images_coarse, images_full, questions):
+        if self.adaptive_budget:
+            raise NotImplementedError(
+                "CLSAttentionModel does not support adaptive budget; "
+                "use --baseline none for adaptive eval."
+            )
+        clip_vision = self.full_encoder.clip.vision_model
+        with torch.no_grad():
+            outputs = clip_vision(
+                pixel_values=images_full,
+                output_hidden_states=True,
+                return_dict=True,
+            )
+        v_full = outputs.last_hidden_state[:, 1:, :].contiguous()
+        assert v_full.shape[1] == 576, (
+            f"CLSAttentionModel expects 576 patch tokens, got {v_full.shape[1]}"
+        )
+        if outputs.hidden_states is None or len(outputs.hidden_states) < 2:
+            raise RuntimeError("CLIP vision model did not return hidden states.")
+
+        last_block = clip_vision.encoder.layers[-1]
+        hidden = last_block.layer_norm1(outputs.hidden_states[-2])
+        attn = last_block.self_attn
+        q = attn.q_proj(hidden)
+        k = attn.k_proj(hidden)
+        B, S, D = q.shape
+        num_heads = int(attn.num_heads)
+        head_dim = D // num_heads
+        scale = float(getattr(attn, "scale", head_dim ** -0.5))
+        q = q.view(B, S, num_heads, head_dim).transpose(1, 2) * scale
+        k = k.view(B, S, num_heads, head_dim).transpose(1, 2)
+        last_attn = torch.matmul(q, k.transpose(-2, -1)).softmax(dim=-1)
+        cls_to_patches = last_attn[:, :, 0, 1:].mean(dim=1)
+        assert cls_to_patches.shape == (v_full.shape[0], v_full.shape[1]), (
+            f"Unexpected CLS attention shape {tuple(cls_to_patches.shape)} "
+            f"for visual tokens {tuple(v_full.shape)}"
+        )
+        idx = cls_to_patches.topk(self.k, dim=-1).indices
         return gather_tokens(v_full, idx), None
 
 
@@ -203,7 +281,8 @@ def load_model(
     k_min: int = 36,
     k_max: int = 288,
     zero_query: bool = False,
-    tpn_version: str = "v1",
+    tpn_version: str = "auto",
+    auto_adaptive_budget: bool = True,
 ) -> TCViTokModel:
     """Load TCViTokModel from Phase 1 checkpoint.
 
@@ -211,7 +290,30 @@ def load_model(
     lora_*, multi_modal_projector.*). The 7B LLaVA backbone is re-loaded
     from HF cache (offline) and trainable weights are overlaid via strict=False.
     """
-    # Wiring config matching Phase 1 training. Defaults are v1 (cross-attention TPN).
+    print(f"[load_model] Pre-loading checkpoint to detect config: {checkpoint_path}")
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state_dict = ckpt.get("model_state_dict", ckpt)
+
+    if tpn_version == "auto":
+        v3_markers = (
+            "tpn.proj_in.",
+            "tpn.attn.",
+            "tpn.score_head.",
+            "tpn.norm_attn.",
+        )
+        tpn_version = "v3" if any(
+            key.startswith(v3_markers) for key in state_dict
+        ) else "v1"
+        print(f"[load_model] Auto-detected TPN version: {tpn_version}")
+
+    has_budget_predictor = any(
+        key.startswith("budget_predictor.") for key in state_dict
+    )
+    if auto_adaptive_budget and baseline == "none" and has_budget_predictor and not adaptive_budget:
+        adaptive_budget = True
+        print("[load_model] Auto-enabled adaptive_budget from checkpoint keys")
+
+    # Wiring config matching Phase 1 training. v1 is cross-attention TPN.
     # For v3 (image-only scorer), we pass a slimmer config (no d_coarse/d_text/M).
     if tpn_version == "v3":
         tpn_config = {
@@ -241,15 +343,14 @@ def load_model(
     model_cls = {
         "none": TCViTokModel,
         "random_drop": RandomDropModel,
+        "uniform_grid": UniformGridModel,
+        "cls_attention": CLSAttentionModel,
         "image_only": ImageOnlyTPNModel,
         "full_576": Full576Model,
         "merge_disabled": MergeDisabledModel,
     }[baseline]
 
-    # Auto-detect LoRA rank/alpha/targets from checkpoint before building model
-    print(f"[load_model] Pre-loading checkpoint to detect LoRA config: {checkpoint_path}")
-    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    state_dict = ckpt.get("model_state_dict", ckpt)
+    # Auto-detect LoRA rank/alpha/targets from checkpoint before building model.
     for key, val in state_dict.items():
         if "lora_A" in key and "q_proj" in key:
             lora_config["rank"] = val.shape[0]
@@ -271,7 +372,10 @@ def load_model(
 
     # Merge config: 0 disables merge entirely (used by merge_disabled / full_576).
     # For the Final model checkpoint, the training config used beta=0.3, tau=0.1.
-    effective_merge_beta = 0.0 if baseline in ("merge_disabled", "full_576") else merge_beta
+    hard_drop_baselines = (
+        "merge_disabled", "full_576", "random_drop", "uniform_grid", "cls_attention"
+    )
+    effective_merge_beta = 0.0 if baseline in hard_drop_baselines else merge_beta
 
     model = model_cls(
         k=k,
@@ -839,14 +943,20 @@ def parse_args():
     )
     parser.add_argument(
         "--baseline", default="none",
-        choices=["none", "random_drop", "image_only", "full_576", "merge_disabled"],
+        choices=[
+            "none", "random_drop", "uniform_grid", "cls_attention",
+            "image_only", "full_576", "merge_disabled",
+        ],
         help=(
             "Baseline variant. 'none' = full TC-ViTok. "
             "'full_576' = same LoRA + mm_proj as TC-ViTok but pass all 576 tokens "
             "(critical missing control: isolates compression vs LoRA effect). "
             "'merge_disabled' = Final TPN selection but beta=0 at eval "
             "(true single-variable merge ablation). "
-            "'image_only' = TPN with zeroed CLIP query (Hypothesis H2 test)."
+            "'image_only' = TPN with zeroed CLIP query (Hypothesis H2 test). "
+            "'random_drop' = uniform random token selection at k. "
+            "'uniform_grid' = deterministic every-N/k-th token selection. "
+            "'cls_attention' = CLIP last-layer CLS-to-patch attention top-k."
         ),
     )
     parser.add_argument("--k", type=int, default=144, help="Token budget")
@@ -862,6 +972,16 @@ def parse_args():
         "--adaptive-budget", action="store_true",
         help="Use BudgetPredictor for per-sample variable k (Adaptive variant).",
     )
+    parser.add_argument(
+        "--no-auto-adaptive-budget",
+        action="store_false",
+        dest="auto_adaptive_budget",
+        help=(
+            "Do not auto-enable BudgetPredictor just because checkpoint keys are "
+            "present. Use this for fixed-k sweeps on adaptive checkpoints."
+        ),
+    )
+    parser.set_defaults(auto_adaptive_budget=True)
     parser.add_argument("--k-min", type=int, default=36)
     parser.add_argument("--k-max", type=int, default=288)
     parser.add_argument(
@@ -869,8 +989,9 @@ def parse_args():
         help="Zero out CLIP text embedding before TPN (v1 with zero_query=True).",
     )
     parser.add_argument(
-        "--tpn-version", default="v1", choices=["v1", "v3"],
-        help="TPN architecture. 'v1' = cross-attention TPN (DINOv2+CLIP-text). "
+        "--tpn-version", default="auto", choices=["auto", "v1", "v3"],
+        help="TPN architecture. 'auto' detects from checkpoint keys. "
+             "'v1' = cross-attention TPN (DINOv2+CLIP-text). "
              "'v3' = image-only TokenScorerV3 (per-token MLP + self-attn on CLIP).",
     )
     parser.add_argument(
@@ -880,6 +1001,10 @@ def parse_args():
             "Each seed re-runs the full benchmark; results are averaged and stddev "
             "is reported. Default 1 = no variance estimate. Recommended: 3-5."
         ),
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="Base random seed. Controls random_drop token sampling.",
     )
     parser.add_argument("--data-root", default=None,
                         help="Dataset root (default: $DATA_ROOT env var)")
@@ -929,6 +1054,9 @@ def main():
     print(f"  Baseline   : {args.baseline}")
     print(f"  Benchmarks : {args.benchmarks}")
     print(f"  k          : {args.k}")
+    print(f"  Zero query : {args.zero_query}")
+    print(f"  TPN version: {args.tpn_version}")
+    print(f"  Seed       : {args.seed}")
     print(f"  Device     : {device}")
     print(f"  Batch size : {args.batch_size}")
     print(f"  Data root  : {data_root}")
@@ -949,12 +1077,22 @@ def main():
         k_max=args.k_max,
         zero_query=args.zero_query,
         tpn_version=args.tpn_version,
+        auto_adaptive_budget=args.auto_adaptive_budget,
     )
+    if args.zero_query and model.tpn_version == "v3":
+        print(
+            "[warning] --zero-query is a no-op for tpn-version=v3 because "
+            "TokenScorerV3 has no CLIP text-query input."
+        )
 
     results = {
         "checkpoint": args.checkpoint,
         "baseline": args.baseline,
         "k": args.k,
+        "zero_query": bool(args.zero_query),
+        "tpn_version": model.tpn_version,
+        "max_samples": args.max_samples,
+        "seed": int(args.seed),
         "merge_beta": float(model.merge_beta),
         "merge_tau": float(model.merge_tau),
         "adaptive_budget": bool(model.adaptive_budget),
@@ -969,9 +1107,10 @@ def main():
     # any sampling in generate(); LLaVA greedy decoding is deterministic so
     # variance comes from any tie-breaking + non-deterministic GPU kernels.
     # We collect per-seed metrics and report mean ± stddev.
-    seeds = list(range(args.n_eval_seeds))
+    seeds = [args.seed + i for i in range(args.n_eval_seeds)]
     per_seed_metrics: list[dict] = []
     for seed in seeds:
+        random.seed(seed)
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
