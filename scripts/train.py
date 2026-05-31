@@ -408,6 +408,7 @@ def main():
     k_max = config_dict.get("model", {}).get("k_max", 288)
     zero_query = config_dict.get("model", {}).get("zero_query", False)
     tpn_version = config_dict.get("model", {}).get("tpn_version", "v1")
+    ste_correction = config_dict.get("model", {}).get("ste_correction", True)
 
     model = TCViTokModel(
         k=k,
@@ -422,6 +423,7 @@ def main():
         k_max=k_max,
         zero_query=zero_query,
         tpn_version=tpn_version,
+        ste_correction=ste_correction,
     )
 
     # Log param count on ALL ranks for DDP debugging

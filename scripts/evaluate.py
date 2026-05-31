@@ -283,6 +283,7 @@ def load_model(
     zero_query: bool = False,
     tpn_version: str = "auto",
     auto_adaptive_budget: bool = True,
+    llava_attn_implementation: str | None = None,
 ) -> TCViTokModel:
     """Load TCViTokModel from Phase 1 checkpoint.
 
@@ -391,6 +392,7 @@ def load_model(
         k_max=k_max,
         zero_query=zero_query,
         tpn_version=tpn_version,
+        llava_attn_implementation=llava_attn_implementation,
     )
 
     print(f"[load_model] Backbone loaded in {time.time()-t0:.1f}s")
@@ -929,6 +931,196 @@ def _summarize_seeds(per_seed: list[dict]) -> dict:
     return summary
 
 
+@torch.no_grad()
+def _clip_cls_attention_scores(model: TCViTokModel, images_full: torch.Tensor) -> torch.Tensor:
+    """Return final-layer CLIP CLS-to-patch attention, shape [B, 576]."""
+    clip_vision = model.full_encoder.clip.vision_model
+    outputs = clip_vision(
+        pixel_values=images_full,
+        output_hidden_states=True,
+        return_dict=True,
+    )
+    if outputs.hidden_states is None or len(outputs.hidden_states) < 2:
+        raise RuntimeError("CLIP vision model did not return hidden states.")
+
+    last_block = clip_vision.encoder.layers[-1]
+    hidden = last_block.layer_norm1(outputs.hidden_states[-2])
+    attn = last_block.self_attn
+    q = attn.q_proj(hidden)
+    k = attn.k_proj(hidden)
+    batch, seq_len, dim = q.shape
+    num_heads = int(attn.num_heads)
+    head_dim = dim // num_heads
+    scale = float(getattr(attn, "scale", head_dim ** -0.5))
+    q = q.view(batch, seq_len, num_heads, head_dim).transpose(1, 2) * scale
+    k = k.view(batch, seq_len, num_heads, head_dim).transpose(1, 2)
+    weights = torch.matmul(q, k.transpose(-2, -1)).softmax(dim=-1)
+    scores = weights[:, :, 0, 1:].mean(dim=1)
+    if scores.shape[1] != 576:
+        raise RuntimeError(f"Expected 576 CLIP patch scores, got {tuple(scores.shape)}")
+    return scores
+
+
+def _forced_rows_to_indices(
+    forced_rows: torch.Tensor,
+    k: int,
+    device: torch.device | str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert forced selection rows into [B,k] indices plus [B,576] scores."""
+    rows = forced_rows.to(device)
+    if rows.ndim != 2:
+        raise ValueError(f"Forced selection tensor must be 2D, got {tuple(rows.shape)}")
+
+    if rows.shape[1] == 576:
+        scores = rows.float()
+        idx = scores.topk(k, dim=-1).indices
+        return idx.long(), scores
+
+    idx = rows.long()
+    if idx.shape[1] < k:
+        raise ValueError(f"Forced index tensor has only {idx.shape[1]} columns; need k={k}")
+    idx = idx[:, :k]
+    scores = torch.zeros(idx.shape[0], 576, device=device, dtype=torch.float32)
+    scores.scatter_(1, idx.clamp(0, 575), 1.0)
+    return idx, scores
+
+
+def install_diagnostic_selection_io(model: TCViTokModel, args, device: str) -> dict | None:
+    """Attach evaluation-time selection save/load diagnostics to a model."""
+    paths = [
+        args.force_selection_from,
+        args.save_scores_to,
+        args.save_selection_to,
+        args.save_attentions_from_clip,
+    ]
+    if not any(paths):
+        return None
+
+    if args.baseline != "none" and (
+        args.save_scores_to or args.save_selection_to or args.save_attentions_from_clip
+    ):
+        print(
+            "[warning] diagnostic score/selection saving is designed for "
+            "--baseline none; forced selection still works for downstream evaluation."
+        )
+
+    forced = None
+    if args.force_selection_from:
+        forced = torch.load(args.force_selection_from, map_location="cpu")
+        if not torch.is_tensor(forced):
+            raise ValueError("--force-selection-from must point to a tensor .pt file")
+
+    state = {
+        "offset": 0,
+        "forced": forced,
+        "scores": [],
+        "selection": [],
+        "clip_attn": [],
+        "save_scores_to": args.save_scores_to,
+        "save_selection_to": args.save_selection_to,
+        "save_attentions_from_clip": args.save_attentions_from_clip,
+    }
+    original_select = model._select_tokens
+
+    @torch.no_grad()
+    def diagnostic_select(images_coarse, images_full, questions):
+        batch = images_full.shape[0]
+        start = state["offset"]
+        end = start + batch
+        state["offset"] = end
+
+        if state["forced"] is not None:
+            if end > state["forced"].shape[0]:
+                raise RuntimeError(
+                    f"Forced selection has {state['forced'].shape[0]} rows, "
+                    f"but evaluation requested rows through {end}."
+                )
+            v_full = model.full_encoder(images_full)
+            idx, s_N = _forced_rows_to_indices(
+                state["forced"][start:end], model.k, v_full.device
+            )
+            if model.adaptive_budget:
+                v_selected = model._gather_adaptive(v_full, idx, s_N)
+                k_per_sample = (idx >= 0).sum(dim=1)
+                output = (v_selected, k_per_sample)
+            elif model.merge_beta > 0:
+                output = (
+                    informative_token_merge(
+                        v_fine=v_full,
+                        idx=idx,
+                        s_N=s_N,
+                        beta=model.merge_beta,
+                        tau_merge=model.merge_tau,
+                    ),
+                    None,
+                )
+            else:
+                output = (gather_tokens(v_full, idx), None)
+        elif hasattr(model, "_compute_tpn_selection"):
+            v_full, idx, s_N, _ = model._compute_tpn_selection(
+                images_coarse=images_coarse,
+                images_full=images_full,
+                questions=questions,
+            )
+            if model.adaptive_budget:
+                v_selected = model._gather_adaptive(v_full, idx, s_N)
+                k_per_sample = (idx >= 0).sum(dim=1)
+                output = (v_selected, k_per_sample)
+            elif model.merge_beta > 0:
+                output = (
+                    informative_token_merge(
+                        v_fine=v_full,
+                        idx=idx,
+                        s_N=s_N,
+                        beta=model.merge_beta,
+                        tau_merge=model.merge_tau,
+                    ),
+                    None,
+                )
+            else:
+                output = (gather_tokens(v_full, idx), None)
+        else:
+            output = original_select(images_coarse, images_full, questions)
+            idx = None
+            s_N = None
+
+        if args.save_scores_to and s_N is not None:
+            state["scores"].append(s_N.detach().cpu())
+        if args.save_selection_to and idx is not None:
+            state["selection"].append(idx.detach().cpu())
+        if args.save_attentions_from_clip:
+            state["clip_attn"].append(
+                _clip_cls_attention_scores(model, images_full).detach().cpu()
+            )
+        return output
+
+    model._select_tokens = diagnostic_select
+    return state
+
+
+def save_diagnostic_selection_io(state: dict | None) -> None:
+    """Persist tensors accumulated by install_diagnostic_selection_io."""
+    if state is None:
+        return
+    outputs = [
+        ("save_scores_to", "scores", "scores"),
+        ("save_selection_to", "selection", "selection"),
+        ("save_attentions_from_clip", "clip_attn", "CLIP attentions"),
+    ]
+    for path_key, data_key, label in outputs:
+        path = state.get(path_key)
+        chunks = state.get(data_key) or []
+        if not path:
+            continue
+        if not chunks:
+            raise RuntimeError(f"No {label} were captured; refusing to write {path}")
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tensor = torch.cat(chunks, dim=0)
+        torch.save(tensor, out)
+        print(f"Saved {label} to {out} with shape={tuple(tensor.shape)}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
@@ -989,6 +1181,33 @@ def parse_args():
         help="Zero out CLIP text embedding before TPN (v1 with zero_query=True).",
     )
     parser.add_argument(
+        "--force-query-zero", action="store_true",
+        help="Alias for --zero-query used by diagnostic scripts.",
+    )
+    parser.add_argument(
+        "--force-selection-from", default=None,
+        help=(
+            "Path to .pt tensor with forced selections. Supports [N,k] long "
+            "indices or [N,576] float/bool masks/scores. Batches consume rows "
+            "in evaluation order."
+        ),
+    )
+    parser.add_argument(
+        "--save-scores-to", default=None,
+        help="Save per-image TPN score tensors [N,576] to this .pt file.",
+    )
+    parser.add_argument(
+        "--save-selection-to", default=None,
+        help="Save per-image selected top-k indices [N,k] to this .pt file.",
+    )
+    parser.add_argument(
+        "--save-attentions-from-clip", default=None,
+        help=(
+            "Save per-image CLIP final-layer CLS-to-patch attention [N,576] "
+            "to this .pt file."
+        ),
+    )
+    parser.add_argument(
         "--tpn-version", default="auto", choices=["auto", "v1", "v3"],
         help="TPN architecture. 'auto' detects from checkpoint keys. "
              "'v1' = cross-attention TPN (DINOv2+CLIP-text). "
@@ -1032,6 +1251,8 @@ def detect_device():
 
 def main():
     args = parse_args()
+    if args.force_query_zero:
+        args.zero_query = True
 
     # Resolve data_root
     data_root = args.data_root or os.environ.get("DATA_ROOT")
@@ -1084,6 +1305,8 @@ def main():
             "[warning] --zero-query is a no-op for tpn-version=v3 because "
             "TokenScorerV3 has no CLIP text-query input."
         )
+
+    diag = install_diagnostic_selection_io(model, args, device)
 
     results = {
         "checkpoint": args.checkpoint,
@@ -1223,6 +1446,7 @@ def main():
         for bench, stats in results["per_seed"].items():
             print(f"    {bench:10s}: {stats['mean']:.2f} ± {stats['stddev']:.2f}  (n={stats['n_seeds']})")
 
+    save_diagnostic_selection_io(diag)
     print("=" * 60)
 
 

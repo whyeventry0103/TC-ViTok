@@ -107,6 +107,7 @@ class TCViTokTrainer:
         # Steps 0-pooler_warmup: only pooler + LoRA + projector update.
         # Steps pooler_warmup+: everything updates normally.
         self.pooler_warmup_steps = config["training"].get("pooler_warmup_steps", 0)
+        self.log_grad_norms = config["training"].get("log_grad_norms", False)
 
         # Logging
         self.log_interval = config["logging"]["log_interval"]
@@ -366,6 +367,9 @@ class TCViTokTrainer:
         loss = loss_dict["total"] / self.grad_accum_steps
         loss.backward()
 
+        if self.log_grad_norms and self.is_main and (self.global_step + 1) % self.log_interval == 0:
+            loss_dict.update(self._collect_grad_norms(raw_model))
+
         if (self.global_step + 1) % self.grad_accum_steps == 0:
             # Gradient clipping
             torch.nn.utils.clip_grad_norm_(
@@ -422,6 +426,32 @@ class TCViTokTrainer:
 
         return {k: v.detach() if isinstance(v, torch.Tensor) else v
                 for k, v in loss_dict.items()}
+
+    @staticmethod
+    def _module_grad_norm(module) -> float:
+        total_sq = 0.0
+        for param in module.parameters():
+            if param.grad is not None:
+                total_sq += float(param.grad.detach().float().pow(2).sum().cpu())
+        return total_sq ** 0.5
+
+    @staticmethod
+    def _named_grad_norm(model, predicate) -> float:
+        total_sq = 0.0
+        for name, param in model.named_parameters():
+            if param.grad is not None and predicate(name):
+                total_sq += float(param.grad.detach().float().pow(2).sum().cpu())
+        return total_sq ** 0.5
+
+    def _collect_grad_norms(self, raw_model) -> Dict[str, float]:
+        metrics = {
+            "grad_norm_tpn": self._module_grad_norm(raw_model.tpn),
+            "grad_norm_lora": self._named_grad_norm(raw_model, lambda n: "lora_" in n),
+            "grad_norm_mm_projector": self._named_grad_norm(raw_model, lambda n: "_mm_proj" in n or "mm_projector" in n),
+        }
+        if getattr(raw_model, "budget_predictor", None) is not None:
+            metrics["grad_norm_budget"] = self._module_grad_norm(raw_model.budget_predictor)
+        return metrics
 
     @torch.no_grad()
     def validate(self) -> Dict[str, float]:

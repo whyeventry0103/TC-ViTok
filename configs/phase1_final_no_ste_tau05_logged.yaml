@@ -1,0 +1,16 @@
+# Simpler tau-management alternative: disable Eq. 1 but avoid low-temperature
+# saturation by stopping the Gumbel-Sigmoid schedule at tau=0.5.
+
+defaults:
+  - phase1_final
+
+model:
+  ste_correction: false
+
+training:
+  tau_min: 0.5
+  log_grad_norms: true
+
+logging:
+  wandb_run_name: "phase1_final_no_ste_tau05_logged"
+

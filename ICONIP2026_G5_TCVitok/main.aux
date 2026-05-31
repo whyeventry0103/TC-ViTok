@@ -2,15 +2,17 @@
 \providecommand\hyper@newdestlabel[2]{}
 \providecommand\HyField@AuxAddToFields[1]{}
 \providecommand\HyField@AuxAddToCoFields[2]{}
-\@writefile{toc}{\contentsline {title}{Training Dynamics of Trainable Pre-LLM\unskip \ \ignorespaces  Visual Token Compression:\unskip \ \ignorespaces  A Failure-Mode Taxonomy}{1}{chapter.1}\protected@file@percent }
-\@writefile{toc}{\authcount {2}}
-\@writefile{toc}{\contentsline {author}{Muhammad Ali Shah \and Talha Hassan Ul Haq}{1}{chapter.1}\protected@file@percent }
 \citation{liu2024llava}
 \citation{radford2021clip}
+\@writefile{toc}{\contentsline {title}{Why Jointly Learned Pre-LLM\unskip \ \ignorespaces  Visual Token Selectors Can Fail:\unskip \ \ignorespaces  A Diagnostic Case Study}{1}{chapter.1}\protected@file@percent }
+\@writefile{toc}{\authcount {2}}
+\@writefile{toc}{\contentsline {author}{Muhammad Ali Shah \and Talha Hassan Ul Haq}{1}{chapter.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:intro}{{1}{1}{Introduction}{section.1}{}}
 \citation{chen2024fastv,zhang2025sparsevlm}
 \citation{bolya2022token,liang2022evit,shang2024llava}
-\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{2}{section.1}\protected@file@percent }
-\newlabel{sec:intro}{{1}{2}{Introduction}{section.1}{}}
+\citation{hu2022lora}
+\citation{li2023blip2,zhang2025sparsevlm,li2025qgvtc}
 \@writefile{toc}{\contentsline {paragraph}{Contributions.}{2}{section*.2}\protected@file@percent }
 \citation{bolya2022token}
 \citation{rao2021dynamicvit}
@@ -24,135 +26,126 @@
 \citation{jang2017categorical,maddison2017concrete}
 \citation{bengio2013estimating}
 \citation{meng2022adavit}
-\citation{bolya2022token}
-\citation{rao2021dynamicvit}
-\citation{liang2022evit}
-\citation{shang2024llava}
-\citation{chen2024fastv}
-\citation{zhang2025sparsevlm}
-\citation{li2025qgvtc}
-\citation{zhu2024focusllava}
-\citation{mescheder2018training,jolicoeur2018relativistic}
+\citation{borkar1997stochastic,konda2004convergence}
+\citation{bengio2009curriculum}
 \@writefile{toc}{\contentsline {section}{\numberline {2}Related Work}{3}{section.2}\protected@file@percent }
 \newlabel{sec:related}{{2}{3}{Related Work}{section.2}{}}
 \@writefile{toc}{\contentsline {paragraph}{Query-agnostic visual token compression.}{3}{section*.3}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{Query-aware compression.}{3}{section*.4}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{Differentiable discrete selection.}{3}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Training-dynamics perspective.}{3}{section*.6}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\numberline {3}Method}{3}{section.3}\protected@file@percent }
 \newlabel{sec:method}{{3}{3}{Method}{section.3}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Problem Setup and the Co-Adaptation Loop}{3}{subsection.3.1}\protected@file@percent }
 \newlabel{sec:co-adaptation}{{3.1}{3}{Problem Setup and the Co-Adaptation Loop}{subsection.3.1}{}}
+\citation{borkar1997stochastic,konda2004convergence}
 \citation{oquab2023dinov2}
 \citation{radford2021clip}
 \citation{radford2021clip}
-\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Positioning of \textsc  {TC-ViTok}. \emph  {Where} is the stage at which compression happens; \emph  {Recover} indicates how discarded tokens contribute to the retained representation; \emph  {Adapt $k$} indicates per-sample budget.}}{4}{table.caption.6}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces \textsc  {TC-ViTok} dataflow. Frozen encoders provide fine CLIP tokens, coarse DINOv2 features, and the text query. The TPN consumes only $(\mathbf  {q},\mathbf  {v}_{c})$, scores the 576-token CLIP grid, and the selected tokens pass through fixed merge, the LLaVA-1.5 projector, and LoRA-adapted decoding. Gray nodes are frozen, blue nodes are trained, green is parameter-free, orange is discrete selection, and dashed arrows carry selector scores.}}{4}{figure.caption.7}\protected@file@percent }
 \providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
-\newlabel{tab:methods}{{1}{4}{Positioning of \textsc {TC-ViTok}. \emph {Where} is the stage at which compression happens; \emph {Recover} indicates how discarded tokens contribute to the retained representation; \emph {Adapt $k$} indicates per-sample budget}{table.caption.6}{}}
+\newlabel{fig:architecture}{{1}{4}{\textsc {TC-ViTok} dataflow. Frozen encoders provide fine CLIP tokens, coarse DINOv2 features, and the text query. The TPN consumes only $(\qemb ,\vcoarse )$, scores the 576-token CLIP grid, and the selected tokens pass through fixed merge, the LLaVA-1.5 projector, and LoRA-adapted decoding. Gray nodes are frozen, blue nodes are trained, green is parameter-free, orange is discrete selection, and dashed arrows carry selector scores}{figure.caption.7}{}}
+\newlabel{eq:vqa-loss}{{1}{4}{Problem Setup and the Co-Adaptation Loop}{equation.1}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Architecture}{4}{subsection.3.2}\protected@file@percent }
 \newlabel{sec:tpn}{{3.2}{4}{Architecture}{subsection.3.2}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Gumbel-Sigmoid STE with $\tau $-Independent Correction}{4}{subsection.3.3}\protected@file@percent }
 \newlabel{sec:ste}{{3.3}{4}{Gumbel-Sigmoid STE with \texorpdfstring {$\tau $}{tau}-Independent Correction}{subsection.3.3}{}}
-\newlabel{eq:taufix}{{1}{5}{Gumbel-Sigmoid STE with \texorpdfstring {$\tau $}{tau}-Independent Correction}{equation.1}{}}
+\newlabel{eq:gumbel-ste}{{2}{5}{Gumbel-Sigmoid STE with \texorpdfstring {$\tau $}{tau}-Independent Correction}{equation.2}{}}
+\newlabel{eq:taufix}{{3}{5}{Gumbel-Sigmoid STE with \texorpdfstring {$\tau $}{tau}-Independent Correction}{equation.3}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Informative Token Merge (Parameter-Free)}{5}{subsection.3.4}\protected@file@percent }
 \newlabel{sec:merge}{{3.4}{5}{Informative Token Merge (Parameter-Free)}{subsection.3.4}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Adaptive Budget and Training Curriculum}{5}{subsection.3.5}\protected@file@percent }
-\newlabel{sec:training}{{3.5}{5}{Adaptive Budget and Training Curriculum}{subsection.3.5}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {4}A Failure-Mode Taxonomy for Trainable Pre-LLM Compression}{5}{section.4}\protected@file@percent }
-\newlabel{sec:taxonomy}{{4}{5}{A Failure-Mode Taxonomy for Trainable Pre-LLM Compression}{section.4}{}}
-\citation{mescheder2018training,jolicoeur2018relativistic}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Adaptive Budget and Training Curriculum}{6}{subsection.3.5}\protected@file@percent }
+\newlabel{sec:training}{{3.5}{6}{Adaptive Budget and Training Curriculum}{subsection.3.5}{}}
+\newlabel{eq:budget-loss}{{5}{6}{Adaptive Budget and Training Curriculum}{equation.5}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}A Failure-Mode Case Study for Trainable Pre-LLM Compression}{6}{section.4}\protected@file@percent }
+\newlabel{sec:taxonomy}{{4}{6}{A Failure-Mode Case Study for Trainable Pre-LLM Compression}{section.4}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {4.1}FM1: Co-Adaptation Oscillation}{6}{subsection.4.1}\protected@file@percent }
 \newlabel{sec:fm1}{{4.1}{6}{FM1: Co-Adaptation Oscillation}{subsection.4.1}{}}
-\@writefile{toc}{\contentsline {paragraph}{Prediction.}{6}{section*.7}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Mechanism.}{6}{section*.8}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Signature.}{6}{section*.9}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Cross-architecture stress test.}{6}{section*.10}\protected@file@percent }
-\citation{meng2022adavit,rao2021dynamicvit}
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Co-adaptation oscillation across selector learning rates. \emph  {Top:} $\eta _{\mathrm  {sel}}{=}5{\times }10^{-4}$, period $\approx 5$K steps. \emph  {Middle:} $\eta _{\mathrm  {sel}}{=}2{\times }10^{-5}$, period $\approx 15$K steps. \emph  {Bottom:} $\eta _{\mathrm  {sel}}{=}0$ (frozen pooler), no oscillation but fixed noise tokens the LLM cannot use.}}{7}{figure.caption.11}\protected@file@percent }
-\newlabel{fig:oscillation}{{1}{7}{Co-adaptation oscillation across selector learning rates. \emph {Top:} $\etasel {=}5{\times }10^{-4}$, period $\approx 5$K steps. \emph {Middle:} $\etasel {=}2{\times }10^{-5}$, period $\approx 15$K steps. \emph {Bottom:} $\etasel {=}0$ (frozen pooler), no oscillation but fixed noise tokens the LLM cannot use}{figure.caption.11}{}}
+\@writefile{toc}{\contentsline {paragraph}{Prediction.}{6}{section*.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Mechanism.}{6}{section*.9}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Representative pooler versions from the FM1 sweep. \emph  {Top:} active trainable pooler with $\eta _{\mathrm  {sel}}{=}5{\times }10^{-4}$, period $\approx 5$K steps. \emph  {Middle:} active trainable pooler with $\eta _{\mathrm  {sel}}{=}2{\times }10^{-5}$, period $\approx 15$K steps. \emph  {Bottom:} frozen pooler, no oscillation but fixed noise tokens the LLM cannot use.}}{7}{figure.caption.11}\protected@file@percent }
+\newlabel{fig:oscillation}{{2}{7}{Representative pooler versions from the FM1 sweep. \emph {Top:} active trainable pooler with $\etasel {=}5{\times }10^{-4}$, period $\approx 5$K steps. \emph {Middle:} active trainable pooler with $\etasel {=}2{\times }10^{-5}$, period $\approx 15$K steps. \emph {Bottom:} frozen pooler, no oscillation but fixed noise tokens the LLM cannot use}{figure.caption.11}{}}
+\@writefile{toc}{\contentsline {paragraph}{Signature.}{7}{section*.10}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{Remedy.}{7}{section*.12}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {4.2}FM2: BudgetPredictor Collapse}{7}{subsection.4.2}\protected@file@percent }
 \newlabel{sec:fm2}{{4.2}{7}{FM2: BudgetPredictor Collapse}{subsection.4.2}{}}
 \@writefile{toc}{\contentsline {paragraph}{Prediction.}{7}{section*.13}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Mechanism.}{7}{section*.14}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Signature.}{7}{section*.15}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces BudgetPredictor outcome during fine-tuning of the warm-started checkpoint. Collapse: $k_{\mathrm  {eff}}{>}0.99\,k_{\max }$ for $\geq 2$K consecutive steps. The $\lambda _b{=}0.10$ point is the only one run to completion.}}{8}{table.caption.16}\protected@file@percent }
-\newlabel{tab:budget-collapse}{{2}{8}{BudgetPredictor outcome during fine-tuning of the warm-started checkpoint. Collapse: $\keff {>}0.99\,\kmax $ for $\geq 2$K consecutive steps. The $\lbb {=}0.10$ point is the only one run to completion}{table.caption.16}{}}
+\citation{meng2022adavit,rao2021dynamicvit}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces BudgetPredictor outcome during fine-tuning of the warm-started checkpoint. Collapse: $k_{\mathrm  {eff}}{>}0.99\,k_{\max }$ for $\geq 2$K consecutive steps. $k_{\mathrm  {eff}}$ is the final effective budget; Val is best observed validation NTP loss, not a direct selector-quality ranking because token counts and continuation trajectories differ. Seed-7 replications are completed for $\lambda _b\in \{0.03,0.08,0.10,0.15\}$; ``n/a'' indicates not replicated in seed~7. Collapse denotes saturation to the full-budget policy: the low Val at seed-7 $\lambda _b{=}0.03$ shows that a collapsed head can still behave as a strong fixed-full-budget model, but it eliminates per-sample token reduction below $k_{\max }$. Stronger budget pressure means non-collapsed $k_{\mathrm  {eff}}$ below $k_{\max }$ with worse Val than the best stable setting; $\lambda _b{=}0.20$ remains exploratory and single-seed.}}{8}{table.caption.16}\protected@file@percent }
+\newlabel{tab:budget-collapse}{{1}{8}{BudgetPredictor outcome during fine-tuning of the warm-started checkpoint. Collapse: $\keff {>}0.99\,\kmax $ for $\geq 2$K consecutive steps. $\keff $ is the final effective budget; Val is best observed validation NTP loss, not a direct selector-quality ranking because token counts and continuation trajectories differ. Seed-7 replications are completed for $\lbb \in \{0.03,0.08,0.10,0.15\}$; ``n/a'' indicates not replicated in seed~7. Collapse denotes saturation to the full-budget policy: the low Val at seed-7 $\lbb {=}0.03$ shows that a collapsed head can still behave as a strong fixed-full-budget model, but it eliminates per-sample token reduction below $\kmax $. Stronger budget pressure means non-collapsed $\keff $ below $\kmax $ with worse Val than the best stable setting; $\lbb {=}0.20$ remains exploratory and single-seed}{table.caption.16}{}}
+\@writefile{toc}{\contentsline {paragraph}{Mechanism.}{8}{section*.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Signature.}{8}{section*.15}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{Remedy.}{8}{section*.17}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}FM3: Warm-Start Dependence}{8}{subsection.4.3}\protected@file@percent }
-\newlabel{sec:warmstart}{{4.3}{8}{FM3: Warm-Start Dependence}{subsection.4.3}{}}
-\@writefile{toc}{\contentsline {paragraph}{Prediction.}{8}{section*.18}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Mechanism.}{8}{section*.19}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Signature.}{8}{section*.20}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Remedy.}{8}{section*.22}\protected@file@percent }
+\citation{bengio2009curriculum}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Warm-start vs.\ from-scratch outcomes on the joint TPN+LoRA+projector system. Val-VQA is NTP cross-entropy on VQAv2 val (lower is better).}}{9}{table.caption.21}\protected@file@percent }
+\newlabel{tab:warmstart}{{2}{9}{Warm-start vs.\ from-scratch outcomes on the joint TPN+LoRA+projector system. Val-VQA is NTP cross-entropy on VQAv2 val (lower is better)}{table.caption.21}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}FM3: Warm-Start Dependence}{9}{subsection.4.3}\protected@file@percent }
+\newlabel{sec:warmstart}{{4.3}{9}{FM3: Warm-Start Dependence}{subsection.4.3}{}}
+\@writefile{toc}{\contentsline {paragraph}{Prediction.}{9}{section*.18}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Mechanism.}{9}{section*.19}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Signature.}{9}{section*.20}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Remedy.}{9}{section*.22}\protected@file@percent }
 \citation{goyal2017vqav2}
 \citation{hudson2019gqa}
 \citation{li2023pope}
-\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Warm-start vs.\ from-scratch outcomes on the joint TPN+LoRA+projector system. Val-VQA is NTP cross-entropy on VQAv2 val (lower is better).}}{9}{table.caption.21}\protected@file@percent }
-\newlabel{tab:warmstart}{{3}{9}{Warm-start vs.\ from-scratch outcomes on the joint TPN+LoRA+projector system. Val-VQA is NTP cross-entropy on VQAv2 val (lower is better)}{table.caption.21}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Testing the Taxonomy on Other Architectures}{9}{subsection.4.4}\protected@file@percent }
-\newlabel{sec:portability}{{4.4}{9}{Testing the Taxonomy on Other Architectures}{subsection.4.4}{}}
-\@writefile{toc}{\contentsline {paragraph}{Reproduction protocols.}{9}{section*.23}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {5}Experiments}{9}{section.5}\protected@file@percent }
-\newlabel{sec:experiments}{{5}{9}{Experiments}{section.5}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Setup}{9}{subsection.5.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Hardware and data.}{9}{section*.24}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{The missing control.}{9}{section*.25}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Reproduction Protocols for Other Architectures}{10}{subsection.4.4}\protected@file@percent }
+\newlabel{sec:portability}{{4.4}{10}{Reproduction Protocols for Other Architectures}{subsection.4.4}{}}
+\@writefile{toc}{\contentsline {paragraph}{Reproduction protocols.}{10}{section*.23}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Experiments}{10}{section.5}\protected@file@percent }
+\newlabel{sec:experiments}{{5}{10}{Experiments}{section.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Setup}{10}{subsection.5.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Hardware and data.}{10}{section*.24}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The missing control.}{10}{section*.25}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Main Results}{10}{subsection.5.2}\protected@file@percent }
+\newlabel{sec:main-results}{{5.2}{10}{Main Results}{subsection.5.2}{}}
 \citation{liu2024llava}
 \citation{chen2024fastv}
 \citation{shang2024llava}
 \citation{zhang2025sparsevlm}
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Token-budget sweep on the Phase~1 Adaptive checkpoint. The learned TPN remains below the strongest trivial selector at every measured $k$ on VQAv2, GQA, and POPE.}}{10}{figure.caption.28}\protected@file@percent }
-\newlabel{fig:k-scaling}{{2}{10}{Token-budget sweep on the Phase~1 Adaptive checkpoint. The learned TPN remains below the strongest trivial selector at every measured $k$ on VQAv2, GQA, and POPE}{figure.caption.28}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Main Results}{10}{subsection.5.2}\protected@file@percent }
-\newlabel{sec:main-results}{{5.2}{10}{Main Results}{subsection.5.2}{}}
-\@writefile{toc}{\contentsline {paragraph}{Trivial-selector baselines.}{10}{section*.26}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Scaling with token budget.}{10}{section*.27}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Main results on LLaVA-1.5-7B. Headline comparison is \textsc  {TC-ViTok Final} vs.\ \textsc  {LoRA-576}. All \textsc  {TC-ViTok} rows are single-seed evaluations; binomial standard errors at the listed sample sizes are $\sigma {\approx }0.16$~pp for VQAv2 testdev, $\sim $0.22~pp for GQA, and $\sim $0.50~pp for the 5K POPE subset.}}{11}{table.caption.29}\protected@file@percent }
-\newlabel{tab:main}{{4}{11}{Main results on LLaVA-1.5-7B. Headline comparison is \textsc {TC-ViTok Final} vs.\ \textsc {LoRA-576}. All \textsc {TC-ViTok} rows are single-seed evaluations; binomial standard errors at the listed sample sizes are $\sigma {\approx }0.16$~pp for VQAv2 testdev, $\sim $0.22~pp for GQA, and $\sim $0.50~pp for the 5K POPE subset}{table.caption.29}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Properties of the Converged Selector}{11}{subsection.5.3}\protected@file@percent }
-\newlabel{sec:selector-properties}{{5.3}{11}{Properties of the Converged Selector}{subsection.5.3}{}}
-\@writefile{toc}{\contentsline {paragraph}{Interpreting query-agnostic convergence.}{11}{section*.31}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Measured behaviour.}{11}{section*.32}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Two-seed replication of the matched compression gap. Both rows are 5K-sample evaluations after 80K-step Phase 1 training with identical configuration and different seeds.}}{12}{table.caption.30}\protected@file@percent }
-\newlabel{tab:seed-replication}{{5}{12}{Two-seed replication of the matched compression gap. Both rows are 5K-sample evaluations after 80K-step Phase 1 training with identical configuration and different seeds}{table.caption.30}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces Inference-time merge-weight sweep on the Phase~1 Final checkpoint. Variations are at the level of subset noise.}}{12}{table.caption.34}\protected@file@percent }
-\newlabel{tab:beta-sweep}{{6}{12}{Inference-time merge-weight sweep on the Phase~1 Final checkpoint. Variations are at the level of subset noise}{table.caption.34}{}}
-\@writefile{toc}{\contentsline {paragraph}{Token merge: architectural, not benchmark-improving.}{12}{section*.33}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Structured per-position selection prior.}{12}{section*.35}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Token-budget sweep on the Phase~1 Adaptive checkpoint. The learned TPN remains below the strongest trivial selector at every measured $k$ on VQAv2, GQA, and POPE; ``strongest'' is the per-$k$ maximum of random, grid, and CLS-attention top-$k$.}}{11}{figure.caption.28}\protected@file@percent }
+\newlabel{fig:k-scaling}{{3}{11}{Token-budget sweep on the Phase~1 Adaptive checkpoint. The learned TPN remains below the strongest trivial selector at every measured $k$ on VQAv2, GQA, and POPE; ``strongest'' is the per-$k$ maximum of random, grid, and CLS-attention top-$k$}{figure.caption.28}{}}
+\@writefile{toc}{\contentsline {paragraph}{Trivial-selector baselines.}{11}{section*.26}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Scaling with token budget.}{11}{section*.27}\protected@file@percent }
 \citation{rao2021dynamicvit}
 \citation{chen2024fastv}
-\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Aggregate selection diagnostics on 500 GQA val\_balanced samples (Phase~1 Final). \emph  {Left:} per-position selection frequency $P_\text  {select}$ shows range $0$--$0.7$ with mild upper-region preference. \emph  {Right:} per-image min-max normalised score is approximately uniform except for a localised upper-centre region (rows 0--4, cols 6--11) that the TPN systematically deprioritises regardless of content.}}{13}{figure.caption.36}\protected@file@percent }
-\newlabel{fig:selection}{{3}{13}{Aggregate selection diagnostics on 500 GQA val\_balanced samples (Phase~1 Final). \emph {Left:} per-position selection frequency $P_\text {select}$ shows range $0$--$0.7$ with mild upper-region preference. \emph {Right:} per-image min-max normalised score is approximately uniform except for a localised upper-centre region (rows 0--4, cols 6--11) that the TPN systematically deprioritises regardless of content}{figure.caption.36}{}}
-\@writefile{toc}{\contentsline {paragraph}{Adaptive variant as a design exploration.}{13}{section*.37}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Main results on LLaVA-1.5-7B. Headline comparison is \textsc  {TC-ViTok Final} vs.\ \textsc  {LoRA-576}. All \textsc  {TC-ViTok} rows are single-seed evaluations; binomial standard errors at the listed sample sizes are $\sigma {\approx }0.16$~pp for VQAv2 testdev, $\sim $0.22~pp for GQA, $\sim $0.50~pp for the 5K POPE subset, $\sim $2.5~pp for MMBench dev, and $\sim $0.7~pp for TextVQA val. ``n/a'' means not evaluated.}}{12}{table.caption.29}\protected@file@percent }
+\newlabel{tab:main}{{3}{12}{Main results on LLaVA-1.5-7B. Headline comparison is \textsc {TC-ViTok Final} vs.\ \textsc {LoRA-576}. All \textsc {TC-ViTok} rows are single-seed evaluations; binomial standard errors at the listed sample sizes are $\sigma {\approx }0.16$~pp for VQAv2 testdev, $\sim $0.22~pp for GQA, $\sim $0.50~pp for the 5K POPE subset, $\sim $2.5~pp for MMBench dev, and $\sim $0.7~pp for TextVQA val. ``n/a'' means not evaluated}{table.caption.29}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Properties of the Converged Selector}{12}{subsection.5.3}\protected@file@percent }
+\newlabel{sec:selector-properties}{{5.3}{12}{Properties of the Converged Selector}{subsection.5.3}{}}
+\@writefile{toc}{\contentsline {paragraph}{Query-agnostic convergence at inference.}{12}{section*.31}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Token merge: architectural, not benchmark-improving.}{12}{section*.32}\protected@file@percent }
+\citation{oquab2023dinov2}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Two-seed replication of the matched compression gap. Rows are 5K-sample evaluations from the validation sets at the Phase-1 Final checkpoint (80K steps, identical configuration).}}{13}{table.caption.30}\protected@file@percent }
+\newlabel{tab:seed-replication}{{4}{13}{Two-seed replication of the matched compression gap. Rows are 5K-sample evaluations from the validation sets at the Phase-1 Final checkpoint (80K steps, identical configuration)}{table.caption.30}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {6}Discussion}{13}{section.6}\protected@file@percent }
 \newlabel{sec:discussion}{{6}{13}{Discussion}{section.6}{}}
-\@writefile{toc}{\contentsline {paragraph}{Why \textsc  {TC-ViTok} loses to its matched baseline.}{13}{section*.38}\protected@file@percent }
-\citation{darcet2024vision}
+\@writefile{toc}{\contentsline {paragraph}{Why \textsc  {TC-ViTok} loses to its matched baseline.}{13}{section*.33}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Supporting probe evidence for the selector ceiling.}{13}{section*.34}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Limitations.}{13}{section*.35}\protected@file@percent }
 \bibstyle{splncs04}
 \bibdata{main}
 \bibcite{bengio2013estimating}{1}
-\@writefile{toc}{\contentsline {paragraph}{Limitations.}{14}{section*.39}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Future work.}{14}{section*.40}\protected@file@percent }
+\bibcite{bengio2009curriculum}{2}
+\bibcite{bolya2022token}{3}
+\bibcite{borkar1997stochastic}{4}
+\bibcite{chen2024fastv}{5}
+\bibcite{goyal2017vqav2}{6}
 \@writefile{toc}{\contentsline {section}{\numberline {7}Conclusion}{14}{section.7}\protected@file@percent }
-\bibcite{bolya2022token}{2}
-\bibcite{chen2024fastv}{3}
-\bibcite{darcet2024vision}{4}
-\bibcite{goyal2017vqav2}{5}
-\bibcite{hudson2019gqa}{6}
-\bibcite{jang2017categorical}{7}
-\bibcite{jolicoeur2018relativistic}{8}
-\bibcite{li2023blip2}{9}
-\bibcite{li2025qgvtc}{10}
-\bibcite{li2023pope}{11}
-\bibcite{liang2022evit}{12}
-\bibcite{liu2024llava}{13}
-\bibcite{maddison2017concrete}{14}
-\bibcite{meng2022adavit}{15}
-\bibcite{mescheder2018training}{16}
-\bibcite{oquab2023dinov2}{17}
-\bibcite{radford2021clip}{18}
-\bibcite{rao2021dynamicvit}{19}
-\bibcite{shang2024llava}{20}
-\bibcite{zhang2025sparsevlm}{21}
-\bibcite{zhu2024focusllava}{22}
+\bibcite{hu2022lora}{7}
+\bibcite{hudson2019gqa}{8}
+\bibcite{jang2017categorical}{9}
+\bibcite{konda2004convergence}{10}
+\bibcite{li2023blip2}{11}
+\bibcite{li2025qgvtc}{12}
+\bibcite{li2023pope}{13}
+\bibcite{liang2022evit}{14}
+\bibcite{liu2024llava}{15}
+\bibcite{maddison2017concrete}{16}
+\bibcite{meng2022adavit}{17}
+\bibcite{oquab2023dinov2}{18}
+\bibcite{radford2021clip}{19}
+\bibcite{rao2021dynamicvit}{20}
+\bibcite{shang2024llava}{21}
+\bibcite{zhang2025sparsevlm}{22}
+\bibcite{zhu2024focusllava}{23}
 \gdef \@abspage@last{15}

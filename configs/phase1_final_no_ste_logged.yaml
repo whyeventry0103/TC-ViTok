@@ -1,0 +1,16 @@
+# Phase 1 Final ablation with Eq. 1 disabled and gradient-norm logging.
+# This tests whether the tau-independent correction is necessary for
+# sustained selector gradients and final task performance.
+
+defaults:
+  - phase1_final
+
+model:
+  ste_correction: false
+
+training:
+  log_grad_norms: true
+
+logging:
+  wandb_run_name: "phase1_final_no_ste_logged"
+

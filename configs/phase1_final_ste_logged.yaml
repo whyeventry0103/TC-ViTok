@@ -1,0 +1,15 @@
+# Phase 1 Final rerun with STE correction enabled and gradient-norm logging.
+# Use as the positive-control side of the STE ablation.
+
+defaults:
+  - phase1_final
+
+model:
+  ste_correction: true
+
+training:
+  log_grad_norms: true
+
+logging:
+  wandb_run_name: "phase1_final_ste_logged"
+

@@ -6,17 +6,23 @@
 \bibitem{bengio2013estimating}
 Bengio, Y., L{\'e}onard, N., Courville, A.: Estimating or propagating gradients through stochastic neurons for conditional computation. arXiv:1308.3432  (2013)
 
+\bibitem{bengio2009curriculum}
+Bengio, Y., Louradour, J., Collobert, R., Weston, J.: Curriculum learning. In: ICML (2009)
+
 \bibitem{bolya2022token}
 Bolya, D., Fu, C.Y., Dai, X., Zhang, P., Feichtenhofer, C.: Token merging: Your {V}i{T} but faster. In: ICLR (2023)
+
+\bibitem{borkar1997stochastic}
+Borkar, V.S.: Stochastic approximation with two time scales. Systems \& Control Letters  \textbf{29}(5),  291--294 (1997)
 
 \bibitem{chen2024fastv}
 Chen, L., Zhao, J., Wang, X., Chen, D., Xu, R., Dong, P., Zhang, W.: An image is worth 1/2 tokens after layer 2: Plug-and-play inference acceleration for large vision-language models. In: ECCV (2024)
 
-\bibitem{darcet2024vision}
-Darcet, T., Oquab, M., Mairal, J., Bojanowski, P.: Vision transformers need registers. In: International Conference on Learning Representations (ICLR) (2024)
-
 \bibitem{goyal2017vqav2}
 Goyal, Y., Khot, T., Summers-Stay, D., Batra, D., Parikh, D.: Making the {V} in {VQA} matter: Elevating the role of image understanding in visual question answering. In: CVPR (2017)
+
+\bibitem{hu2022lora}
+Hu, E.J., Shen, Y., Wallis, P., Allen-Zhu, Z., Li, Y., Wang, S., Wang, L., Chen, W.: {LoRA}: Low-rank adaptation of large language models. In: ICLR (2022)
 
 \bibitem{hudson2019gqa}
 Hudson, D.A., Manning, C.D.: {GQA}: A new dataset for real-world visual reasoning and compositional question answering. In: CVPR (2019)
@@ -24,14 +30,14 @@ Hudson, D.A., Manning, C.D.: {GQA}: A new dataset for real-world visual reasonin
 \bibitem{jang2017categorical}
 Jang, E., Gu, S., Poole, B.: Categorical reparameterization with {Gumbel-Softmax}. In: ICLR (2017)
 
-\bibitem{jolicoeur2018relativistic}
-Jolicoeur-Martineau, A.: The relativistic discriminator: a key element missing from standard {GAN}. arXiv:1807.00734  (2018)
+\bibitem{konda2004convergence}
+Konda, V.R., Tsitsiklis, J.N.: Convergence rate of linear two-time-scale stochastic approximation. The Annals of Applied Probability  \textbf{14}(2),  796--819 (2004)
 
 \bibitem{li2023blip2}
 Li, J., Li, D., Savarese, S., Hoi, S.: {BLIP-2}: Bootstrapping language-image pre-training with frozen image encoders and large language models. In: ICML (2023)
 
 \bibitem{li2025qgvtc}
-Li, S., et~al.: {QG-VTC}: Question-guided visual token compression in {MLLMs} for efficient {VQA}. Neurocomputing  (2025)
+Li, S., Xu, J., Li, X.H., Deng, C., Huang, L.L.: {QG-VTC}: Question-guided visual token compression in {MLLMs} for efficient {VQA}. arXiv:2504.00654  (2025)
 
 \bibitem{li2023pope}
 Li, Y., Du, Y., Zhou, K., Wang, J., Zhao, X., Wen, J.R.: Evaluating object hallucination in large vision-language models. EMNLP  (2023)
@@ -47,9 +53,6 @@ Maddison, C.J., Mnih, A., Teh, Y.W.: The concrete distribution: A continuous rel
 
 \bibitem{meng2022adavit}
 Meng, L., Li, H., Chen, B.C., Lan, S., Wu, Z., Jiang, Y.G., Lim, S.N.: {AdaViT}: Adaptive vision transformers for efficient image recognition. In: CVPR (2022)
-
-\bibitem{mescheder2018training}
-Mescheder, L., Geiger, A., Nowozin, S.: Which training methods for {GAN}s do actually converge? In: ICML (2018)
 
 \bibitem{oquab2023dinov2}
 Oquab, M., Darcet, T., Moutakanni, T., Vo, H., Szafraniec, M., Khalidov, V., Fernandez, P., Haziza, D., Massa, F., El-Nouby, A., et~al.: {DINOv2}: Learning robust visual features without supervision. arXiv:2304.07193  (2023)
@@ -67,6 +70,6 @@ Shang, Y., Cai, M., Xu, B., Lee, Y.J., Yan, Y.: {LLaVA-PruMerge}: Adaptive token
 Zhang, Y., Fan, C.K., Ma, J., Zheng, W., Huang, T., Cheng, K., Gudovskiy, D., Okuno, T., Nakata, Y., Keutzer, K., et~al.: {SparseVLM}: Visual token sparsification for efficient vision-language model inference. In: ICML (2025)
 
 \bibitem{zhu2024focusllava}
-Zhu, Y., et~al.: {FocusLLaVA}: A coarse-to-fine visual token selection framework for efficient multimodal reasoning. arXiv:2401.08681  (2024)
+Zhu, Y., Xie, C., Liang, S., Zheng, B., Guo, S.: {FocusLLaVA}: A coarse-to-fine approach for efficient and effective visual token compression. arXiv:2411.14228  (2024)
 
 \end{thebibliography}

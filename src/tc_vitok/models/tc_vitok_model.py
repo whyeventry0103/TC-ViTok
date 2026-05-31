@@ -357,6 +357,8 @@ class TCViTokModel(nn.Module):
         k_max: int = 288,
         zero_query: bool = False,
         tpn_version: str = "v1",
+        ste_correction: bool = True,
+        llava_attn_implementation: Optional[str] = None,
     ):
         super().__init__()
 
@@ -369,6 +371,7 @@ class TCViTokModel(nn.Module):
         self.k_max = k_max
         self.zero_query = zero_query
         self.tpn_version = tpn_version
+        self.ste_correction = ste_correction
         is_v3 = (tpn_version == "v3")
 
         # 1. Encoders
@@ -422,9 +425,18 @@ class TCViTokModel(nn.Module):
         if use_stub_llm:
             self.llm = StubLLM(d_visual=1024)
         else:
-            self._init_llava(llava_model_name, lora_config or {})
+            self._init_llava(
+                llava_model_name,
+                lora_config or {},
+                attn_implementation=llava_attn_implementation,
+            )
 
-    def _init_llava(self, model_name: str, lora_config: dict):
+    def _init_llava(
+        self,
+        model_name: str,
+        lora_config: dict,
+        attn_implementation: Optional[str] = None,
+    ):
         """Initialize LLaVA-1.5 with LoRA adapters and VQA classification head.
 
         TC-ViTok replaces LLaVA's internal ViT with its own CLIP ViT-L/14 + TPN
@@ -453,10 +465,15 @@ class TCViTokModel(nn.Module):
         # Do NOT use device_map="cpu" — it installs accelerate dispatch hooks that
         # intercept .to() calls, preventing model.to(cuda:N) from actually moving
         # tensors to GPU. This caused GPU 1 to have only 727MiB while GPU 0 had 16GB.
+        load_kwargs = {
+            "torch_dtype": torch.bfloat16,   # match training BF16 autocast (float16 caused NaN via attention overflow)
+            "low_cpu_mem_usage": True,
+        }
+        if attn_implementation is not None:
+            load_kwargs["attn_implementation"] = attn_implementation
         self.llava = LlavaForConditionalGeneration.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16,   # match training BF16 autocast (float16 caused NaN via attention overflow)
-            low_cpu_mem_usage=True,
+            **load_kwargs,
         )
         self.processor = LlavaProcessor.from_pretrained(model_name)
 
@@ -635,7 +652,7 @@ class TCViTokModel(nn.Module):
         # L_budget = λ * mean(k_eff/N), which always pushes toward k_min (fewer tokens).
         # The dual correction lets VQA loss push BudgetPredictor toward MORE tokens
         # when accuracy benefits, creating the desired compression-accuracy tradeoff.
-        if self.training and not self.use_stub_llm:
+        if self.training and not self.use_stub_llm and self.ste_correction:
             safe_idx = idx.clamp(min=0)
             scores_at_selected = torch.gather(s_N, dim=1, index=safe_idx)  # [B, k]
             correction_tpn = scores_at_selected - scores_at_selected.detach()  # [B, k], = 0 fwd
@@ -1117,6 +1134,39 @@ class TCViTokModel(nn.Module):
                         Shape: [B, k, 1024] (fixed) or [B, k_max_batch, 1024] (adaptive)
             k_per_sample: Per-sample valid token count [B] (adaptive) or None (fixed)
         """
+        v_full, idx, s_N, _ = self._compute_tpn_selection(
+            images_coarse=images_coarse,
+            images_full=images_full,
+            questions=questions,
+        )
+
+        if self.adaptive_budget:
+            # Per-sample variable k — use _gather_adaptive
+            v_selected = self._gather_adaptive(v_full, idx, s_N)
+            k_per_sample = (idx >= 0).sum(dim=1)
+            return v_selected, k_per_sample
+
+        # Fixed-k path
+        if self.merge_beta > 0:
+            return informative_token_merge(
+                v_fine=v_full, idx=idx, s_N=s_N,
+                beta=self.merge_beta, tau_merge=self.merge_tau,
+            ), None
+        return gather_tokens(v_full, idx), None
+
+    @torch.no_grad()
+    def _compute_tpn_selection(
+        self,
+        images_coarse: torch.Tensor,
+        images_full: torch.Tensor,
+        questions: list,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return full visual tokens plus raw TPN selection diagnostics.
+
+        This is the diagnostic-friendly part of ``_select_tokens``: callers get
+        the full CLIP tokens, selected indices, per-position TPN scores, and the
+        effective budget without changing downstream gather/merge behavior.
+        """
         v_full = self.full_encoder(images_full)
 
         if self.tpn_version == "v3":
@@ -1137,20 +1187,7 @@ class TCViTokModel(nn.Module):
                 budget_predictor=self.budget_predictor,
                 k_min=self.k_min, k_max=self.k_max,
             )
-
-        if self.adaptive_budget:
-            # Per-sample variable k — use _gather_adaptive
-            v_selected = self._gather_adaptive(v_full, idx, s_N)
-            k_per_sample = (idx >= 0).sum(dim=1)
-            return v_selected, k_per_sample
-
-        # Fixed-k path
-        if self.merge_beta > 0:
-            return informative_token_merge(
-                v_fine=v_full, idx=idx, s_N=s_N,
-                beta=self.merge_beta, tau_merge=self.merge_tau,
-            ), None
-        return gather_tokens(v_full, idx), None
+        return v_full, idx, s_N, k_effective
 
     @torch.no_grad()
     def generate(
